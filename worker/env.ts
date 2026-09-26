@@ -10,6 +10,8 @@ export interface Env {
   LIVESYNC_DATABASE?: string;
   LIVESYNC_USERNAME?: string;
   VAULT_EXCLUDED_FOLDERS?: string;
+  /** Optional. "off" runs without semantic search (no embeddings, no Vectorize usage). */
+  SEMANTIC_SEARCH?: string;
   /** Optional. Extra scopes for MCP_STATIC_TOKEN, e.g. "vault:append,vault:write". */
   MCP_STATIC_TOKEN_SCOPES?: string;
 

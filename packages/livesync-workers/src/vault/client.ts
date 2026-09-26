@@ -11,6 +11,7 @@ import {
   type VaultBindings,
   type VaultPolicy,
   type VaultRef,
+  semanticSearchEnabled,
 } from "../types.js";
 
 export type { FullTextSearchHit };
@@ -79,6 +80,8 @@ export interface Vault {
     text: string,
     options?: { createIfMissing?: boolean },
   ): Promise<AppendVaultNoteResult>;
+  /** False when the bindings have no vector index; `search` then returns nothing. */
+  readonly semanticSearch: boolean;
   /** Semantic search over indexed notes. */
   search(query: string, topK: number): Promise<VectorSearchHit[]>;
   /**
@@ -111,6 +114,7 @@ export function createVault(bindings: VaultBindings, options: CreateVaultOptions
 class VaultClient implements Vault {
   readonly ref: VaultRef;
   readonly policy: VaultPolicy;
+  readonly semanticSearch: boolean;
 
   constructor(
     private readonly bindings: VaultBindings,
@@ -119,6 +123,7 @@ class VaultClient implements Vault {
   ) {
     this.ref = options.ref;
     this.policy = options.policy;
+    this.semanticSearch = semanticSearchEnabled(bindings);
   }
 
   unrestricted(): Vault {

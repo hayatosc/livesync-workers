@@ -119,10 +119,17 @@ export type AnyDurableObjectNamespace = DurableObjectNamespace<any>;
 
 export interface VaultBindings {
   vaultDb: AnyDurableObjectNamespace;
-  vectorize: VectorizeIndex;
+  /**
+   * Vector index for semantic search. Leave `vectorize` and `embedder` both
+   * unset to run without semantic search: notes are still tracked and the
+   * full-text index still works, `Vault.search` returns no hits, and nothing
+   * is embedded (no Workers AI or Vectorize usage). Turning it back on later
+   * embeds only notes that change afterwards.
+   */
+  vectorize?: VectorizeIndex;
   /** Holds the built-in full-text index. Required unless `fullText` is given. */
   bucket?: R2Bucket;
-  embedder: Embedder;
+  embedder?: Embedder;
   vectorIsolation?: VectorIsolation;
   /**
    * External full-text index, updated per note as the vault changes. When set,
@@ -147,6 +154,13 @@ export type DailyNoteSettings = {
   folder?: string;
   format?: string;
 };
+
+/** Whether the bindings include a vector index (see VaultBindings.vectorize). */
+export function semanticSearchEnabled(
+  bindings: Pick<VaultBindings, "vectorize" | "embedder">,
+): bindings is Pick<VaultBindings, "vectorize" | "embedder"> & { vectorize: VectorizeIndex; embedder: Embedder } {
+  return bindings.vectorize !== undefined && bindings.embedder !== undefined;
+}
 
 export function vaultObjectName(ref: VaultRef): string {
   return `${ref.tenantId}:${ref.databaseName}`;

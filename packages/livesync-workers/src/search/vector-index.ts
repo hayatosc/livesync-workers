@@ -1,6 +1,6 @@
 import { chunkMarkdown, hashText } from "./chunk-md.js";
 import type { VaultBindings, VaultRef } from "../types.js";
-import { vaultObjectName } from "../types.js";
+import { semanticSearchEnabled, vaultObjectName } from "../types.js";
 
 const VECTORIZE_DELETE_BATCH_SIZE = 100;
 const VECTORIZE_UPSERT_BATCH_SIZE = 50;
@@ -53,6 +53,7 @@ export async function upsertNoteVectors(
     previousChunks: number;
   },
 ): Promise<number> {
+  if (!semanticSearchEnabled(bindings)) return 0; // semantic search off: nothing stored
   const { ref, path, content, hash, previousChunks } = input;
   const chunks = chunkMarkdown(path, content);
   const mtime = Date.now();
@@ -97,11 +98,12 @@ export async function removeNoteVectors(
   bindings: VectorBindings,
   input: { ref: VaultRef; path: string; chunks: number },
 ): Promise<void> {
+  if (!semanticSearchEnabled(bindings) || input.chunks <= 0) return;
   const ids: string[] = [];
   for (let i = 0; i < input.chunks; i += 1) {
     ids.push(await vectorId(input.ref, input.path, i));
   }
-  if (ids.length > 0) await deleteVectorIds(bindings.vectorize, ids);
+  await deleteVectorIds(bindings.vectorize, ids);
 }
 
 export async function vectorSearch(
@@ -110,6 +112,7 @@ export async function vectorSearch(
   query: string,
   topK: number,
 ): Promise<VectorSearchHit[]> {
+  if (!semanticSearchEnabled(bindings)) return [];
   const [qvec] = await bindings.embedder.embed([query.slice(0, EMBED_INPUT_MAX_CHARS)]);
   const namespaced = isolation(bindings) === "namespace";
   // Metadata mode over-fetches: the default namespace may hold other vectors

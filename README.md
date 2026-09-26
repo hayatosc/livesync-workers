@@ -99,6 +99,7 @@ Variables (in `wrangler.jsonc` `vars`, editable in the dashboard; `keep_vars` is
 | `LIVESYNC_DATABASE` | `vault` | CouchDB database name the plugin connects to |
 | `LIVESYNC_USERNAME` | `obsidian` | Username the plugin logs in with |
 | `VAULT_EXCLUDED_FOLDERS` | (not set) | Comma-separated folders left out of the search indexes (still readable), e.g. `Templates,Archive` |
+| `SEMANTIC_SEARCH` | (not set) | `off` runs without semantic search: nothing is embedded and Vectorize is not used; `grepNotes` still works. Turning it back on embeds only notes that change afterwards. |
 | `MCP_STATIC_TOKEN_SCOPES` | (not set) | Extra scopes for the static token, e.g. `vault:append,vault:write` |
 
 The "not set" ones are optional and deliberately absent from `wrangler.jsonc`, because every `vars` entry becomes a required field in the Deploy form. Add them in the dashboard (Settings → Variables and Secrets) or to `vars` when you need them.

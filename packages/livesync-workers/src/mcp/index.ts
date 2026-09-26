@@ -200,6 +200,13 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
     },
     async ({ query, limit }) => {
       const vault = await readyVault();
+      if (!vault.semanticSearch) {
+        return textResult({
+          hits: [],
+          error: "SEMANTIC_SEARCH_DISABLED",
+          message: "Semantic search is turned off for this vault. Use grepNotes instead.",
+        });
+      }
       const hits = await vault.search(query, clampLimit(limit, 8, 20));
       return textResult({ hits });
     },

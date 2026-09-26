@@ -516,6 +516,33 @@ describe("LiveSync Vectorize indexing", () => {
     expect(vi.mocked(env.FTS_BUCKET.put).mock.calls.some(([key]) => String(key).endsWith("/manifest.json"))).toBe(false);
   });
 
+  it("tracks notes and builds the full-text index without a vector index", async () => {
+    const context = vaultDb();
+    context.env.semanticSearch = false;
+    const { durableObject, env, upserted } = context;
+    await durableObject.fetch(new Request("https://db/", { method: "PUT" }));
+    await replicate(durableObject, [leafDoc("h:a", "全文検索だけの vault"), noteDoc("a.md", "1-a", "a.md", ["h:a"])]);
+    await durableObject.alarm();
+    expect(vi.mocked(env.AI.run)).not.toHaveBeenCalled();
+    expect(upserted).toHaveLength(0);
+    await expect(json(await internalOp(durableObject, { op: "indexStatus" }))).resolves.toMatchObject({
+      indexed: 1,
+      pending: 0,
+    });
+    await internalOp(durableObject, { op: "ftsRebuild" });
+    await durableObject.alarm();
+    const status = await json<{ fts: { generation: string | null } }>(
+      await internalOp(durableObject, { op: "indexStatus" }),
+    );
+    expect(status.fts.generation).toMatch(/\w+-\w+/);
+    // Deleting the note must not touch Vectorize either.
+    await replicate(durableObject, [
+      { _id: "a.md", _rev: "2-del", _revisions: { start: 2, ids: ["del", "a"] }, _deleted: true },
+    ]);
+    await durableObject.alarm();
+    expect(vi.mocked(env.VECTORIZE.deleteByIds)).not.toHaveBeenCalled();
+  });
+
   it("purge removes indexed vectors", async () => {
     const context = await created();
     const { durableObject, deletedIds } = context;

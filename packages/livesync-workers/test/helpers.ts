@@ -14,6 +14,8 @@ export const TEST_SECRET = "test-secret";
 export type TestEnv = {
   policy: VaultPolicy;
   ftsMaxTotalCodeUnits?: number;
+  /** false leaves vectorize/embedder out of the bindings (semantic search off). */
+  semanticSearch?: boolean;
   AI: { run: ReturnType<typeof vi.fn> };
   VECTORIZE: { upsert: ReturnType<typeof vi.fn>; deleteByIds: ReturnType<typeof vi.fn>; query: ReturnType<typeof vi.fn> };
   FTS_BUCKET: R2Bucket;
@@ -64,9 +66,13 @@ export function testHost(env: TestEnv, ref?: VaultRef): VaultHost {
 export function testBindings(env: TestEnv): VaultBindings {
   return {
     vaultDb: env.VAULT_DB,
-    vectorize: env.VECTORIZE as unknown as VectorizeIndex,
     bucket: env.FTS_BUCKET,
-    embedder: workersAiEmbedder(env.AI as unknown as Ai),
+    ...(env.semanticSearch === false
+      ? {}
+      : {
+          vectorize: env.VECTORIZE as unknown as VectorizeIndex,
+          embedder: workersAiEmbedder(env.AI as unknown as Ai),
+        }),
     vectorIsolation: "metadata",
     ...(env.ftsMaxTotalCodeUnits !== undefined ? { ftsMaxTotalCodeUnits: env.ftsMaxTotalCodeUnits } : {}),
   };

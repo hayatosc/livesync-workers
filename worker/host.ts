@@ -74,12 +74,17 @@ export function vaultHost(env: Env): VaultHost {
   };
 }
 
+export function semanticSearchOn(env: Env): boolean {
+  return !/^(off|false|0|no)$/i.test((env.SEMANTIC_SEARCH ?? "").trim());
+}
+
 export function vaultBindings(env: Env): VaultBindings {
   return {
     vaultDb: env.VAULT_DB,
-    vectorize: env.VECTORIZE,
     bucket: env.FTS_BUCKET,
-    embedder: workersAiEmbedder(env.AI),
+    ...(semanticSearchOn(env)
+      ? { vectorize: env.VECTORIZE, embedder: workersAiEmbedder(env.AI) }
+      : {}),
     vectorIsolation: "namespace",
   };
 }
