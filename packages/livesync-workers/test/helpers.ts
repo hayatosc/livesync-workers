@@ -13,6 +13,7 @@ export const TEST_SECRET = "test-secret";
 
 export type TestEnv = {
   policy: VaultPolicy;
+  ftsMaxTotalCodeUnits?: number;
   AI: { run: ReturnType<typeof vi.fn> };
   VECTORIZE: { upsert: ReturnType<typeof vi.fn>; deleteByIds: ReturnType<typeof vi.fn>; query: ReturnType<typeof vi.fn> };
   FTS_BUCKET: R2Bucket;
@@ -67,6 +68,7 @@ export function testBindings(env: TestEnv): VaultBindings {
     bucket: env.FTS_BUCKET,
     embedder: workersAiEmbedder(env.AI as unknown as Ai),
     vectorIsolation: "metadata",
+    ...(env.ftsMaxTotalCodeUnits !== undefined ? { ftsMaxTotalCodeUnits: env.ftsMaxTotalCodeUnits } : {}),
   };
 }
 

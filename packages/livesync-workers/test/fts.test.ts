@@ -9,8 +9,10 @@ import {
   encodeShard,
   gunzip,
   gzip,
+  shardForTerm,
   type Posting,
 } from "../src/search/fts/codec.js";
+import { PostingsBuilder } from "../src/search/fts/postings.js";
 import { normalizeText, tokenize } from "../src/search/fts/tokenize.js";
 import { extractSnippet, searchIndex } from "../src/search/fts/search.js";
 
@@ -63,6 +65,38 @@ describe("codec", () => {
     ]);
     const decoded = decodeShard(await gunzip(await gzip(encodeShard(postings))));
     expect(decoded).toEqual(postings);
+  });
+
+  it("PostingsBuilder produces byte-identical shards to the object encoder", () => {
+    const shardCount = 4;
+    const byTerm = new Map<string, Posting[]>();
+    const builder = new PostingsBuilder(shardCount);
+    let seed = 7;
+    const rand = (n: number) => (seed = (seed * 48271) % 2147483647) % n;
+    const terms = ["会議", "室内", "livesync", "z", "検索", "メモ", "第1", "1回"];
+    for (let doc = 0; doc < 300; doc += 1) {
+      const chosen = [...new Set(Array.from({ length: 1 + rand(5) }, () => terms[rand(terms.length)]!))];
+      for (const term of chosen) {
+        const positions = Array.from({ length: 1 + rand(40) }, () => rand(200000)).sort((a, b) => a - b);
+        builder.add(term, doc, positions);
+        const list = byTerm.get(term) ?? [];
+        list.push({ doc, positions });
+        byTerm.set(term, list);
+      }
+    }
+    for (let shard = 0; shard < shardCount; shard += 1) {
+      const expected = encodeShard(
+        [...byTerm].filter(([term]) => shardForTerm(term, shardCount) === shard),
+      );
+      expect(encodeShard(builder.shardEntries(shard))).toEqual(expected);
+    }
+    expect(builder.termCount).toBe(byTerm.size);
+  });
+
+  it("PostingsBuilder rejects out-of-order docs", () => {
+    const builder = new PostingsBuilder(1);
+    builder.add("a", 5, [1]);
+    expect(() => builder.add("a", 3, [1])).toThrow(/ascending/);
   });
 });
 

@@ -130,6 +130,12 @@ export interface VaultBindings {
    */
   fullText?: FullTextIndex;
   /**
+   * Cap on the total note text (JS code units) the built-in full-text rebuild
+   * accepts before giving up with an explicit error. Default 8,000,000, sized
+   * for the Durable Object memory and CPU limits; lower it for testing.
+   */
+  ftsMaxTotalCodeUnits?: number;
+  /**
    * Durable Object name for a vault. Default {@link vaultObjectName}
    * (`${tenantId}:${databaseName}`). A host that changes it must also override
    * `LiveSyncVaultDO.vaultRef()`, which otherwise parses the default name.

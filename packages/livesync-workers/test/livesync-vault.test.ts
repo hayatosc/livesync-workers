@@ -441,6 +441,81 @@ describe("LiveSync Vectorize indexing", () => {
     ).resolves.toMatchObject({ indexed: 1, pending: 0 });
   });
 
+  it("runs the FTS rebuild once the vault is quiet and records the generation", async () => {
+    const { durableObject, env } = await created();
+    await replicate(durableObject, [leafDoc("h:a", "全文検索のメモ"), noteDoc("a.md", "1-a", "a.md", ["h:a"])]);
+    await durableObject.alarm(); // vectors; arms the debounced rebuild
+    await internalOp(durableObject, { op: "ftsRebuild" }); // make it due now
+    await durableObject.alarm();
+    const status = await json<{ fts: { generation: string | null; rebuildAt: number | null; error: string | null } }>(
+      await internalOp(durableObject, { op: "indexStatus" }),
+    );
+    expect(status.fts.generation).toMatch(/\w+-\w+/);
+    expect(status.fts.rebuildAt).toBeNull();
+    expect(status.fts.error).toBeNull();
+    const puts = vi.mocked(env.FTS_BUCKET.put).mock.calls.map(([key]) => String(key));
+    expect(puts.filter((key) => key.endsWith("/manifest.json"))).toHaveLength(1);
+    expect(puts.filter((key) => /shard-\d{3}\.bin\.gz$/.test(key))).toHaveLength(16);
+  });
+
+  it("gives up with an explicit error when the vault exceeds the FTS size guard", async () => {
+    const context = vaultDb();
+    context.env.ftsMaxTotalCodeUnits = 20;
+    const { durableObject, env } = context;
+    await durableObject.fetch(new Request("https://db/", { method: "PUT" }));
+    await replicate(durableObject, [
+      leafDoc("h:a", "十文字ちょうどの本文です。"),
+      noteDoc("a.md", "1-a", "a.md", ["h:a"]),
+      noteDoc("b.md", "1-b", "b.md", ["h:a"]),
+      noteDoc("c.md", "1-c", "c.md", ["h:a"]),
+    ]);
+    await durableObject.alarm();
+    await internalOp(durableObject, { op: "ftsRebuild" });
+    await durableObject.alarm();
+    const status = await json<{ fts: { generation: string | null; rebuildAt: number | null; error: string | null } }>(
+      await internalOp(durableObject, { op: "indexStatus" }),
+    );
+    expect(status.fts.error).toMatch(/exceeds the full-text size guard/);
+    expect(status.fts.rebuildAt).toBeNull();
+    expect(status.fts.generation).toBeNull();
+    const markers = () =>
+      vi.mocked(env.FTS_BUCKET.put).mock.calls
+        .filter(([key]) => String(key).endsWith("/debug.json"))
+        .map(([, body]) => JSON.parse(String(body)) as { phase: string });
+    expect(vi.mocked(env.FTS_BUCKET.put).mock.calls.some(([key]) => String(key).endsWith("/manifest.json"))).toBe(false);
+    expect(markers().at(-1)).toMatchObject({ phase: "too-large" });
+    const markerCount = markers().length;
+
+    // Another ftsRebuild request retries (the guard is a size check, not a lockout).
+    await internalOp(durableObject, { op: "ftsRebuild" });
+    await durableObject.alarm();
+    expect(markers().length).toBeGreaterThan(markerCount);
+    expect(markers().at(-1)).toMatchObject({ phase: "too-large" });
+  });
+
+  it("stops retrying the FTS rebuild after repeated interrupted attempts", async () => {
+    const { durableObject, env } = await created();
+    await replicate(durableObject, [leafDoc("h:a", "本文"), noteDoc("a.md", "1-a", "a.md", ["h:a"])]);
+    await durableObject.alarm();
+    // The R2 marker says the previous attempts died mid-build (memory reset):
+    // SQLite has no trace of them, only the marker survives.
+    vi.mocked(env.FTS_BUCKET.get).mockImplementation((async (key: string) =>
+      key.endsWith("/debug.json")
+        ? ({ json: async () => ({ phase: "gather-start", attempts: 3, at: 1 }) } as unknown as R2ObjectBody)
+        : null) as never);
+    await internalOp(durableObject, { op: "ftsRebuild" });
+    await durableObject.alarm();
+    const status = await json<{ fts: { generation: string | null; rebuildAt: number | null; error: string | null } }>(
+      await internalOp(durableObject, { op: "indexStatus" }),
+    );
+    expect(status.fts.error).toMatch(/interrupted 3 times/);
+    expect(status.fts.rebuildAt).toBeNull();
+    expect(status.fts.generation).toBeNull();
+    const markers = vi.mocked(env.FTS_BUCKET.put).mock.calls.filter(([key]) => String(key).endsWith("/debug.json"));
+    expect(JSON.parse(String(markers.at(-1)![1]))).toMatchObject({ phase: "failed", attempts: 3 });
+    expect(vi.mocked(env.FTS_BUCKET.put).mock.calls.some(([key]) => String(key).endsWith("/manifest.json"))).toBe(false);
+  });
+
   it("purge removes indexed vectors", async () => {
     const context = await created();
     const { durableObject, deletedIds } = context;

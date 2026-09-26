@@ -65,11 +65,17 @@ export async function readFtsPhase(
 export async function rebuildFtsIndex(
   bucket: R2Bucket,
   ref: VaultRef,
-  docs: FtsDocInput[],
-  options: { previousGeneration?: string | null } = {},
+  docs: Iterable<FtsDocInput>,
+  options: {
+    previousGeneration?: string | null;
+    /** Carried into every phase marker (e.g. the attempt counter). */
+    marker?: Record<string, unknown>;
+  } = {},
 ): Promise<FtsManifest> {
+  const extra = options.marker ?? {};
   const built = await buildIndex(docs, { shardCount: FTS_SHARD_COUNT });
   await markFtsPhase(bucket, ref, "build-done", {
+    ...extra,
     docCount: built.stats.docCount,
     termCount: built.stats.termCount,
   });
@@ -79,7 +85,7 @@ export async function rebuildFtsIndex(
   for (const [name, body] of built.files) {
     await bucket.put(`${base}/${generation}/${name}`, body);
   }
-  await markFtsPhase(bucket, ref, "upload-done", { generation });
+  await markFtsPhase(bucket, ref, "upload-done", { ...extra, generation });
   const manifest: FtsManifest = {
     version: 1,
     generation,
@@ -101,7 +107,7 @@ export async function rebuildFtsIndex(
   for (let i = 0; i < stale.length; i += 1000) {
     await bucket.delete(stale.slice(i, i + 1000));
   }
-  await markFtsPhase(bucket, ref, "rebuild-complete", { generation });
+  await markFtsPhase(bucket, ref, "rebuild-complete", { ...extra, generation });
   return manifest;
 }
 

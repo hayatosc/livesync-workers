@@ -14,9 +14,16 @@ const MAGIC = [0x4b, 0x46, 0x54, 0x53]; // "KFTS"
 
 export type Posting = { doc: number; positions: number[] };
 
+/** Postings already in shard byte form (everything after the doc count). */
+export type EncodedPostings = { docCount: number; body: Uint8Array };
+
 export class ByteWriter {
-  private buf = new Uint8Array(1024);
+  private buf: Uint8Array;
   private len = 0;
+
+  constructor(initialCapacity = 1024) {
+    this.buf = new Uint8Array(initialCapacity);
+  }
 
   private ensure(extra: number): void {
     if (this.len + extra <= this.buf.length) return;
@@ -113,7 +120,27 @@ export function shardForTerm(term: string, shardCount: number): number {
   return fnv1a(term) % shardCount;
 }
 
-export function encodeShard(entries: Iterable<[string, Posting[]]>): Uint8Array {
+export function encodePostings(writer: ByteWriter, postings: Posting[]): void {
+  let prevDoc = 0;
+  for (const posting of postings) {
+    writer.varint(posting.doc - prevDoc);
+    prevDoc = posting.doc;
+    writer.varint(posting.positions.length);
+    let prevPos = 0;
+    for (const pos of posting.positions) {
+      writer.varint(pos - prevPos);
+      prevPos = pos;
+    }
+  }
+}
+
+/**
+ * Entries may carry decoded postings or bytes pre-encoded by PostingsBuilder;
+ * both produce the same shard bytes. Entries are sorted by term here.
+ */
+export function encodeShard(
+  entries: Iterable<[string, Posting[] | EncodedPostings]>,
+): Uint8Array {
   const writer = new ByteWriter();
   for (const byte of MAGIC) writer.u8(byte);
   writer.varint(SHARD_FORMAT_VERSION);
@@ -124,17 +151,12 @@ export function encodeShard(entries: Iterable<[string, Posting[]]>): Uint8Array 
     const termBytes = encoder.encode(term);
     writer.varint(termBytes.length);
     writer.bytes(termBytes);
-    writer.varint(postings.length);
-    let prevDoc = 0;
-    for (const posting of postings) {
-      writer.varint(posting.doc - prevDoc);
-      prevDoc = posting.doc;
-      writer.varint(posting.positions.length);
-      let prevPos = 0;
-      for (const pos of posting.positions) {
-        writer.varint(pos - prevPos);
-        prevPos = pos;
-      }
+    if (Array.isArray(postings)) {
+      writer.varint(postings.length);
+      encodePostings(writer, postings);
+    } else {
+      writer.varint(postings.docCount);
+      writer.bytes(postings.body);
     }
   }
   return writer.toUint8Array();

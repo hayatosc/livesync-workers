@@ -38,7 +38,12 @@ export type VaultIndexStatus = {
   currentSeq: number;
   indexed: number;
   pending: number;
-  fts?: { generation: string | null; rebuildAt: number | null };
+  fts?: {
+    generation: string | null;
+    rebuildAt: number | null;
+    /** Why the last rebuild gave up (vault too large, repeated resets); null when healthy. */
+    error?: string | null;
+  };
   /** Progress of an external full-text index (`VaultBindings.fullText`), per note. */
   fullText?: { indexed: number; pending: number };
 };

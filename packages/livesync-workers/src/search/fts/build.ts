@@ -1,4 +1,5 @@
-import { encodeShard, gzip, shardForTerm, type Posting } from "./codec.js";
+import { encodeShard, gzip } from "./codec.js";
+import { PostingsBuilder } from "./postings.js";
 import { normalizeText, tokenize } from "./tokenize.js";
 
 export const DEFAULT_SHARD_COUNT = 16;
@@ -44,19 +45,23 @@ export const DOCS_FILE_NAME = "docs.json.gz";
 /**
  * Build a complete index generation in memory. Pure apart from gzip; callers
  * decide the generation id and where the files live (R2, disk, memory).
+ * Memory is dominated by the encoded postings (a few bytes per code point)
+ * plus per-term bookkeeping; see PostingsBuilder.
  */
 export async function buildIndex(
-  inputs: FtsDocInput[],
+  inputs: Iterable<FtsDocInput>,
   options: { shardCount?: number } = {},
 ): Promise<FtsBuildResult> {
   const shardCount = options.shardCount ?? DEFAULT_SHARD_COUNT;
-  const postingsByTerm = new Map<string, Posting[]>();
+  const postings = new PostingsBuilder(shardCount);
   const docs: FtsDocMeta[] = [];
   let totalChars = 0;
   let postingCount = 0;
 
-  for (let docId = 0; docId < inputs.length; docId += 1) {
-    const input = inputs[docId]!;
+  // Inputs may be a lazy generator so callers can read one note at a time
+  // instead of holding every body in memory alongside the postings.
+  for (const input of inputs) {
+    const docId = docs.length;
     const { chars } = normalizeText(input.content);
     docs.push({
       path: input.path,
@@ -76,30 +81,17 @@ export async function buildIndex(
       positions.push(token.pos);
     }
     for (const [term, positions] of positionsByTerm) {
-      let postings = postingsByTerm.get(term);
-      if (!postings) {
-        postings = [];
-        postingsByTerm.set(term, postings);
-      }
       // Tokens are emitted in ascending position order per mode section, but
       // index-mode boundary unigrams arrive after the bigrams; keep sorted.
       positions.sort((a, b) => a - b);
-      postings.push({ doc: docId, positions });
+      postings.add(term, docId, positions);
+      postingCount += positions.length;
     }
-  }
-
-  const shards: Array<Array<[string, Posting[]]>> = Array.from(
-    { length: shardCount },
-    () => [],
-  );
-  for (const [term, postings] of postingsByTerm) {
-    shards[shardForTerm(term, shardCount)]!.push([term, postings]);
-    postingCount += postings.reduce((sum, p) => sum + p.positions.length, 0);
   }
 
   const files = new Map<string, Uint8Array>();
   for (let shard = 0; shard < shardCount; shard += 1) {
-    files.set(shardFileName(shard), await gzip(encodeShard(shards[shard]!)));
+    files.set(shardFileName(shard), await gzip(encodeShard(postings.shardEntries(shard))));
   }
   files.set(
     DOCS_FILE_NAME,
@@ -112,7 +104,7 @@ export async function buildIndex(
     stats: {
       docCount: docs.length,
       totalChars,
-      termCount: postingsByTerm.size,
+      termCount: postings.termCount,
       postingCount,
     },
   };

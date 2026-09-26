@@ -1,6 +1,11 @@
 import { hashText } from "../search/chunk-md.js";
 import { removeNoteVectors, upsertNoteVectors } from "../search/vector-index.js";
-import { deleteFtsIndex, markFtsPhase, rebuildFtsIndex } from "../search/fts-index.js";
+import {
+  deleteFtsIndex,
+  markFtsPhase,
+  readFtsPhase,
+  rebuildFtsIndex,
+} from "../search/fts-index.js";
 import type { FtsDocInput } from "../search/fts/build.js";
 import {
   CHANGES_IDLE_HEADER,
@@ -109,14 +114,24 @@ const INDEX_RETRY_DELAY_MS = 30_000;
 const INDEX_MAX_ATTEMPTS = 20;
 const FTS_GENERATION_META_KEY = "fts_generation";
 const FTS_REBUILD_AT_META_KEY = "fts_rebuild_at";
+// Why the last rebuild gave up; cleared by the next successful rebuild.
+const FTS_ERROR_META_KEY = "fts_error";
 // Full FTS rebuilds are cheap at vault scale but write ~20 R2 objects, so
 // wait for the vault to go quiet before rebuilding.
 const FTS_REBUILD_DEBOUNCE_MS = 5 * 60_000;
 const FTS_REBUILD_RETRY_MS = 60_000;
-// Guard rails for the in-DO full rebuild: it must stay well under the DO CPU
-// limit, so refuse pathological inputs instead of burning the isolate.
-const FTS_MAX_TOTAL_BYTES = 50_000_000;
+// Guard rails for the in-DO full rebuild. Sizes are JS code units (what the
+// tokenizer walks), not UTF-8 bytes: 8M code units is ~20 MB of Japanese
+// Markdown. Measured 2026-09: the build needs ~10 bytes of heap per code unit
+// and ~1.8 s of DO CPU per million, so this stays under the 128 MB / 30 s
+// limits with headroom. Bigger vaults need the segmented index, not a bigger
+// number here.
+const FTS_MAX_TOTAL_CODE_UNITS = 8_000_000;
 const FTS_MAX_NOTE_BYTES = 2_000_000;
+// A rebuild that dies from a memory reset leaves no SQLite trace (the event's
+// writes roll back), so attempts are counted in the R2 phase marker. After this
+// many interrupted attempts the rebuild is disarmed instead of looping forever.
+const FTS_MAX_REBUILD_ATTEMPTS = 3;
 // External full-text index (VaultBindings.fullText): notes already
 // vector-indexed but not yet written there (a fresh setup, or after
 // "ftsRebuild") are backfilled this many per alarm run.
@@ -214,6 +229,15 @@ function noteDocIdForPath(path: string, caseInsensitive: boolean): string {
   let id = caseInsensitive ? path.toLowerCase() : path;
   if (id.startsWith("_")) id = `/${id}`;
   return id;
+}
+
+class FtsTooLargeError extends Error {
+  constructor(
+    readonly codeUnits: number,
+    readonly limit: number,
+  ) {
+    super(`FTS rebuild input exceeds ${limit} code units`);
+  }
 }
 
 function revisionMetadata(doc: DocBody): RevisionMetadata {
@@ -896,6 +920,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
           fts: {
             generation: this.getMeta(FTS_GENERATION_META_KEY),
             rebuildAt: Number(this.getMeta(FTS_REBUILD_AT_META_KEY)) || null,
+            error: this.getMeta(FTS_ERROR_META_KEY),
           },
         });
       default:
@@ -1496,50 +1521,120 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const ref = this.vaultRef();
     if (!ref) return;
     const bucket = this.ftsBucket();
-    await markFtsPhase(bucket, ref, "gather-start");
-    const policy = await this.loadPolicy(ref);
-    const docs: FtsDocInput[] = [];
-    let totalBytes = 0;
-    for (const row of this.listNoteRevisionsForFts()) {
-      const path = row.fts_path;
-      if (!path.endsWith(".md") || path.startsWith("i:")) continue;
-      if (!isIndexableMarkdownPath(path, policy)) continue;
-      const content = this.fileContentForRow(row);
-      if (content == null) continue;
-      if (content.length > FTS_MAX_NOTE_BYTES) {
-        console.warn("FTS rebuild skipping oversized note", { path });
-        continue;
-      }
-      totalBytes += content.length;
-      if (totalBytes > FTS_MAX_TOTAL_BYTES) {
-        // Too big for the in-DO rebuild; disarm instead of burning CPU.
-        console.warn("FTS rebuild aborted: vault exceeds size guard", { totalBytes });
-        this.ctx.storage.sql.exec(
-          `DELETE FROM meta WHERE key = ?`,
-          FTS_REBUILD_AT_META_KEY,
-        );
-        return;
-      }
-      docs.push({
-        path,
-        content,
-        ...(row.fts_mtime != null ? { mtime: row.fts_mtime } : {}),
-      });
+
+    // An interrupted previous attempt (memory reset, CPU limit) leaves its
+    // last phase marker behind; a completed or abandoned one does not count.
+    const previous = await readFtsPhase(bucket, ref);
+    const interrupted =
+      previous != null && !["rebuild-complete", "failed", "too-large"].includes(String(previous.phase));
+    const attempts = (interrupted ? Number(previous.attempts) || 0 : 0) + 1;
+    if (attempts > FTS_MAX_REBUILD_ATTEMPTS) {
+      const message = `rebuild was interrupted ${attempts - 1} times (last phase: ${String(previous?.phase)}); the vault is probably too large for the in-DO build`;
+      console.warn("FTS rebuild giving up", { attempts: attempts - 1, lastPhase: previous?.phase });
+      await markFtsPhase(bucket, ref, "failed", { attempts: attempts - 1, lastPhase: previous?.phase });
+      this.setMeta(FTS_ERROR_META_KEY, message);
+      this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, FTS_REBUILD_AT_META_KEY);
+      return;
     }
-    console.log("FTS rebuild starting", { docCount: docs.length, totalBytes });
-    await markFtsPhase(bucket, ref, "gather-done", {
-      docCount: docs.length,
-      totalBytes,
-    });
-    const manifest = await rebuildFtsIndex(bucket, ref, docs, {
-      previousGeneration: this.getMeta(FTS_GENERATION_META_KEY),
-    });
+    const marker = { attempts };
+    await markFtsPhase(bucket, ref, "gather-start", marker);
+
+    const policy = await this.loadPolicy(ref);
+    const refs = this.listNoteRefsForFts().filter(
+      (row) =>
+        row.fts_path.endsWith(".md") &&
+        !row.fts_path.startsWith("i:") &&
+        isIndexableMarkdownPath(row.fts_path, policy),
+    );
+    console.log("FTS rebuild starting", { noteCount: refs.length, attempts });
+
+    // Bodies are read one note at a time while the index is built, so only
+    // the postings and one note live in memory at once.
+    const self = this;
+    const maxCodeUnits = this.bindings().ftsMaxTotalCodeUnits ?? FTS_MAX_TOTAL_CODE_UNITS;
+    let totalCodeUnits = 0;
+    let skipped = 0;
+    function* inputs(): Generator<FtsDocInput> {
+      for (const row of refs) {
+        const rev = self.rawWinningRow(row.id);
+        const content = rev ? self.fileContentForRow(rev) : null;
+        if (content == null) continue;
+        if (content.length > FTS_MAX_NOTE_BYTES) {
+          console.warn("FTS rebuild skipping oversized note", { path: row.fts_path });
+          skipped += 1;
+          continue;
+        }
+        totalCodeUnits += content.length;
+        if (totalCodeUnits > maxCodeUnits) {
+          throw new FtsTooLargeError(totalCodeUnits, maxCodeUnits);
+        }
+        yield {
+          path: row.fts_path,
+          content,
+          ...(row.fts_mtime != null ? { mtime: row.fts_mtime } : {}),
+        };
+      }
+    }
+
+    let manifest;
+    try {
+      manifest = await rebuildFtsIndex(bucket, ref, inputs(), {
+        previousGeneration: this.getMeta(FTS_GENERATION_META_KEY),
+        marker,
+      });
+    } catch (error) {
+      if (!(error instanceof FtsTooLargeError)) throw error;
+      // Too big for the in-DO rebuild; record why and disarm instead of burning CPU.
+      const message = `vault exceeds the full-text size guard (${error.codeUnits.toLocaleString("en")}+ of ${error.limit.toLocaleString("en")} code units)`;
+      console.warn("FTS rebuild aborted: vault exceeds size guard", { codeUnits: error.codeUnits });
+      await markFtsPhase(bucket, ref, "too-large", { codeUnits: error.codeUnits });
+      this.setMeta(FTS_ERROR_META_KEY, message);
+      this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, FTS_REBUILD_AT_META_KEY);
+      return;
+    }
     this.setMeta(FTS_GENERATION_META_KEY, manifest.generation);
+    this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, FTS_ERROR_META_KEY);
     console.log("FTS rebuild finished", {
       generation: manifest.generation,
       docCount: manifest.docCount,
       totalChars: manifest.totalChars,
+      skipped,
+      attempts,
     });
+  }
+
+  /**
+   * Winning note ids/paths for the full-text rebuild, without bodies. Bodies
+   * are fetched per note while indexing so a large vault is never held in
+   * memory at once.
+   */
+  private listNoteRefsForFts(): Array<{ id: string; fts_path: string; fts_mtime: number | null }> {
+    type Ref = { id: string; fts_path: string; fts_mtime: number | null };
+    const rows = this.rows<Ref>(
+      `SELECT r.id, m.path AS fts_path, m.mtime AS fts_mtime
+       FROM docs d
+       JOIN rev_metadata m ON m.id = d.id AND m.rev = d.winning_rev
+       JOIN revs r ON r.id = d.id AND r.rev = d.winning_rev
+       WHERE d.deleted = 0 AND m.path IS NOT NULL
+         AND COALESCE(m.type, '') NOT IN ('leaf', 'chunkpack')
+         AND (r.body_chunked = 1 OR COALESCE(json_extract(r.body, '$.deleted'), 0) != 1)`,
+    );
+    rows.push(...this.rows<Ref>(
+      `SELECT r.id,
+         json_extract(r.body, '$.path') AS fts_path,
+         json_extract(r.body, '$.mtime') AS fts_mtime
+       FROM docs d
+       JOIN revs r ON r.id = d.id AND r.rev = d.winning_rev
+       WHERE d.deleted = 0
+         AND r.body_chunked = 0
+         AND json_type(r.body, '$.path') = 'text'
+         AND COALESCE(json_extract(r.body, '$.type'), '') NOT IN ('leaf', 'chunkpack')
+         AND COALESCE(json_extract(r.body, '$.deleted'), 0) != 1
+         AND NOT EXISTS (
+           SELECT 1 FROM rev_metadata m WHERE m.id = r.id AND m.rev = r.rev
+         )`,
+    ));
+    return rows;
   }
 
   private async removeAllVectors(): Promise<void> {
