@@ -94,9 +94,11 @@ export function memoryBucket() {
     async put(key: string, body: Uint8Array | string) {
       store.set(key, typeof body === "string" ? new TextEncoder().encode(body) : body);
     },
-    async get(key: string) {
-      const body = store.get(key);
-      if (!body) return null;
+    async get(key: string, options?: { range?: { offset: number; length: number } }) {
+      const whole = store.get(key);
+      if (!whole) return null;
+      const range = options?.range;
+      const body = range ? whole.subarray(range.offset, range.offset + range.length) : whole;
       return {
         arrayBuffer: async () => body.slice().buffer,
         json: async () => JSON.parse(new TextDecoder().decode(body)),

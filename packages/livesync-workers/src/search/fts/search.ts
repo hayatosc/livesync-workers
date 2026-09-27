@@ -1,14 +1,41 @@
-import { decodeShard, gunzip, shardForTerm, type Posting } from "./codec.js";
+import {
+  bucketForTerm,
+  decodeBucketTerms,
+  decodeSegmentIndex,
+  decodeShard,
+  DEFAULT_BUCKET_COUNT,
+  gunzip,
+  shardForTerm,
+  type Posting,
+} from "./codec.js";
 import {
   normalizeText,
   termCharLength,
   tokenize,
   type Token,
 } from "./tokenize.js";
-import { DOCS_FILE_NAME, shardFileName, type FtsDocMeta } from "./build.js";
+import { DOCS_FILE_NAME, INDEX_FILE_NAME, shardFileName, type FtsDocMeta } from "./build.js";
 
 /** Fetch a segment-relative file ("shard-003.bin.gz"); null if missing. */
 export type FetchSegmentFile = (name: string) => Promise<Uint8Array | null>;
+
+/** Access to one segment's files; ranges are what makes format 2 cheap to search. */
+export type SegmentFiles = {
+  get: FetchSegmentFile;
+  /** Bytes [offset, offset + length) of a file; null if the file is missing. */
+  getRange: (name: string, offset: number, length: number) => Promise<Uint8Array | null>;
+};
+
+/** A whole-file fetcher as SegmentFiles (ranges are sliced client-side). */
+export function segmentFilesFromFetch(fetch: FetchSegmentFile): SegmentFiles {
+  return {
+    get: fetch,
+    async getRange(name, offset, length) {
+      const whole = await fetch(name);
+      return whole ? whole.subarray(offset, offset + length) : null;
+    },
+  };
+}
 
 export type SearchMatch = {
   /** Match start, as an index into the doc's normalized code points. */
@@ -46,12 +73,43 @@ export function parsePhrases(query: string): Phrase[] {
     const first = tokens[0]!;
     const last = tokens[tokens.length - 1]!;
     phrases.push({
-      tokens,
+      tokens: coveringTokens(tokens),
       basePos: first.pos,
       matchLen: last.pos + termCharLength(last.term) - first.pos,
     });
   }
   return phrases;
+}
+
+/**
+ * The fewest tokens that still pin every character of the phrase at its
+ * relative position. Bigram tokens overlap, so every other one suffices:
+ * with 会議 at p and 議室 implied by 室内 at p+2, a doc holding 会議 at p and
+ * 室内 at p+2 necessarily holds 会議室内. Halves the postings a long CJK
+ * phrase has to read without changing which documents match.
+ */
+export function coveringTokens(tokens: Token[]): Token[] {
+  const sorted = [...tokens].sort((a, b) => a.pos - b.pos);
+  const end = Math.max(...sorted.map((t) => t.pos + termCharLength(t.term)));
+  const chosen: Token[] = [];
+  let covered = sorted[0]!.pos;
+  let i = 0;
+  while (covered < end) {
+    let best: Token | null = null;
+    while (i < sorted.length && sorted[i]!.pos <= covered) {
+      const token = sorted[i]!;
+      if (!best || token.pos + termCharLength(token.term) > best.pos + termCharLength(best.term)) best = token;
+      i += 1;
+    }
+    if (!best) {
+      // A gap (separator chars between tokens): continue from the next token.
+      covered = sorted[i]!.pos;
+      continue;
+    }
+    chosen.push(best);
+    covered = best.pos + termCharLength(best.term);
+  }
+  return chosen;
 }
 
 function postingsSize(postings: Posting[]): number {
@@ -85,11 +143,16 @@ export async function searchSegment(
   phrases: Phrase[],
   options: {
     shardCount: number;
-    fetchFile: FetchSegmentFile;
+    /** Shard file layout; see shardFileName. Default 2. */
+    format?: 1 | 2;
+    bucketCount?: number;
+    files: SegmentFiles;
     maxMatchesPerDoc?: number;
   },
 ): Promise<SegmentSearchResult> {
-  const { shardCount, fetchFile } = options;
+  const { shardCount, files } = options;
+  const format = options.format ?? 2;
+  const bucketCount = options.bucketCount ?? DEFAULT_BUCKET_COUNT;
   const maxMatchesPerDoc = options.maxMatchesPerDoc ?? 20;
   const empty = (docs: FtsDocMeta[]): SegmentSearchResult => ({
     candidates: [],
@@ -102,31 +165,11 @@ export async function searchSegment(
   for (const phrase of phrases) {
     for (const token of phrase.tokens) terms.add(token.term);
   }
-  const shardIds = new Set<number>();
-  for (const term of terms) shardIds.add(shardForTerm(term, shardCount));
-
-  const [docsRaw, ...shardBodies] = await Promise.all([
-    fetchFile(DOCS_FILE_NAME),
-    ...[...shardIds].map((shard) => fetchFile(shardFileName(shard))),
-  ]);
-  if (!docsRaw) throw new Error("FTS segment docs file is missing");
-  const docs = (
-    JSON.parse(new TextDecoder().decode(await gunzip(docsRaw))) as {
-      docs: FtsDocMeta[];
-    }
-  ).docs;
+  const [docs, termPostings] =
+    format === 1
+      ? await loadWholeShards(terms, shardCount, files)
+      : await loadBuckets(terms, shardCount, bucketCount, files);
   if (phrases.length === 0) return empty(docs);
-
-  const termPostings = new Map<string, Posting[]>();
-  const shardList = [...shardIds];
-  for (let i = 0; i < shardList.length; i += 1) {
-    const body = shardBodies[i];
-    const decoded = body ? decodeShard(await gunzip(body)) : new Map<string, Posting[]>();
-    for (const term of terms) {
-      if (shardForTerm(term, shardCount) !== shardList[i]) continue;
-      termPostings.set(term, decoded.get(term) ?? []);
-    }
-  }
 
   // Verified match start positions per doc, per phrase. Every phrase is
   // evaluated even when an earlier one found nothing, so df stays comparable
@@ -201,6 +244,68 @@ export async function searchSegment(
   };
 }
 
+async function loadDocs(files: SegmentFiles): Promise<FtsDocMeta[]> {
+  const raw = await files.get(DOCS_FILE_NAME);
+  if (!raw) throw new Error("FTS segment docs file is missing");
+  return (JSON.parse(new TextDecoder().decode(await gunzip(raw))) as { docs: FtsDocMeta[] }).docs;
+}
+
+/** Format 1: every touched shard is read and decoded in full. */
+async function loadWholeShards(
+  terms: Set<string>,
+  shardCount: number,
+  files: SegmentFiles,
+): Promise<[FtsDocMeta[], Map<string, Posting[]>]> {
+  const shardIds = [...new Set([...terms].map((term) => shardForTerm(term, shardCount)))];
+  const [docs, ...shardBodies] = await Promise.all([
+    loadDocs(files),
+    ...shardIds.map((shard) => files.get(shardFileName(shard, 1))),
+  ]);
+  const termPostings = new Map<string, Posting[]>();
+  for (let i = 0; i < shardIds.length; i += 1) {
+    const body = shardBodies[i];
+    const decoded = body ? decodeShard(await gunzip(body)) : new Map<string, Posting[]>();
+    for (const term of terms) {
+      if (shardForTerm(term, shardCount) !== shardIds[i]) continue;
+      termPostings.set(term, decoded.get(term) ?? []);
+    }
+  }
+  return [docs, termPostings];
+}
+
+/** Format 2: only the buckets the terms hash into are read (one range each). */
+async function loadBuckets(
+  terms: Set<string>,
+  shardCount: number,
+  bucketCount: number,
+  files: SegmentFiles,
+): Promise<[FtsDocMeta[], Map<string, Posting[]>]> {
+  const [docs, indexRaw] = await Promise.all([loadDocs(files), files.get(INDEX_FILE_NAME)]);
+  if (!indexRaw) throw new Error("FTS segment index file is missing");
+  const index = decodeSegmentIndex(indexRaw, shardCount, bucketCount);
+  const groups = new Map<string, { shard: number; bucket: number; terms: string[] }>();
+  for (const term of terms) {
+    const shard = shardForTerm(term, shardCount);
+    const bucket = bucketForTerm(term, bucketCount);
+    const key = `${shard}:${bucket}`;
+    const group = groups.get(key) ?? { shard, bucket, terms: [] };
+    group.terms.push(term);
+    groups.set(key, group);
+  }
+  const termPostings = new Map<string, Posting[]>();
+  await Promise.all(
+    [...groups.values()].map(async ({ shard, bucket, terms: wanted }) => {
+      const offsets = index[shard]!;
+      const start = offsets[bucket]!;
+      const length = offsets[bucket + 1]! - start;
+      const raw = length > 0 ? await files.getRange(shardFileName(shard, 2), start, length) : null;
+      const decoded = raw ? decodeBucketTerms(await gunzip(raw), wanted) : null;
+      for (const term of wanted) termPostings.set(term, decoded?.get(term) ?? []);
+    }),
+  );
+  return [docs, termPostings];
+}
+
 export type RankOptions = {
   limit?: number;
   /** BM25 parameters. */
@@ -266,6 +371,7 @@ export async function searchIndex(
   query: string,
   options: {
     shardCount: number;
+    format?: 1 | 2;
     fetchFile: FetchSegmentFile;
     limit?: number;
     maxMatchesPerDoc?: number;
@@ -273,7 +379,7 @@ export async function searchIndex(
 ): Promise<SearchHit[]> {
   const phrases = parsePhrases(query);
   if (phrases.length === 0) return [];
-  const result = await searchSegment(phrases, options);
+  const result = await searchSegment(phrases, { ...options, files: segmentFilesFromFetch(options.fetchFile) });
   return rankHits([result], { ...(options.limit !== undefined ? { limit: options.limit } : {}) });
 }
 

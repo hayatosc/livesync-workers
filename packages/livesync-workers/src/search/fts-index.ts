@@ -4,8 +4,15 @@
  *   fts/{tenantId}/{databaseName}/
  *     manifest.json                  live segment list; swapped atomically
  *     seg-{id}/docs.json.gz          segment-local docId → path, hash, chars, mtime
- *     seg-{id}/shard-000..015.bin.gz postings, term → fnv1a(term) % 16
+ *     seg-{id}/index.bin             bucket byte ranges of every shard
+ *     seg-{id}/shard-000..015.bin    postings, term → fnv1a(term) % 16, in 64
+ *                                    independently gzipped buckets per shard
  *     debug.json                     last phase reached (survives DO resets)
+ *
+ * A search reads, per segment, docs.json.gz, index.bin and one byte range
+ * per bucket its terms hash into (segment format 2). Segments written by
+ * 0.3.0 (format 1: shard-NNN.bin.gz, one gzip stream each, read whole) stay
+ * searchable and are rewritten to format 2 by the maintenance pass.
  *
  * A segment holds the notes one indexing pass wrote (new or changed notes),
  * so an update costs O(changed text), not O(vault). Replaced and deleted
@@ -18,22 +25,32 @@
 import {
   buildIndex,
   DOCS_FILE_NAME,
+  INDEX_FILE_NAME,
   shardFileName,
   type FtsDocInput,
   type FtsDocMeta,
 } from "./fts/build.js";
-import { gunzip, gzip } from "./fts/codec.js";
-import { mergeShards } from "./fts/merge.js";
+import {
+  DEFAULT_BUCKET_COUNT,
+  decodeSegmentIndex,
+  encodeSegmentIndex,
+  gunzip,
+  gzip,
+  type BucketedShard,
+} from "./fts/codec.js";
+import { mergeShard, type MergeInput } from "./fts/merge.js";
 import {
   parsePhrases,
   rankHits,
   searchSegment,
   type RankedHit,
+  type SegmentFiles,
   type SegmentSearchResult,
 } from "./fts/search.js";
 import type { VaultRef } from "../types.js";
 
 export const FTS_SHARD_COUNT = 16;
+export const FTS_BUCKET_COUNT = DEFAULT_BUCKET_COUNT;
 /** How long a retired segment stays readable for searches that already read the old manifest. */
 const RETIRED_GRACE_MS = 5 * 60_000;
 
@@ -45,7 +62,13 @@ export type FtsSegment = {
   builtAt: number;
   /** False for a legacy generation, whose docs carry no content hash. */
   hashed: boolean;
+  /** Shard file layout (see shardFileName); absent means 1. */
+  format?: 1 | 2;
 };
+
+export function segmentFormat(segment: FtsSegment): 1 | 2 {
+  return segment.format ?? 1;
+}
 
 export type FtsManifest = {
   version: 2;
@@ -250,6 +273,7 @@ export async function appendFtsSegment(
     totalChars: built.stats.totalChars,
     builtAt: now,
     hashed: true,
+    format: 2,
   };
   // Sweep before the commit: the new segment is in the manifest being
   // written, so it survives; a crash in between only leaves it orphaned.
@@ -289,15 +313,17 @@ export async function retireFtsSegments(
 }
 
 export type CompactionPlan = {
-  /** Segments to merge, in manifest order. */
+  /** Segments to merge, in manifest order. A single segment means a format upgrade. */
   segments: FtsSegment[];
 };
 
 /**
- * Which segments to merge next, if any: the two smallest hashed segments
- * once there are more than `maxSegments`, provided the result stays under
- * `maxMergedChars` (bounds the CPU one merge pass needs). Legacy segments
- * are never merged; they are retired once every note has been re-indexed.
+ * Which segments to merge next, if any: first any hashed segment still in
+ * shard format 1 (rewritten alone into format 2, so searches can read it by
+ * range), then the two smallest hashed segments once there are more than
+ * `maxSegments`, provided the result stays under `maxMergedChars` (bounds
+ * the CPU one merge pass needs). Legacy segments are never merged; they are
+ * retired once every note has been re-indexed.
  */
 export function planFtsCompaction(
   manifest: FtsManifest,
@@ -306,6 +332,8 @@ export function planFtsCompaction(
   const maxSegments = options.maxSegments ?? 8;
   const maxMergedChars = options.maxMergedChars ?? 16_000_000;
   const hashed = manifest.segments.filter((s) => s.hashed);
+  const outdated = hashed.find((s) => segmentFormat(s) !== 2);
+  if (outdated) return { segments: [outdated] };
   if (hashed.length <= maxSegments) return null;
   const smallest = [...hashed].sort((a, b) => a.totalChars - b.totalChars).slice(0, 2);
   if (smallest.length < 2) return null;
@@ -362,18 +390,33 @@ export async function compactFtsSegments(
 
   const files = new Map<string, Uint8Array>();
   if (mergedDocs.length > 0) {
+    // Bucket offsets of the format-2 inputs, read once.
+    const indexes = await Promise.all(
+      plan.segments.map(async (segment) => {
+        if (segmentFormat(segment) !== 2) return null;
+        const object = await bucket.get(`${base}/${segment.id}/${INDEX_FILE_NAME}`);
+        if (!object) throw new Error(`FTS segment ${segment.id} has no index file`);
+        return decodeSegmentIndex(new Uint8Array(await object.arrayBuffer()), FTS_SHARD_COUNT, FTS_BUCKET_COUNT);
+      }),
+    );
+    const shards: BucketedShard[] = [];
     for (let shard = 0; shard < FTS_SHARD_COUNT; shard += 1) {
-      const name = shardFileName(shard);
-      const inputs = [];
+      const inputs: MergeInput[] = [];
       for (let i = 0; i < plan.segments.length; i += 1) {
-        const object = await bucket.get(`${base}/${plan.segments[i]!.id}/${name}`);
+        const format = segmentFormat(plan.segments[i]!);
+        const object = await bucket.get(`${base}/${plan.segments[i]!.id}/${shardFileName(shard, format)}`);
         inputs.push({
-          data: object ? await gunzip(new Uint8Array(await object.arrayBuffer())) : null,
+          format,
+          data: object ? new Uint8Array(await object.arrayBuffer()) : null,
+          ...(format === 2 ? { offsets: indexes[i]![shard]! } : {}),
           remap: remaps[i]!,
         });
       }
-      files.set(name, await gzip(mergeShards(inputs)));
+      const merged = await mergeShard(inputs, FTS_BUCKET_COUNT);
+      shards.push(merged);
+      files.set(shardFileName(shard, 2), merged.data);
     }
+    files.set(INDEX_FILE_NAME, encodeSegmentIndex(shards, FTS_BUCKET_COUNT));
     files.set(DOCS_FILE_NAME, await gzip(new TextEncoder().encode(JSON.stringify({ docs: mergedDocs }))));
   }
 
@@ -389,6 +432,7 @@ export async function compactFtsSegments(
     totalChars: mergedDocs.reduce((sum, d) => sum + d.chars, 0),
     builtAt: now,
     hashed: true,
+    format: 2,
   };
   const remaining = previous.segments.filter((s) => !ids.includes(s.id));
   // Keep the merged segment where the earliest input was, so manifest order stays by age.
@@ -418,7 +462,10 @@ export type FtsSearchResult =
   | { status: "ready"; manifest: FtsManifest; hits: RankedHit[] }
   | { status: "not-built" };
 
-/** Read-through cache for immutable segment files (the Workers Cache API). */
+/**
+ * Read-through cache for immutable segment files (the Workers Cache API).
+ * Keys are object keys, with "@offset+length" appended for a byte range.
+ */
 export type FtsFileCache = {
   match(key: string): Promise<Uint8Array | null>;
   put(key: string, body: Uint8Array): Promise<void>;
@@ -426,17 +473,22 @@ export type FtsFileCache = {
 
 const CACHE_ORIGIN = "https://fts-segments.livesync-workers.invalid/";
 
+function cacheUrl(key: string): string {
+  const at = key.lastIndexOf("@");
+  return at < 0 ? CACHE_ORIGIN + key : `${CACHE_ORIGIN}${key.slice(0, at)}?range=${key.slice(at + 1)}`;
+}
+
 /** Segment files never change, so they can be cached for as long as they exist. */
 export function ftsCacheFromWorkersCache(cache: Cache | undefined): FtsFileCache | undefined {
   if (!cache) return undefined;
   return {
     async match(key) {
-      const hit = await cache.match(CACHE_ORIGIN + key);
+      const hit = await cache.match(cacheUrl(key));
       return hit ? new Uint8Array(await hit.arrayBuffer()) : null;
     },
     async put(key, body) {
       await cache.put(
-        CACHE_ORIGIN + key,
+        cacheUrl(key),
         new Response(body, {
           headers: {
             "Content-Type": "application/octet-stream",
@@ -472,23 +524,33 @@ export async function ftsSearch(
   const base = basePrefix(ref);
   const cache = options.cache;
 
-  const fetchFile = async (key: string): Promise<Uint8Array | null> => {
+  const fetchBytes = async (
+    key: string,
+    range?: { offset: number; length: number },
+  ): Promise<Uint8Array | null> => {
+    const cacheKey = range ? `${key}@${range.offset}+${range.length}` : key;
     if (cache) {
-      const cached = await cache.match(key).catch(() => null);
+      const cached = await cache.match(cacheKey).catch(() => null);
       if (cached) return cached;
     }
-    const object = await bucket.get(key);
+    const object = await bucket.get(key, range ? { range } : undefined);
     if (!object) return null;
     const body = new Uint8Array(await object.arrayBuffer());
-    if (cache) await cache.put(key, body).catch(() => undefined);
+    if (cache) await cache.put(cacheKey, body).catch(() => undefined);
     return body;
   };
+  const filesOf = (segment: FtsSegment): SegmentFiles => ({
+    get: (name) => fetchBytes(`${base}/${segment.id}/${name}`),
+    getRange: (name, offset, length) => fetchBytes(`${base}/${segment.id}/${name}`, { offset, length }),
+  });
 
   const results: SegmentSearchResult[] = await Promise.all(
     manifest.segments.map((segment) =>
       searchSegment(phrases, {
         shardCount: manifest.shardCount,
-        fetchFile: (name) => fetchFile(`${base}/${segment.id}/${name}`),
+        bucketCount: FTS_BUCKET_COUNT,
+        format: segmentFormat(segment),
+        files: filesOf(segment),
       }),
     ),
   );

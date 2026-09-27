@@ -64,7 +64,7 @@ describe("fts-index segments", () => {
 
   it("reads a version-1 manifest as one legacy segment and retires it later", async () => {
     const { bucket, store } = memoryBucket();
-    const built = await buildIndex([{ path: "a.md", content: "旧世代の会議メモ" }]);
+    const built = await buildIndex([{ path: "a.md", content: "旧世代の会議メモ" }], { format: 1 });
     for (const [name, body] of built.files) await bucket.put(`fts/u1/v1/gen-old/${name}`, body);
     await bucket.put(
       "fts/u1/v1/manifest.json",
@@ -101,7 +101,7 @@ describe("fts-index segments", () => {
   });
 
   it("plans compaction of the two smallest segments only past the segment cap", async () => {
-    const segment = (id: string, totalChars: number) => ({ id, docCount: 1, totalChars, builtAt: 0, hashed: true });
+    const segment = (id: string, totalChars: number) => ({ id, docCount: 1, totalChars, builtAt: 0, hashed: true, format: 2 as const });
     const manifest: FtsManifest = {
       version: 2,
       shardCount: 16,
@@ -158,6 +158,46 @@ describe("fts-index segments", () => {
     expect((await ready(bucket, "会議メモ")).hits).toEqual([]);
     // Merged inputs stay on disk during the grace period.
     expect(segmentDirs(store).has(s1!.segment.id)).toBe(true);
+  });
+
+  it("upgrades a format-1 hashed segment to format 2 before merging anything", async () => {
+    const { bucket, store } = memoryBucket();
+    // A segment as 0.3.0 wrote it: whole-gzip shards, no index.bin, no format field.
+    const built = await buildIndex(
+      [
+        { path: "a.md", content: "京都の会議メモ", hash: "a1" },
+        { path: "gone.md", content: "消えた会議", hash: "g1" },
+      ],
+      { format: 1 },
+    );
+    for (const [name, body] of built.files) await bucket.put(`fts/u1/v1/seg-old/${name}`, body);
+    await bucket.put(
+      "fts/u1/v1/manifest.json",
+      JSON.stringify({
+        version: 2,
+        shardCount: 16,
+        segments: [{ id: "seg-old", docCount: 2, totalChars: 12, builtAt: 1, hashed: true }],
+        retired: [],
+        builtAt: 1,
+        docCount: 2,
+        totalChars: 12,
+      }),
+    );
+    expect((await ready(bucket, "会議")).hits.map((hit) => hit.path).sort()).toEqual(["a.md", "gone.md"]);
+
+    const manifest = (await readFtsManifest(bucket, ref))!;
+    const plan = planFtsCompaction(manifest, { maxSegments: 8 })!;
+    expect(plan.segments.map((s) => s.id)).toEqual(["seg-old"]);
+    const upgraded = await compactFtsSegments(bucket, ref, plan, {
+      isLive: (docs) => docs.map((doc) => doc.path === "a.md"),
+      now: 10,
+    });
+    expect(upgraded?.segment).toMatchObject({ docCount: 1, format: 2 });
+    expect(upgraded?.manifest.segments.map((s) => s.format)).toEqual([2]);
+    expect(planFtsCompaction(upgraded!.manifest, { maxSegments: 8 })).toBeNull();
+    expect(store.has(`fts/u1/v1/${upgraded!.segment.id}/index.bin`)).toBe(true);
+    expect((await ready(bucket, "会議")).hits.map((hit) => hit.path)).toEqual(["a.md"]);
+    expect((await ready(bucket, "会議メモ")).hits.map((hit) => hit.path)).toEqual(["a.md"]);
   });
 
   it("scores with BM25 across segments", async () => {

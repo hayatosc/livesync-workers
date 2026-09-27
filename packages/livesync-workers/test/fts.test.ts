@@ -162,45 +162,120 @@ describe("extractSnippet", () => {
   });
 });
 
-describe("mergeShards", () => {
-  it("produces the same shards as rebuilding from the kept docs", async () => {
-    const { mergeShards } = await import("../src/search/fts/merge.js");
-    const a: FtsDocInput[] = [
-      { path: "a0.md", content: "京都の会議メモ。LiveSync 設定" },
-      { path: "a1.md", content: "消える文書 会議" },
-      { path: "a2.md", content: "第1回のイベント" },
-    ];
-    const b: FtsDocInput[] = [
-      { path: "b0.md", content: "会議室の予約と検索" },
-      { path: "b1.md", content: "残る文書 メモ" },
-    ];
-    const [builtA, builtB] = await Promise.all([buildIndex(a), buildIndex(b)]);
-    // Drop a1 and b0; new ids: a0→0, a2→1, b1→2.
-    const kept = [a[0]!, a[2]!, b[1]!];
-    const expected = await buildIndex(kept);
+describe("mergeShard", () => {
+  const shardName = (shard: number, format: 1 | 2) => `shard-${String(shard).padStart(3, "0")}.bin${format === 1 ? ".gz" : ""}`;
+  async function decodeBucketed(data: Uint8Array, offsets: Uint32Array) {
+    const { decodeBucket, decodePostings } = await import("../src/search/fts/codec.js");
+    const result = new Map<string, Posting[]>();
+    for (let b = 0; b + 1 < offsets.length; b += 1) {
+      if (offsets[b + 1]! <= offsets[b]!) continue;
+      for (const entry of decodeBucket(await gunzip(data.subarray(offsets[b], offsets[b + 1])))) {
+        result.set(entry.term, decodePostings(entry.body, entry.docCount));
+      }
+    }
+    return result;
+  }
+  const a: FtsDocInput[] = [
+    { path: "a0.md", content: "京都の会議メモ。LiveSync 設定" },
+    { path: "a1.md", content: "消える文書 会議" },
+    { path: "a2.md", content: "第1回のイベント" },
+  ];
+  const b: FtsDocInput[] = [
+    { path: "b0.md", content: "会議室の予約と検索" },
+    { path: "b1.md", content: "残る文書 メモ" },
+  ];
+  // Drop a1 and b0; new ids: a0→0, a2→1, b1→2.
+  const kept = [a[0]!, a[2]!, b[1]!];
+
+  it("produces the same postings as rebuilding from the kept docs", async () => {
+    const { mergeShard } = await import("../src/search/fts/merge.js");
+    const { decodeSegmentIndex, DEFAULT_BUCKET_COUNT } = await import("../src/search/fts/codec.js");
+    const [builtA, builtB, expected] = await Promise.all([buildIndex(a), buildIndex(b), buildIndex(kept)]);
+    const index = (built: typeof builtA) =>
+      decodeSegmentIndex(built.files.get("index.bin")!, DEFAULT_SHARD_COUNT, DEFAULT_BUCKET_COUNT);
+    const [indexA, indexB, indexE] = [index(builtA), index(builtB), index(expected)];
     for (let shard = 0; shard < DEFAULT_SHARD_COUNT; shard += 1) {
-      const name = `shard-${String(shard).padStart(3, "0")}.bin.gz`;
-      const merged = mergeShards([
-        { data: await gunzip(builtA.files.get(name)!), remap: Int32Array.from([0, -1, 1]) },
-        { data: await gunzip(builtB.files.get(name)!), remap: Int32Array.from([-1, 2]) },
-      ]);
-      expect(decodeShard(merged)).toEqual(decodeShard(await gunzip(expected.files.get(name)!)));
+      const merged = await mergeShard(
+        [
+          { format: 2, data: builtA.files.get(shardName(shard, 2))!, offsets: indexA[shard]!, remap: Int32Array.from([0, -1, 1]) },
+          { format: 2, data: builtB.files.get(shardName(shard, 2))!, offsets: indexB[shard]!, remap: Int32Array.from([-1, 2]) },
+        ],
+        DEFAULT_BUCKET_COUNT,
+      );
+      expect(merged.offsets).toEqual(indexE[shard]);
+      expect(await decodeBucketed(merged.data, merged.offsets)).toEqual(
+        await decodeBucketed(expected.files.get(shardName(shard, 2))!, indexE[shard]!),
+      );
+    }
+  });
+
+  it("reads format-1 inputs and writes format 2 (the upgrade path)", async () => {
+    const { mergeShard } = await import("../src/search/fts/merge.js");
+    const { decodeSegmentIndex, DEFAULT_BUCKET_COUNT } = await import("../src/search/fts/codec.js");
+    const [oldA, oldB, expected] = await Promise.all([
+      buildIndex(a, { format: 1 }),
+      buildIndex(b, { format: 1 }),
+      buildIndex(kept),
+    ]);
+    const indexE = decodeSegmentIndex(expected.files.get("index.bin")!, DEFAULT_SHARD_COUNT, DEFAULT_BUCKET_COUNT);
+    for (let shard = 0; shard < DEFAULT_SHARD_COUNT; shard += 1) {
+      const merged = await mergeShard(
+        [
+          { format: 1, data: oldA.files.get(shardName(shard, 1))!, remap: Int32Array.from([0, -1, 1]) },
+          { format: 1, data: oldB.files.get(shardName(shard, 1))!, remap: Int32Array.from([-1, 2]) },
+        ],
+        DEFAULT_BUCKET_COUNT,
+      );
+      expect(merged.data).toEqual(expected.files.get(shardName(shard, 2)));
     }
   });
 
   it("skips missing inputs and terms that lose every doc", async () => {
-    const { mergeShards } = await import("../src/search/fts/merge.js");
+    const { mergeShard } = await import("../src/search/fts/merge.js");
+    const { decodeSegmentIndex, DEFAULT_BUCKET_COUNT } = await import("../src/search/fts/codec.js");
     const built = await buildIndex([{ path: "x.md", content: "abc def" }, { path: "y.md", content: "def" }]);
-    const shard = (term: string) => `shard-${String(shardForTerm(term, DEFAULT_SHARD_COUNT)).padStart(3, "0")}.bin.gz`;
-    const merged = decodeShard(
-      mergeShards([
-        { data: null, remap: Int32Array.from([]) },
-        { data: await gunzip(built.files.get(shard("abc"))!), remap: Int32Array.from([-1, 0]) },
-      ]),
+    const index = decodeSegmentIndex(built.files.get("index.bin")!, DEFAULT_SHARD_COUNT, DEFAULT_BUCKET_COUNT);
+    const shard = shardForTerm("abc", DEFAULT_SHARD_COUNT);
+    const merged = await mergeShard(
+      [
+        { format: 2, data: null, remap: Int32Array.from([]) },
+        { format: 2, data: built.files.get(shardName(shard, 2))!, offsets: index[shard]!, remap: Int32Array.from([-1, 0]) },
+      ],
+      DEFAULT_BUCKET_COUNT,
     );
-    expect(merged.has("abc")).toBe(false);
-    if (shardForTerm("def", DEFAULT_SHARD_COUNT) === shardForTerm("abc", DEFAULT_SHARD_COUNT)) {
-      expect(merged.get("def")).toEqual([{ doc: 0, positions: [0] }]);
+    const decoded = await decodeBucketed(merged.data, merged.offsets);
+    expect(decoded.has("abc")).toBe(false);
+    if (shardForTerm("def", DEFAULT_SHARD_COUNT) === shard) {
+      expect(decoded.get("def")).toEqual([{ doc: 0, positions: [0] }]);
     }
+  });
+});
+
+describe("coveringTokens", () => {
+  it("keeps every other bigram of a CJK run and still matches exactly", async () => {
+    const { coveringTokens } = await import("../src/search/fts/search.js");
+    const { chars } = normalizeText("神霊の力を持った女性絵師");
+    const tokens = tokenize(chars, "query");
+    expect(tokens).toHaveLength(11);
+    const chosen = coveringTokens(tokens);
+    expect(chosen.map((t) => t.pos)).toEqual([0, 2, 4, 6, 8, 10]);
+    // Exactness: the pruned tokens reject a doc where the middle differs.
+    const docs: FtsDocInput[] = [
+      { path: "hit.md", content: "神霊の力を持った女性絵師の話" },
+      { path: "near.md", content: "神霊の力を持った男性絵師の話" },
+      { path: "split.md", content: "神霊の力を、持った女性絵師" },
+    ];
+    expect(paths(await search(docs, "神霊の力を持った女性絵師"))).toEqual(["hit.md"]);
+  });
+
+  it("keeps single tokens and mixed runs intact", async () => {
+    const { coveringTokens } = await import("../src/search/fts/search.js");
+    const one = tokenize(normalizeText("livesync").chars, "query");
+    expect(coveringTokens(one)).toEqual(one);
+    const mixed = tokenize(normalizeText("第1回目").chars, "query");
+    const chosen = coveringTokens(mixed);
+    const covered = new Set<number>();
+    for (const t of chosen) for (let i = 0; i < [...t.term].length; i += 1) covered.add(t.pos + i);
+    expect([...covered].sort((x, y) => x - y)).toEqual([0, 1, 2, 3]);
   });
 });

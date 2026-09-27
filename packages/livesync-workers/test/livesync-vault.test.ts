@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { hashText, splitNoteContentForChunks } from "../src/index.js";
 import { ftsSearch, readFtsManifest } from "../src/search/fts-index.js";
+import { buildIndex } from "../src/search/fts/build.js";
 import { memoryBucket, TestVaultDO, testEnv } from "./helpers.js";
 
 type SqliteRow = Record<string, string | number | null>;
@@ -456,7 +457,8 @@ describe("LiveSync Vectorize indexing", () => {
     expect(status.fts.error).toBeNull();
     const puts = vi.mocked(env.FTS_BUCKET.put).mock.calls.map(([key]) => String(key));
     expect(puts.filter((key) => key.endsWith("/manifest.json"))).toHaveLength(1);
-    expect(puts.filter((key) => /shard-\d{3}\.bin\.gz$/.test(key))).toHaveLength(16);
+    expect(puts.filter((key) => /shard-\d{3}\.bin$/.test(key))).toHaveLength(16);
+    expect(puts.filter((key) => key.endsWith("/index.bin"))).toHaveLength(1);
   });
 
   it("gives up with an explicit error when the vault exceeds the FTS size guard", async () => {
@@ -668,6 +670,50 @@ describe("LiveSync Vectorize indexing", () => {
     expect(await json(await internalOp(durableObject, { op: "indexStatus" }))).toMatchObject({
       fts: { pending: 0, rebuildAt: null, error: null },
     });
+  });
+
+  it("rewrites segments of an older shard format after an index-version upgrade", async () => {
+    const context = await created();
+    const { bucket, store } = memoryBucket();
+    context.env.FTS_BUCKET = bucket;
+    const { durableObject, storage } = context;
+    const ref = { tenantId: "user-1", databaseName: "vault" };
+    await replicate(durableObject, [leafDoc("h:a", "旧形式の会議メモ"), noteDoc("a.md", "1-a", "a.md", ["h:a"])]);
+    await durableObject.alarm();
+    storage.sql.exec(`UPDATE meta SET value = '0' WHERE key = 'fts_rebuild_at'`);
+    await durableObject.alarm();
+    const fresh = (await readFtsManifest(bucket, ref))!;
+    expect(fresh.segments.map((s) => s.format)).toEqual([2]);
+
+    // Replace it with the same content as 0.3.0 wrote it (format 1, no index.bin).
+    const hash = await hashText("旧形式の会議メモ");
+    const old = await buildIndex([{ path: "a.md", content: "旧形式の会議メモ", hash }], { format: 1 });
+    for (const [name, body] of old.files) await bucket.put(`fts/user-1/vault/seg-old/${name}`, body);
+    await bucket.put(
+      "fts/user-1/vault/manifest.json",
+      JSON.stringify({ ...fresh, segments: [{ id: "seg-old", docCount: 1, totalChars: 8, builtAt: 1, hashed: true }] }),
+    );
+    storage.sql.exec(`UPDATE meta SET value = '2' WHERE key = 'fts_index_version'`);
+    storage.sql.exec(`DELETE FROM meta WHERE key = 'fts_rebuild_at'`);
+
+    // The upgraded object arms a pass; the first request schedules its alarm.
+    const upgraded = new TestVaultDO({ storage, id: { name: "user-1:vault" } } as unknown as DurableObjectState, context.env);
+    vi.mocked(storage.setAlarm).mockClear();
+    (upgraded as unknown as { lastIndexScheduleAt: number }).lastIndexScheduleAt = 0;
+    await upgraded.fetch(new Request("https://db/_changes?since=0"));
+    expect(storage.setAlarm).toHaveBeenCalled();
+    await upgraded.alarm();
+    const after = (await readFtsManifest(bucket, ref))!;
+    expect(after.segments.map((s) => s.format)).toEqual([2]);
+    expect(after.segments[0]!.id).not.toBe("seg-old");
+    expect(after.retired.map((r) => r.id)).toEqual(["seg-old"]);
+    expect(store.has(`fts/user-1/vault/${after.segments[0]!.id}/index.bin`)).toBe(true);
+    await upgraded.alarm();
+    expect(await json(await internalOp(upgraded, { op: "indexStatus" }))).toMatchObject({
+      fts: { pending: 0, rebuildAt: null, error: null },
+    });
+    const result = await ftsSearch(bucket, ref, "会議メモ", 5);
+    expect(result.status === "ready" && result.hits.map((hit) => hit.path)).toEqual(["a.md"]);
   });
 
   it("purge removes indexed vectors", async () => {

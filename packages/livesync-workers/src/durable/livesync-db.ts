@@ -120,10 +120,12 @@ const INDEX_RETRY_DELAY_MS = 30_000;
 const INDEX_MAX_ATTEMPTS = 20;
 // Newest segment the built-in full-text index wrote (shown as fts.generation).
 const FTS_GENERATION_META_KEY = "fts_generation";
-// Layout of the built-in index this code writes. "2" = per-note segments;
-// the previous whole-vault generation had no version meta.
+// Layout of the built-in index this code writes: "2" = per-note segments,
+// "3" = bucketed shards read by range. The whole-vault generation before
+// them had no version meta. A change arms a maintenance pass, which
+// rewrites what the new code cannot read efficiently.
 const FTS_INDEX_VERSION_META_KEY = "fts_index_version";
-const CURRENT_FTS_INDEX_VERSION = "2";
+const CURRENT_FTS_INDEX_VERSION = "3";
 const FTS_REBUILD_AT_META_KEY = "fts_rebuild_at";
 // Why the last pass gave up; cleared by the next successful pass.
 const FTS_ERROR_META_KEY = "fts_error";
@@ -695,9 +697,11 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     if (this.getMeta(FTS_INDEX_VERSION_META_KEY) !== CURRENT_FTS_INDEX_VERSION) {
       // Upgrading from the whole-vault build: its "too large" / "interrupted"
       // verdicts do not apply to the segmented index, which picks up every
-      // note (fts_hash is NULL for all of them) in bounded passes.
+      // note (fts_hash is NULL for all of them) in bounded passes. Arming a
+      // pass also lets the maintenance step rewrite older segment formats.
       sql.exec(`DELETE FROM meta WHERE key = ?`, FTS_ERROR_META_KEY);
       this.setMeta(FTS_INDEX_VERSION_META_KEY, CURRENT_FTS_INDEX_VERSION);
+      this.armFtsBuild(0);
     }
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_revs_id ON revs (id)`);
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_revs_parent ON revs (id, parent_rev)`);
@@ -1445,7 +1449,11 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         ) != null
       );
     }
-    if (this.getMeta(FTS_REBUILD_AT_META_KEY) || this.getMeta(FTS_ERROR_META_KEY)) return false;
+    if (this.getMeta(FTS_ERROR_META_KEY)) return false;
+    const due = Number(this.getMeta(FTS_REBUILD_AT_META_KEY)) || null;
+    // A pass whose time has come but whose alarm was lost (reset, upgrade)
+    // counts as backlog too; the alarm this schedules runs it.
+    if (due != null) return due <= Date.now();
     return this.hasFtsPending();
   }
 

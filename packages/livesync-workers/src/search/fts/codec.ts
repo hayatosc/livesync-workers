@@ -270,3 +270,176 @@ export async function gzip(data: Uint8Array): Promise<Uint8Array> {
 export async function gunzip(data: Uint8Array): Promise<Uint8Array> {
   return pipeThrough(data, new DecompressionStream("gzip"));
 }
+
+// ---------------------------------------------------------------------------
+// Shard format 2: buckets
+//
+// A format-2 shard file is a plain concatenation of independently gzipped
+// buckets; the segment's index.bin holds each bucket's byte range, so a
+// search reads only the buckets its terms hash into (R2 range reads) instead
+// of the whole shard. Terms are assigned by the bits of fnv1a above the shard
+// bits, so the two splits are independent.
+//
+// Bucket layout (before gzip):
+//   term count varint, then per term (sorted by term):
+//     term byte length varint, term bytes, doc count varint,
+//     body byte length varint, body (docId/position delta varints, as in v1)
+// ---------------------------------------------------------------------------
+
+export const SHARD_FORMAT_VERSION_2 = 2;
+export const DEFAULT_BUCKET_COUNT = 64;
+
+export function bucketForTerm(term: string, bucketCount: number): number {
+  return Math.floor(fnv1a(term) / 16) % bucketCount;
+}
+
+/** One term's postings in their encoded form. */
+export type TermEntry = { term: string; docCount: number; body: Uint8Array };
+
+export function encodeBucket(entries: TermEntry[]): Uint8Array {
+  const writer = new ByteWriter();
+  const encoder = new TextEncoder();
+  const sorted = [...entries].sort((a, b) => (a.term < b.term ? -1 : a.term > b.term ? 1 : 0));
+  writer.varint(sorted.length);
+  for (const entry of sorted) {
+    const termBytes = encoder.encode(entry.term);
+    writer.varint(termBytes.length);
+    writer.bytes(termBytes);
+    writer.varint(entry.docCount);
+    writer.varint(entry.body.length);
+    writer.bytes(entry.body);
+  }
+  return writer.toUint8Array();
+}
+
+/** All entries of a (gunzipped) bucket, bodies as views into `data`. */
+export function decodeBucket(data: Uint8Array): TermEntry[] {
+  const reader = new ByteReader(data);
+  const decoder = new TextDecoder();
+  const count = reader.varint();
+  const entries: TermEntry[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const term = decoder.decode(reader.bytes(reader.varint()));
+    const docCount = reader.varint();
+    const body = reader.bytes(reader.varint());
+    entries.push({ term, docCount, body });
+  }
+  return entries;
+}
+
+/** Postings of the wanted terms in a (gunzipped) bucket; terms not present map to []. */
+export function decodeBucketTerms(data: Uint8Array, wanted: Iterable<string>): Map<string, Posting[]> {
+  const want = new Set(wanted);
+  const result = new Map<string, Posting[]>();
+  for (const term of want) result.set(term, []);
+  for (const entry of decodeBucket(data)) {
+    if (!want.has(entry.term)) continue;
+    result.set(entry.term, decodePostings(entry.body, entry.docCount));
+  }
+  return result;
+}
+
+export function decodePostings(body: Uint8Array, docCount: number): Posting[] {
+  const reader = new ByteReader(body);
+  const postings: Posting[] = [];
+  let doc = 0;
+  for (let d = 0; d < docCount; d += 1) {
+    doc += reader.varint();
+    const posCount = reader.varint();
+    const positions: number[] = [];
+    let pos = 0;
+    for (let p = 0; p < posCount; p += 1) {
+      pos += reader.varint();
+      positions.push(pos);
+    }
+    postings.push({ doc, positions });
+  }
+  return postings;
+}
+
+/** Entries of a format-1 shard (gunzipped) without decoding the postings. */
+export function readShardEntries(data: Uint8Array): TermEntry[] {
+  const reader = new ByteReader(data);
+  for (const byte of MAGIC) {
+    if (reader.u8() !== byte) throw new Error("Bad shard magic");
+  }
+  const version = reader.varint();
+  if (version !== SHARD_FORMAT_VERSION) {
+    throw new Error(`Unsupported shard format version ${version}`);
+  }
+  const termCount = reader.varint();
+  const decoder = new TextDecoder();
+  const entries: TermEntry[] = [];
+  for (let t = 0; t < termCount; t += 1) {
+    const term = decoder.decode(reader.bytes(reader.varint()));
+    const docCount = reader.varint();
+    const start = reader.offset;
+    for (let d = 0; d < docCount; d += 1) {
+      reader.varint(); // doc delta
+      reader.skipVarints(reader.varint());
+    }
+    entries.push({ term, docCount, body: reader.slice(start, reader.offset) });
+  }
+  return entries;
+}
+
+export type BucketedShard = {
+  /** Concatenated gzipped buckets. */
+  data: Uint8Array;
+  /** Byte offset of each bucket, plus the total length (bucketCount + 1 entries). */
+  offsets: Uint32Array;
+};
+
+/** Group entries into buckets and gzip each; empty buckets take no bytes. */
+export async function encodeBucketedShard(
+  entries: Iterable<TermEntry>,
+  bucketCount: number,
+): Promise<BucketedShard> {
+  const buckets: TermEntry[][] = Array.from({ length: bucketCount }, () => []);
+  for (const entry of entries) buckets[bucketForTerm(entry.term, bucketCount)]!.push(entry);
+  const compressed = await Promise.all(
+    buckets.map((bucket) => (bucket.length === 0 ? null : gzip(encodeBucket(bucket)))),
+  );
+  const offsets = new Uint32Array(bucketCount + 1);
+  let total = 0;
+  compressed.forEach((chunk, i) => {
+    offsets[i] = total;
+    total += chunk?.length ?? 0;
+  });
+  offsets[bucketCount] = total;
+  const data = new Uint8Array(total);
+  compressed.forEach((chunk, i) => {
+    if (chunk) data.set(chunk, offsets[i]!);
+  });
+  return { data, offsets };
+}
+
+/**
+ * index.bin: for each shard, bucketCount + 1 little-endian u32 offsets.
+ * Read with {@link decodeSegmentIndex}.
+ */
+export function encodeSegmentIndex(shards: BucketedShard[], bucketCount: number): Uint8Array {
+  const out = new Uint8Array(shards.length * (bucketCount + 1) * 4);
+  const view = new DataView(out.buffer);
+  shards.forEach((shard, s) => {
+    for (let b = 0; b <= bucketCount; b += 1) {
+      view.setUint32((s * (bucketCount + 1) + b) * 4, shard.offsets[b]!, true);
+    }
+  });
+  return out;
+}
+
+export function decodeSegmentIndex(data: Uint8Array, shardCount: number, bucketCount: number): Uint32Array[] {
+  const stride = bucketCount + 1;
+  if (data.length !== shardCount * stride * 4) {
+    throw new Error(`FTS segment index has ${data.length} bytes, expected ${shardCount * stride * 4}`);
+  }
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const shards: Uint32Array[] = [];
+  for (let s = 0; s < shardCount; s += 1) {
+    const offsets = new Uint32Array(stride);
+    for (let b = 0; b < stride; b += 1) offsets[b] = view.getUint32((s * stride + b) * 4, true);
+    shards.push(offsets);
+  }
+  return shards;
+}

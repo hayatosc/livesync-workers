@@ -119,7 +119,7 @@ MCP client ──OAuth──▶ Worker ──▶ VaultMCP (McpAgent) ──▶ v
 ```
 
 - Longpoll and continuous `_changes` feeds are waited on in the Worker over a hibernatable WebSocket, so the Durable Object sleeps between writes.
-- The full-text index lives in R2 as immutable segments: each indexing pass (debounced 2 minutes after the last change) writes one segment holding only the notes that changed, and idle passes merge small segments. Ranking is BM25 over the query phrases.
+- The full-text index lives in R2 as immutable segments: each indexing pass (debounced 2 minutes after the last change) writes one segment holding only the notes that changed, and idle passes merge small segments. Postings are stored in small gzipped buckets that a search reads by byte range, so query cost follows the terms asked for rather than the index size. Ranking is BM25 over the query phrases.
 - Vectors live in a Vectorize namespace per vault.
 
 ## Using it as a library
