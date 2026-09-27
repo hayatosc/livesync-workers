@@ -637,6 +637,16 @@ describe("LiveSync Vectorize indexing", () => {
     await bucket.put("fts/user-1/vault/gen-old/docs.json.gz", new Uint8Array([1]));
     storage.sql.exec(`DELETE FROM meta WHERE key = 'fts_rebuild_at'`);
     storage.sql.exec(`UPDATE index_state SET fts_hash = NULL`);
+    // ...including the old build's verdict, which a fresh object clears on its first start.
+    storage.sql.exec(`INSERT INTO meta (key, value) VALUES ('fts_error', 'vault exceeds the full-text size guard')`);
+    storage.sql.exec(`DELETE FROM meta WHERE key = 'fts_index_version'`);
+    const upgraded = new TestVaultDO(
+      { storage, id: { name: "user-1:vault" } } as unknown as DurableObjectState,
+      context.env,
+    );
+    expect(await json(await internalOp(upgraded, { op: "indexStatus" }))).toMatchObject({
+      fts: { error: null, pending: 1 },
+    });
 
     // Legacy docs count as current until the note is written to a hashed segment.
     const live = async () =>
