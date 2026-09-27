@@ -9,24 +9,23 @@ export type FtsDocInput = {
   content: string;
   title?: string;
   mtime?: number;
+  /**
+   * Content hash (sha256 hex) of `content`. Segments are immutable, so a
+   * search checks each hit's (path, hash) against the vault's current state
+   * to drop versions that were replaced or deleted since the segment was built.
+   */
+  hash?: string;
 };
 
-/** Entry in docs.json.gz; the docId is the array index (generation-local). */
+/** Entry in docs.json.gz; the docId is the array index (segment-local). */
 export type FtsDocMeta = {
   path: string;
   title?: string;
-  /** Normalized char count, used for score normalization and sanity checks. */
+  /** Normalized char count (BM25 document length). */
   chars: number;
   mtime?: number;
-};
-
-export type FtsManifest = {
-  version: 1;
-  generation: string;
-  shardCount: number;
-  docCount: number;
-  totalChars: number;
-  builtAt: number;
+  /** Content hash the segment was built from; absent in legacy generations. */
+  hash?: string;
 };
 
 export type FtsBuildResult = {
@@ -43,13 +42,13 @@ export function shardFileName(shard: number): string {
 export const DOCS_FILE_NAME = "docs.json.gz";
 
 /**
- * Build a complete index generation in memory. Pure apart from gzip; callers
- * decide the generation id and where the files live (R2, disk, memory).
- * Memory is dominated by the encoded postings (a few bytes per code point)
- * plus per-term bookkeeping; see PostingsBuilder.
+ * Build one complete segment in memory. Pure apart from gzip; callers decide
+ * the segment id and where the files live (R2, disk, memory). Memory is
+ * dominated by the encoded postings (a few bytes per code point) plus
+ * per-term bookkeeping; see PostingsBuilder.
  */
 export async function buildIndex(
-  inputs: Iterable<FtsDocInput>,
+  inputs: Iterable<FtsDocInput> | AsyncIterable<FtsDocInput>,
   options: { shardCount?: number } = {},
 ): Promise<FtsBuildResult> {
   const shardCount = options.shardCount ?? DEFAULT_SHARD_COUNT;
@@ -60,7 +59,7 @@ export async function buildIndex(
 
   // Inputs may be a lazy generator so callers can read one note at a time
   // instead of holding every body in memory alongside the postings.
-  for (const input of inputs) {
+  for await (const input of inputs) {
     const docId = docs.length;
     const { chars } = normalizeText(input.content);
     docs.push({
@@ -68,6 +67,7 @@ export async function buildIndex(
       ...(input.title !== undefined ? { title: input.title } : {}),
       chars: chars.length,
       ...(input.mtime !== undefined ? { mtime: input.mtime } : {}),
+      ...(input.hash !== undefined ? { hash: input.hash } : {}),
     });
     totalChars += chars.length;
 

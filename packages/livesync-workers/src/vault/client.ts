@@ -2,7 +2,7 @@ import { INTERNAL_SECRET_HEADER } from "../livesync/http.js";
 import { vaultStub } from "../livesync/handler.js";
 import { hashText } from "../search/chunk-md.js";
 import { vectorSearch, type VectorSearchHit } from "../search/vector-index.js";
-import { ftsSearch, readFtsPhase } from "../search/fts-index.js";
+import { defaultFtsCache, ftsSearch, readFtsPhase } from "../search/fts-index.js";
 import { extractSnippet } from "../search/fts/search.js";
 import {
   isReservedPath,
@@ -40,10 +40,14 @@ export type VaultIndexStatus = {
   indexed: number;
   pending: number;
   fts?: {
+    /** Newest segment written by the built-in index. */
     generation: string | null;
+    /** When the next indexing pass is due, or null when nothing is waiting. */
     rebuildAt: number | null;
-    /** Why the last rebuild gave up (vault too large, repeated resets); null when healthy. */
+    /** Why the last pass gave up (vault too large, repeated resets); null when healthy. */
     error?: string | null;
+    /** Notes changed since the built-in index last wrote them. */
+    pending?: number;
   };
   /** Progress of an external full-text index (`VaultBindings.fullText`), per note. */
   fullText?: { indexed: number; pending: number };
@@ -54,6 +58,9 @@ export type FullTextSearchResult =
   | { status: "building"; debug?: Record<string, unknown> | null };
 
 const FTS_SNIPPETS_PER_DOC = 3;
+// Segments keep replaced/deleted versions until compaction, so ask the index
+// for more candidates than needed and let the vault drop the stale ones.
+const FTS_OVERFETCH = 4;
 
 /** Operations on one vault, with the policy's reserved paths enforced. */
 export interface Vault {
@@ -249,29 +256,41 @@ class VaultClient implements Vault {
     }
     const bucket = this.bindings.bucket;
     if (!bucket) throw new Error("VaultBindings needs either bucket or fullText");
-    const result = await ftsSearch(bucket, this.ref, query, limit);
+    const result = await ftsSearch(bucket, this.ref, query, limit * FTS_OVERFETCH + 20, {
+      ...(defaultFtsCache() ? { cache: defaultFtsCache()! } : {}),
+    });
     if (result.status === "not-built") {
       await this.internalResponse({ op: "ftsRebuild" });
-      // The last phase marker the rebuild reached; survives DO resets.
+      // The last phase marker the index reached; survives DO resets.
       const debug = await readFtsPhase(bucket, this.ref);
       return { status: "building", debug };
     }
-    const hits = result.hits.filter((hit) => !this.hidden(hit.path));
-    const contents = await this.readNotes(hits.map((hit) => hit.path));
-    const withSnippets: FullTextSearchHit[] = hits.map((hit) => {
-      const content = contents[hit.path];
-      return {
+    const candidates = result.hits.filter((hit) => !this.hidden(hit.path));
+    // The vault keeps the current versions, drops the rest, and returns the
+    // bodies for snippets in the same round trip.
+    const resolved = await this.internal<{
+      hits: Array<{ path: string; hash: string | null; content: string | null }>;
+    }>({
+      op: "resolveFtsHits",
+      candidates: candidates.map((hit) => ({ path: hit.path, hash: hit.hash })),
+      limit,
+    });
+    const withSnippets: FullTextSearchHit[] = [];
+    for (const live of resolved.hits) {
+      const hit = candidates.find((c) => c.path === live.path && c.hash === live.hash);
+      if (!hit) continue;
+      withSnippets.push({
         path: hit.path,
         score: hit.score,
         matchCount: hit.matches.length,
         snippets:
-          content == null
+          live.content == null
             ? []
             : hit.matches
                 .slice(0, FTS_SNIPPETS_PER_DOC)
-                .map((match) => extractSnippet(content, match)),
-      };
-    });
+                .map((match) => extractSnippet(live.content!, match)),
+      });
+    }
     return {
       status: "ready",
       hits: withSnippets,

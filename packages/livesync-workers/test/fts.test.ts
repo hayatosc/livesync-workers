@@ -161,3 +161,46 @@ describe("extractSnippet", () => {
     expect(snippet.after).toBe("はここ。後");
   });
 });
+
+describe("mergeShards", () => {
+  it("produces the same shards as rebuilding from the kept docs", async () => {
+    const { mergeShards } = await import("../src/search/fts/merge.js");
+    const a: FtsDocInput[] = [
+      { path: "a0.md", content: "京都の会議メモ。LiveSync 設定" },
+      { path: "a1.md", content: "消える文書 会議" },
+      { path: "a2.md", content: "第1回のイベント" },
+    ];
+    const b: FtsDocInput[] = [
+      { path: "b0.md", content: "会議室の予約と検索" },
+      { path: "b1.md", content: "残る文書 メモ" },
+    ];
+    const [builtA, builtB] = await Promise.all([buildIndex(a), buildIndex(b)]);
+    // Drop a1 and b0; new ids: a0→0, a2→1, b1→2.
+    const kept = [a[0]!, a[2]!, b[1]!];
+    const expected = await buildIndex(kept);
+    for (let shard = 0; shard < DEFAULT_SHARD_COUNT; shard += 1) {
+      const name = `shard-${String(shard).padStart(3, "0")}.bin.gz`;
+      const merged = mergeShards([
+        { data: await gunzip(builtA.files.get(name)!), remap: Int32Array.from([0, -1, 1]) },
+        { data: await gunzip(builtB.files.get(name)!), remap: Int32Array.from([-1, 2]) },
+      ]);
+      expect(decodeShard(merged)).toEqual(decodeShard(await gunzip(expected.files.get(name)!)));
+    }
+  });
+
+  it("skips missing inputs and terms that lose every doc", async () => {
+    const { mergeShards } = await import("../src/search/fts/merge.js");
+    const built = await buildIndex([{ path: "x.md", content: "abc def" }, { path: "y.md", content: "def" }]);
+    const shard = (term: string) => `shard-${String(shardForTerm(term, DEFAULT_SHARD_COUNT)).padStart(3, "0")}.bin.gz`;
+    const merged = decodeShard(
+      mergeShards([
+        { data: null, remap: Int32Array.from([]) },
+        { data: await gunzip(built.files.get(shard("abc"))!), remap: Int32Array.from([-1, 0]) },
+      ]),
+    );
+    expect(merged.has("abc")).toBe(false);
+    if (shardForTerm("def", DEFAULT_SHARD_COUNT) === shardForTerm("abc", DEFAULT_SHARD_COUNT)) {
+      expect(merged.get("def")).toEqual([{ doc: 0, positions: [0] }]);
+    }
+  });
+});

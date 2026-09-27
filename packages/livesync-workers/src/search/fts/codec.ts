@@ -61,6 +61,41 @@ export class ByteWriter {
     this.len += data.length;
   }
 
+  get length(): number {
+    return this.len;
+  }
+
+  /** Forget everything written so far (keeps the buffer). */
+  reset(): void {
+    this.len = 0;
+  }
+
+  /** The written bytes as a view; invalid after the next write. */
+  view(): Uint8Array {
+    return this.buf.subarray(0, this.len);
+  }
+
+  /** A 5-byte varint (values below 2^35) whose slot can be patched later. */
+  fixedVarint(value: number): void {
+    this.ensure(5);
+    this.writeFixedVarint(this.len, value);
+    this.len += 5;
+  }
+
+  patchFixedVarint(at: number, value: number): void {
+    this.writeFixedVarint(at, value);
+  }
+
+  private writeFixedVarint(at: number, value: number): void {
+    if (value < 0 || value >= 2 ** 35) throw new Error(`fixed varint out of range: ${value}`);
+    let v = value;
+    for (let i = 0; i < 5; i += 1) {
+      const last = i === 4;
+      this.buf[at + i] = (v % 128) | (last ? 0 : 0x80);
+      v = Math.floor(v / 128);
+    }
+  }
+
   toUint8Array(): Uint8Array {
     return this.buf.slice(0, this.len);
   }
@@ -76,6 +111,25 @@ export class ByteReader {
 
   get eof(): boolean {
     return this.pos >= this.buf.length;
+  }
+
+  /** Current read offset, for slicing already-encoded runs back out. */
+  get offset(): number {
+    return this.pos;
+  }
+
+  /** Raw bytes between two offsets (a view, not a copy). */
+  slice(start: number, end: number): Uint8Array {
+    return this.buf.subarray(start, end);
+  }
+
+  /** Skip `count` varints without decoding them. */
+  skipVarints(count: number): void {
+    for (let i = 0; i < count; i += 1) {
+      while ((this.u8() & 0x80) !== 0) {
+        // continue
+      }
+    }
   }
 
   u8(): number {

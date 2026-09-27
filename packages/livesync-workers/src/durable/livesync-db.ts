@@ -1,10 +1,16 @@
 import { hashText } from "../search/chunk-md.js";
 import { removeNoteVectors, upsertNoteVectors } from "../search/vector-index.js";
 import {
+  appendFtsSegment,
+  compactFtsSegments,
   deleteFtsIndex,
+  FTS_SETTLED_PHASES,
   markFtsPhase,
+  planFtsCompaction,
+  readFtsManifest,
   readFtsPhase,
-  rebuildFtsIndex,
+  retireFtsSegments,
+  type FtsManifest,
 } from "../search/fts-index.js";
 import type { FtsDocInput } from "../search/fts/build.js";
 import {
@@ -92,7 +98,7 @@ type IndexStateRow = {
   chunks: number;
   pending: number;
   attempts: number;
-  /** Content hash last written to the external full-text index (null = not there yet). */
+  /** Content hash last written to the full-text index (null = not there yet). */
   fts_hash: string | null;
 };
 
@@ -112,26 +118,36 @@ const INDEX_BATCH_SIZE = 200;
 const INDEX_ALARM_DELAY_MS = 1_500;
 const INDEX_RETRY_DELAY_MS = 30_000;
 const INDEX_MAX_ATTEMPTS = 20;
+// Newest segment the built-in full-text index wrote (shown as fts.generation).
 const FTS_GENERATION_META_KEY = "fts_generation";
 const FTS_REBUILD_AT_META_KEY = "fts_rebuild_at";
-// Why the last rebuild gave up; cleared by the next successful rebuild.
+// Why the last pass gave up; cleared by the next successful pass.
 const FTS_ERROR_META_KEY = "fts_error";
-// Full FTS rebuilds are cheap at vault scale but write ~20 R2 objects, so
-// wait for the vault to go quiet before rebuilding.
-const FTS_REBUILD_DEBOUNCE_MS = 5 * 60_000;
-const FTS_REBUILD_RETRY_MS = 60_000;
-// Guard rails for the in-DO full rebuild. Sizes are JS code units (what the
-// tokenizer walks), not UTF-8 bytes: 8M code units is ~20 MB of Japanese
-// Markdown. Measured 2026-09: the build needs ~10 bytes of heap per code unit
-// and ~1.8 s of DO CPU per million, so this stays under the 128 MB / 30 s
-// limits with headroom. Bigger vaults need the segmented index, not a bigger
-// number here.
-const FTS_MAX_TOTAL_CODE_UNITS = 8_000_000;
+// Every full-text pass writes a segment (~18 R2 objects), so wait for the
+// vault to go quiet before writing one for a burst of edits.
+const FTS_BUILD_DEBOUNCE_MS = 2 * 60_000;
+const FTS_BUILD_RETRY_MS = 60_000;
+// One pass indexes at most this much note text (JS code units, what the
+// tokenizer walks) into one segment. Measured 2026-09: ~10 bytes of heap and
+// ~1.5 s of DO CPU per million code units, so a pass stays well under the
+// 128 MB / 30 s Durable Object limits; a big backlog takes several passes.
+const FTS_SEGMENT_MAX_CODE_UNITS = 2_000_000;
+const FTS_SEGMENT_MAX_DOCS = 4_000;
+// Ceiling on the whole index (sum of segment text); passes stop with an
+// explicit error above it. 50M code units is ~120 MB of Japanese Markdown.
+const FTS_MAX_TOTAL_CODE_UNITS = 50_000_000;
 const FTS_MAX_NOTE_BYTES = 2_000_000;
-// A rebuild that dies from a memory reset leaves no SQLite trace (the event's
-// writes roll back), so attempts are counted in the R2 phase marker. After this
-// many interrupted attempts the rebuild is disarmed instead of looping forever.
-const FTS_MAX_REBUILD_ATTEMPTS = 3;
+// A pass that dies from a memory reset leaves no SQLite trace (the event's
+// writes roll back), so attempts are counted in the R2 phase marker. After
+// this many interrupted attempts the index is disarmed instead of looping.
+const FTS_MAX_BUILD_ATTEMPTS = 3;
+// Compaction merges the two smallest segments once there are more than this
+// many, as long as the merged text stays under the char bound (one merge per
+// alarm event, no re-tokenizing).
+const FTS_COMPACT_MAX_SEGMENTS = 8;
+const FTS_COMPACT_MAX_MERGED_CHARS = 16_000_000;
+// Most candidates one search asks the vault to check against its current state.
+const FTS_RESOLVE_MAX_CANDIDATES = 500;
 // External full-text index (VaultBindings.fullText): notes already
 // vector-indexed but not yet written there (a fresh setup, or after
 // "ftsRebuild") are backfilled this many per alarm run.
@@ -651,7 +667,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         // Winners changed without a new change row; re-scan the search indexes
         // (unchanged notes are skipped by hash, so nothing is re-embedded).
         this.setMeta(INDEXED_SEQ_META_KEY, "0");
-        this.armFtsRebuild(0);
+        this.armFtsBuild(0);
         void this.scheduleIndexing(0);
       }
     }
@@ -669,7 +685,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       sql.exec<{ name: string }>(`PRAGMA table_info(index_state)`).toArray().map((column) => column.name),
     );
     if (!indexStateColumns.has("fts_hash")) {
-      // Only used with an external full-text index; NULL rows get backfilled there.
+      // NULL rows are pending for the full-text index (built-in or external).
       sql.exec(`ALTER TABLE index_state ADD COLUMN fts_hash TEXT`);
     }
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_revs_id ON revs (id)`);
@@ -884,6 +900,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         }
         return json({ contents });
       }
+      case "resolveFtsHits":
+        return this.resolveFtsHits(body);
       case "writeNote":
         return this.writeNote(body);
       case "reindex":
@@ -921,6 +939,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
             generation: this.getMeta(FTS_GENERATION_META_KEY),
             rebuildAt: Number(this.getMeta(FTS_REBUILD_AT_META_KEY)) || null,
             error: this.getMeta(FTS_ERROR_META_KEY),
+            ...(this.externalFullText() ? {} : { pending: this.countFtsPending() }),
           },
         });
       default:
@@ -1157,7 +1176,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       // must not roll back the vector-indexing progress made above (SQLite DO
       // events are transactional), so defer it whenever this event did work.
       if (more || worked) await this.scheduleIndexing(0);
-      else await this.maybeRunFtsRebuild();
+      else await this.maybeRunFtsBuild();
     } catch (error) {
       console.warn("LiveSync indexing failed", error);
       await this.scheduleIndexing(INDEX_RETRY_DELAY_MS);
@@ -1271,7 +1290,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const lastSeq = changes.at(-1)?.seq ?? since;
     if (lastSeq > since) {
       this.setMeta(INDEXED_SEQ_META_KEY, String(lastSeq));
-      if (!fullText) this.armFtsRebuild(FTS_REBUILD_DEBOUNCE_MS);
+      if (!fullText) this.armFtsBuild(FTS_BUILD_DEBOUNCE_MS);
     }
     return {
       more: changes.length >= INDEX_BATCH_SIZE || fullTextBacklog.length >= FTS_BACKLOG_BATCH_SIZE,
@@ -1400,24 +1419,32 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     return retry;
   }
 
-  /** Whether notes still wait for the external full-text index (never with the built-in one). */
+  /**
+   * Whether notes wait for the full-text index with no pass scheduled to
+   * take them: external index backlog, or (built-in) pending notes while
+   * nothing is armed. An armed pass or a recorded error means the alarm, or
+   * an explicit ftsRebuild, handles it.
+   */
   private hasFullTextBacklog(): boolean {
-    if (!this.externalFullText()) return false;
-    return (
-      this.first<{ n: number }>(
-        `SELECT 1 AS n FROM index_state
-         WHERE fts_hash IS NULL AND pending = 0 AND hash IS NOT NULL LIMIT 1`,
-      ) != null
-    );
+    if (this.externalFullText()) {
+      return (
+        this.first<{ n: number }>(
+          `SELECT 1 AS n FROM index_state
+           WHERE fts_hash IS NULL AND pending = 0 AND hash IS NOT NULL LIMIT 1`,
+        ) != null
+      );
+    }
+    if (this.getMeta(FTS_REBUILD_AT_META_KEY) || this.getMeta(FTS_ERROR_META_KEY)) return false;
+    return this.hasFtsPending();
   }
 
-  /** Re-send every note to the full-text index (external: per note; built-in: one rebuild). */
+  /** Re-send every note to the full-text index (external: per note; built-in: new segments). */
   private requestFullTextRebuild(): void {
-    if (this.externalFullText()) {
-      // Resetting attempts also revives notes that gave up while the index was unreachable.
-      this.ctx.storage.sql.exec(`UPDATE index_state SET fts_hash = NULL, attempts = 0`);
-    } else {
-      this.armFtsRebuild(0);
+    // Resetting attempts also revives notes that gave up while the index was unreachable.
+    this.ctx.storage.sql.exec(`UPDATE index_state SET fts_hash = NULL, attempts = 0`);
+    if (!this.externalFullText()) {
+      this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, FTS_ERROR_META_KEY);
+      this.armFtsBuild(0);
     }
   }
 
@@ -1452,33 +1479,284 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   }
 
   // ---------------------------------------------------------------------
-  // R2 full-text index (debounced full rebuild, piggybacking on the alarm)
+  // Built-in R2 full-text index: one immutable segment per pass, driven by
+  // index_state.fts_hash (null or stale = the note waits for the index)
   // ---------------------------------------------------------------------
 
-  private armFtsRebuild(delayMs: number): void {
+  private static readonly FTS_PENDING_WHERE = `pending = 0 AND hash IS NOT NULL AND doc_id IS NOT NULL
+         AND (fts_hash IS NULL OR fts_hash != hash)`;
+
+  private hasFtsPending(): boolean {
+    return (
+      this.first<{ n: number }>(
+        `SELECT 1 AS n FROM index_state WHERE ${LiveSyncVaultDO.FTS_PENDING_WHERE} LIMIT 1`,
+      ) != null
+    );
+  }
+
+  private countFtsPending(): number {
+    return (
+      this.first<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM index_state WHERE ${LiveSyncVaultDO.FTS_PENDING_WHERE}`,
+      )?.count ?? 0
+    );
+  }
+
+  private armFtsBuild(delayMs: number): void {
     this.setMeta(FTS_REBUILD_AT_META_KEY, String(Date.now() + delayMs));
   }
 
-  private async maybeRunFtsRebuild(): Promise<void> {
+  private async maybeRunFtsBuild(): Promise<void> {
     if (!this.vaultRef() || !this.dbExists() || this.externalFullText()) return;
     const dueRaw = this.getMeta(FTS_REBUILD_AT_META_KEY);
     let due = dueRaw ? Number(dueRaw) : null;
     if (due == null) {
-      if (this.getMeta(FTS_GENERATION_META_KEY)) return;
-      due = Date.now(); // Vault exists but was never FTS-indexed.
+      // Nothing armed: notes can still be waiting after a reset rolled the
+      // arming back, or from before the index tracked them per note.
+      if (this.getMeta(FTS_ERROR_META_KEY) || !this.hasFtsPending()) return;
+      due = Date.now();
     }
     if (Date.now() < due) {
       await this.scheduleIndexing(due - Date.now());
       return;
     }
     try {
-      await this.runFtsRebuild();
-      this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, FTS_REBUILD_AT_META_KEY);
+      const more = await this.runFtsPass();
+      if (more) {
+        this.armFtsBuild(0);
+        await this.scheduleIndexing(0);
+      } else {
+        this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, FTS_REBUILD_AT_META_KEY);
+      }
     } catch (error) {
-      console.warn("FTS rebuild failed", error);
-      this.armFtsRebuild(FTS_REBUILD_RETRY_MS);
-      await this.scheduleIndexing(FTS_REBUILD_RETRY_MS);
+      console.warn("FTS pass failed", error);
+      this.armFtsBuild(FTS_BUILD_RETRY_MS);
+      await this.scheduleIndexing(FTS_BUILD_RETRY_MS);
     }
+  }
+
+  /**
+   * One alarm event's worth of full-text work: index pending notes into a
+   * new segment, or, once nothing is pending, one maintenance step (retire
+   * the legacy generation, merge two segments). Returns whether another pass
+   * is needed right away.
+   */
+  private async runFtsPass(): Promise<boolean> {
+    const ref = this.vaultRef();
+    if (!ref) return false;
+    const bucket = this.ftsBucket();
+
+    // An interrupted previous attempt (memory reset, CPU limit) leaves its
+    // last phase marker behind; a completed or abandoned one does not count.
+    const previous = await readFtsPhase(bucket, ref);
+    const interrupted = previous != null && !FTS_SETTLED_PHASES.includes(String(previous.phase));
+    const attempts = (interrupted ? Number(previous.attempts) || 0 : 0) + 1;
+    if (attempts > FTS_MAX_BUILD_ATTEMPTS) {
+      const message = `full-text pass was interrupted ${attempts - 1} times (last phase: ${String(previous?.phase)}); the vault is probably too large for the in-DO build`;
+      console.warn("FTS pass giving up", { attempts: attempts - 1, lastPhase: previous?.phase });
+      await markFtsPhase(bucket, ref, "failed", { attempts: attempts - 1, lastPhase: previous?.phase });
+      this.setMeta(FTS_ERROR_META_KEY, message);
+      return false;
+    }
+    const marker = { attempts };
+
+    const pending = this.rows<{ path: string; doc_id: string; hash: string }>(
+      `SELECT path, doc_id, hash FROM index_state
+       WHERE ${LiveSyncVaultDO.FTS_PENDING_WHERE}
+       ORDER BY path LIMIT ?`,
+      FTS_SEGMENT_MAX_DOCS + 1,
+    );
+    if (pending.length > 0) {
+      await markFtsPhase(bucket, ref, "segment-start", { ...marker, pending: pending.length });
+      const manifest = await readFtsManifest(bucket, ref);
+      const maxTotal = this.bindings().ftsMaxTotalCodeUnits ?? FTS_MAX_TOTAL_CODE_UNITS;
+      const indexedChars = manifest?.totalChars ?? 0;
+      try {
+        return await this.buildFtsSegment(ref, pending, { marker, budget: maxTotal - indexedChars, maxTotal });
+      } catch (error) {
+        if (!(error instanceof FtsTooLargeError)) throw error;
+        // Too big for the index; record why and disarm instead of burning CPU.
+        const message = `vault exceeds the full-text size guard (${error.codeUnits.toLocaleString("en")}+ of ${error.limit.toLocaleString("en")} code units)`;
+        console.warn("FTS pass aborted: vault exceeds size guard", { codeUnits: error.codeUnits });
+        await markFtsPhase(bucket, ref, "too-large", { codeUnits: error.codeUnits });
+        this.setMeta(FTS_ERROR_META_KEY, message);
+        return false;
+      }
+    }
+
+    // Nothing pending: maintenance, one step per event.
+    const manifest = await readFtsManifest(bucket, ref);
+    if (!manifest) return false;
+    const legacy = manifest.segments.filter((s) => !s.hashed).map((s) => s.id);
+    if (legacy.length > 0) {
+      // Every note is in a hashed segment now; the pre-segment generation is redundant.
+      await retireFtsSegments(bucket, ref, legacy);
+      console.log("FTS legacy generation retired", { segments: legacy });
+      return true;
+    }
+    const plan = planFtsCompaction(manifest, {
+      maxSegments: FTS_COMPACT_MAX_SEGMENTS,
+      maxMergedChars: FTS_COMPACT_MAX_MERGED_CHARS,
+    });
+    if (!plan) return false;
+    const merged = await compactFtsSegments(bucket, ref, plan, {
+      isLive: (docs) => docs.map((doc) => this.ftsDocIsLive(doc.path, doc.hash ?? null)),
+      marker,
+    });
+    if (merged) this.setMeta(FTS_GENERATION_META_KEY, merged.segment.id);
+    console.log("FTS segments compacted", {
+      merged: plan.segments.map((s) => s.id),
+      into: merged?.segment.id,
+      docCount: merged?.segment.docCount,
+    });
+    return true;
+  }
+
+  /**
+   * Index up to one segment's worth of the pending notes and record them as
+   * indexed. Returns whether another pass is needed: more of the backlog, or
+   * a maintenance step the new manifest calls for. Bodies are read one note
+   * at a time while the segment is built, so only the postings and one note
+   * live in memory at once.
+   */
+  private async buildFtsSegment(
+    ref: VaultRef,
+    pending: Array<{ path: string; doc_id: string; hash: string }>,
+    options: { marker: Record<string, unknown>; budget: number; maxTotal: number },
+  ): Promise<boolean> {
+    const bucket = this.ftsBucket();
+    const self = this;
+    const written: Array<{ path: string; hash: string }> = [];
+    // Notes not worth a segment entry (oversized, body gone) are still marked
+    // indexed, or the pass would pick them up again forever.
+    const skipped: Array<{ path: string; hash: string }> = [];
+    let consumed = 0;
+    let mismatched = 0;
+    let codeUnits = 0;
+    async function* inputs(): AsyncGenerator<FtsDocInput> {
+      for (const row of pending) {
+        if (consumed >= FTS_SEGMENT_MAX_DOCS || codeUnits >= FTS_SEGMENT_MAX_CODE_UNITS) break;
+        consumed += 1;
+        const rev = self.rawWinningRow(row.doc_id);
+        const content = rev ? self.fileContentForRow(rev) : null;
+        if (content == null) {
+          console.warn("FTS pass skipping note without a readable body", { path: row.path });
+          skipped.push(row);
+          continue;
+        }
+        if (content.length > FTS_MAX_NOTE_BYTES) {
+          console.warn("FTS pass skipping oversized note", { path: row.path });
+          skipped.push(row);
+          continue;
+        }
+        // The body moved on since the vector pass recorded its hash; the
+        // change that did it is still in the feed and re-queues the note.
+        if ((await hashText(content)) !== row.hash) {
+          mismatched += 1;
+          continue;
+        }
+        codeUnits += content.length;
+        if (codeUnits > options.budget) {
+          throw new FtsTooLargeError(options.maxTotal - options.budget + codeUnits, options.maxTotal);
+        }
+        const mtime = rev ? self.noteMtimeForRow(rev) : null;
+        written.push(row);
+        yield {
+          path: row.path,
+          content,
+          hash: row.hash,
+          ...(mtime != null ? { mtime } : {}),
+        };
+      }
+    }
+
+    const result = await appendFtsSegment(bucket, ref, inputs(), { marker: options.marker });
+    for (const row of [...written, ...skipped]) {
+      this.ctx.storage.sql.exec(
+        `UPDATE index_state SET fts_hash = ? WHERE path = ? AND hash = ?`,
+        row.hash,
+        row.path,
+        row.hash,
+      );
+    }
+    if (result) this.setMeta(FTS_GENERATION_META_KEY, result.segment.id);
+    this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, FTS_ERROR_META_KEY);
+    console.log("FTS segment written", {
+      segment: result?.segment.id ?? null,
+      docCount: result?.segment.docCount ?? 0,
+      codeUnits,
+      skipped: skipped.length,
+      segments: result?.manifest.segments.length,
+      attempts: options.marker.attempts,
+    });
+    if (written.length + skipped.length === 0 && mismatched > 0) {
+      // Only notes whose body moved on: the change that moved it re-arms the pass.
+      return consumed < pending.length;
+    }
+    return consumed < pending.length || this.hasFtsPending() || this.ftsNeedsMaintenance(result?.manifest);
+  }
+
+  /** Whether the idle maintenance step (retire legacy, compact) has work. */
+  private ftsNeedsMaintenance(manifest: FtsManifest | null | undefined): boolean {
+    if (!manifest) return false;
+    return (
+      manifest.segments.some((s) => !s.hashed) ||
+      planFtsCompaction(manifest, {
+        maxSegments: FTS_COMPACT_MAX_SEGMENTS,
+        maxMergedChars: FTS_COMPACT_MAX_MERGED_CHARS,
+      }) != null
+    );
+  }
+
+  /**
+   * Whether a segment entry is the vault's current version of its path. A
+   * hashed entry is current when the index last wrote that hash, or, while a
+   * forced rebuild has cleared the index's record, when the note still has
+   * that content. A legacy entry (no hash) stands until the note is written
+   * to a hashed segment.
+   */
+  private ftsDocIsLive(path: string, hash: string | null): boolean {
+    const row = this.first<{ hash: string | null; fts_hash: string | null }>(
+      `SELECT hash, fts_hash FROM index_state WHERE path = ?`,
+      path,
+    );
+    if (!row) return false;
+    if (hash == null) return row.fts_hash == null;
+    return row.fts_hash === hash || (row.fts_hash == null && row.hash === hash);
+  }
+
+  /**
+   * Check ranked search candidates against the vault's current state, drop
+   * replaced/deleted versions and duplicate paths, and return the bodies of
+   * the first `limit` survivors (for snippets) in one round trip.
+   */
+  private resolveFtsHits(body: InternalOp & { candidates?: unknown; limit?: unknown }): Response {
+    const candidates = Array.isArray(body.candidates)
+      ? body.candidates
+          .filter(
+            (c): c is { path: string; hash: string | null } =>
+              typeof c === "object" && c != null && typeof (c as { path: unknown }).path === "string",
+          )
+          .slice(0, FTS_RESOLVE_MAX_CANDIDATES)
+      : [];
+    const limit = typeof body.limit === "number" && body.limit > 0 ? Math.floor(body.limit) : 20;
+    const hits: Array<{ path: string; hash: string | null; content: string | null }> = [];
+    if (!this.dbExists()) return json({ hits });
+    const seen = new Set<string>();
+    for (const candidate of candidates) {
+      if (hits.length >= limit) break;
+      const hash = typeof candidate.hash === "string" ? candidate.hash : null;
+      if (seen.has(candidate.path) || !this.ftsDocIsLive(candidate.path, hash)) continue;
+      seen.add(candidate.path);
+      const docId = this.first<{ doc_id: string | null }>(
+        `SELECT doc_id FROM index_state WHERE path = ?`,
+        candidate.path,
+      )?.doc_id;
+      const rev = docId ? this.rawWinningRow(docId) : null;
+      const content = rev && !rev.deleted ? this.fileContentForRow(rev) : null;
+      hits.push({ path: candidate.path, hash, content });
+    }
+    return json({ hits });
   }
 
   /**
@@ -1501,126 +1779,6 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     );
     rows.push(...this.rows<FtsRevRow>(
       `SELECT r.*,
-         json_extract(r.body, '$.path') AS fts_path,
-         json_extract(r.body, '$.mtime') AS fts_mtime
-       FROM docs d
-       JOIN revs r ON r.id = d.id AND r.rev = d.winning_rev
-       WHERE d.deleted = 0
-         AND r.body_chunked = 0
-         AND json_type(r.body, '$.path') = 'text'
-         AND COALESCE(json_extract(r.body, '$.type'), '') NOT IN ('leaf', 'chunkpack')
-         AND COALESCE(json_extract(r.body, '$.deleted'), 0) != 1
-         AND NOT EXISTS (
-           SELECT 1 FROM rev_metadata m WHERE m.id = r.id AND m.rev = r.rev
-         )`,
-    ));
-    return rows;
-  }
-
-  private async runFtsRebuild(): Promise<void> {
-    const ref = this.vaultRef();
-    if (!ref) return;
-    const bucket = this.ftsBucket();
-
-    // An interrupted previous attempt (memory reset, CPU limit) leaves its
-    // last phase marker behind; a completed or abandoned one does not count.
-    const previous = await readFtsPhase(bucket, ref);
-    const interrupted =
-      previous != null && !["rebuild-complete", "failed", "too-large"].includes(String(previous.phase));
-    const attempts = (interrupted ? Number(previous.attempts) || 0 : 0) + 1;
-    if (attempts > FTS_MAX_REBUILD_ATTEMPTS) {
-      const message = `rebuild was interrupted ${attempts - 1} times (last phase: ${String(previous?.phase)}); the vault is probably too large for the in-DO build`;
-      console.warn("FTS rebuild giving up", { attempts: attempts - 1, lastPhase: previous?.phase });
-      await markFtsPhase(bucket, ref, "failed", { attempts: attempts - 1, lastPhase: previous?.phase });
-      this.setMeta(FTS_ERROR_META_KEY, message);
-      this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, FTS_REBUILD_AT_META_KEY);
-      return;
-    }
-    const marker = { attempts };
-    await markFtsPhase(bucket, ref, "gather-start", marker);
-
-    const policy = await this.loadPolicy(ref);
-    const refs = this.listNoteRefsForFts().filter(
-      (row) =>
-        row.fts_path.endsWith(".md") &&
-        !row.fts_path.startsWith("i:") &&
-        isIndexableMarkdownPath(row.fts_path, policy),
-    );
-    console.log("FTS rebuild starting", { noteCount: refs.length, attempts });
-
-    // Bodies are read one note at a time while the index is built, so only
-    // the postings and one note live in memory at once.
-    const self = this;
-    const maxCodeUnits = this.bindings().ftsMaxTotalCodeUnits ?? FTS_MAX_TOTAL_CODE_UNITS;
-    let totalCodeUnits = 0;
-    let skipped = 0;
-    function* inputs(): Generator<FtsDocInput> {
-      for (const row of refs) {
-        const rev = self.rawWinningRow(row.id);
-        const content = rev ? self.fileContentForRow(rev) : null;
-        if (content == null) continue;
-        if (content.length > FTS_MAX_NOTE_BYTES) {
-          console.warn("FTS rebuild skipping oversized note", { path: row.fts_path });
-          skipped += 1;
-          continue;
-        }
-        totalCodeUnits += content.length;
-        if (totalCodeUnits > maxCodeUnits) {
-          throw new FtsTooLargeError(totalCodeUnits, maxCodeUnits);
-        }
-        yield {
-          path: row.fts_path,
-          content,
-          ...(row.fts_mtime != null ? { mtime: row.fts_mtime } : {}),
-        };
-      }
-    }
-
-    let manifest;
-    try {
-      manifest = await rebuildFtsIndex(bucket, ref, inputs(), {
-        previousGeneration: this.getMeta(FTS_GENERATION_META_KEY),
-        marker,
-      });
-    } catch (error) {
-      if (!(error instanceof FtsTooLargeError)) throw error;
-      // Too big for the in-DO rebuild; record why and disarm instead of burning CPU.
-      const message = `vault exceeds the full-text size guard (${error.codeUnits.toLocaleString("en")}+ of ${error.limit.toLocaleString("en")} code units)`;
-      console.warn("FTS rebuild aborted: vault exceeds size guard", { codeUnits: error.codeUnits });
-      await markFtsPhase(bucket, ref, "too-large", { codeUnits: error.codeUnits });
-      this.setMeta(FTS_ERROR_META_KEY, message);
-      this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, FTS_REBUILD_AT_META_KEY);
-      return;
-    }
-    this.setMeta(FTS_GENERATION_META_KEY, manifest.generation);
-    this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, FTS_ERROR_META_KEY);
-    console.log("FTS rebuild finished", {
-      generation: manifest.generation,
-      docCount: manifest.docCount,
-      totalChars: manifest.totalChars,
-      skipped,
-      attempts,
-    });
-  }
-
-  /**
-   * Winning note ids/paths for the full-text rebuild, without bodies. Bodies
-   * are fetched per note while indexing so a large vault is never held in
-   * memory at once.
-   */
-  private listNoteRefsForFts(): Array<{ id: string; fts_path: string; fts_mtime: number | null }> {
-    type Ref = { id: string; fts_path: string; fts_mtime: number | null };
-    const rows = this.rows<Ref>(
-      `SELECT r.id, m.path AS fts_path, m.mtime AS fts_mtime
-       FROM docs d
-       JOIN rev_metadata m ON m.id = d.id AND m.rev = d.winning_rev
-       JOIN revs r ON r.id = d.id AND r.rev = d.winning_rev
-       WHERE d.deleted = 0 AND m.path IS NOT NULL
-         AND COALESCE(m.type, '') NOT IN ('leaf', 'chunkpack')
-         AND (r.body_chunked = 1 OR COALESCE(json_extract(r.body, '$.deleted'), 0) != 1)`,
-    );
-    rows.push(...this.rows<Ref>(
-      `SELECT r.id,
          json_extract(r.body, '$.path') AS fts_path,
          json_extract(r.body, '$.mtime') AS fts_mtime
        FROM docs d

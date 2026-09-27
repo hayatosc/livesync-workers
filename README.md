@@ -114,12 +114,12 @@ Secrets: `LIVESYNC_PASSWORD`, `ADMIN_PASSWORD`, `SESSION_SECRET`, and optionally
 Obsidian ──LiveSync (CouchDB API)──▶ Worker ──▶ VaultDO (Durable Object, SQLite)
                                                    │ alarm: index changed notes
                                                    ├──▶ Vectorize (Workers AI embeddings)
-                                                   └──▶ R2 (full-text index generations)
+                                                   └──▶ R2 (full-text index segments)
 MCP client ──OAuth──▶ Worker ──▶ VaultMCP (McpAgent) ──▶ vault client ──▶ VaultDO / Vectorize / R2
 ```
 
 - Longpoll and continuous `_changes` feeds are waited on in the Worker over a hibernatable WebSocket, so the Durable Object sleeps between writes.
-- The full-text index is rebuilt in full (debounced 5 minutes after the last change) as immutable generations in R2.
+- The full-text index lives in R2 as immutable segments: each indexing pass (debounced 2 minutes after the last change) writes one segment holding only the notes that changed, and idle passes merge small segments. Ranking is BM25 over the query phrases.
 - Vectors live in a Vectorize namespace per vault.
 
 ## Using it as a library

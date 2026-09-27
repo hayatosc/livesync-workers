@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
 import { hashText, splitNoteContentForChunks } from "../src/index.js";
-import { TestVaultDO, testEnv } from "./helpers.js";
+import { ftsSearch, readFtsManifest } from "../src/search/fts-index.js";
+import { memoryBucket, TestVaultDO, testEnv } from "./helpers.js";
 
 type SqliteRow = Record<string, string | number | null>;
 
@@ -541,6 +542,122 @@ describe("LiveSync Vectorize indexing", () => {
     ]);
     await durableObject.alarm();
     expect(vi.mocked(env.VECTORIZE.deleteByIds)).not.toHaveBeenCalled();
+  });
+
+  it("indexes only changed notes into new segments and resolves the current versions", async () => {
+    const context = await created();
+    const { bucket } = memoryBucket();
+    context.env.FTS_BUCKET = bucket;
+    const { durableObject, storage } = context;
+    const ref = { tenantId: "user-1", databaseName: "vault" };
+    type Status = { fts: { generation: string | null; rebuildAt: number | null; error: string | null; pending: number } };
+    const status = async () => json<Status>(await internalOp(durableObject, { op: "indexStatus" }));
+    // Pull the debounced pass forward to "now".
+    const makeDue = () => storage.sql.exec(`UPDATE meta SET value = '0' WHERE key = 'fts_rebuild_at'`);
+
+    await replicate(durableObject, [
+      leafDoc("h:a", "京都の会議メモ"),
+      leafDoc("h:b", "検索エンジンの実験"),
+      noteDoc("a.md", "1-a", "a.md", ["h:a"]),
+      noteDoc("b.md", "1-b", "b.md", ["h:b"]),
+    ]);
+    await durableObject.alarm(); // vectors; arms the debounced full-text pass
+    expect(await status()).toMatchObject({ fts: { pending: 2, generation: null } });
+    expect((await status()).fts.rebuildAt).toBeGreaterThan(Date.now());
+    makeDue();
+    await durableObject.alarm();
+    expect(await status()).toMatchObject({ fts: { pending: 0, rebuildAt: null, error: null } });
+    expect((await status()).fts.generation).toMatch(/^seg-/);
+    expect((await readFtsManifest(bucket, ref))?.segments.map((s) => s.docCount)).toEqual([2]);
+
+    // a.md changes, c.md is new, b.md is deleted: only a and c go into the next segment.
+    await replicate(durableObject, [
+      leafDoc("h:a2", "京都の会議は中止"),
+      noteDoc("a.md", "2-a2", "a.md", ["h:a2"]),
+      leafDoc("h:c", "会議室の予約"),
+      noteDoc("c.md", "1-c", "c.md", ["h:c"]),
+      { _id: "b.md", _rev: "2-del", _revisions: { start: 2, ids: ["del", "b"] }, _deleted: true },
+    ]);
+    await durableObject.alarm();
+    expect(await status()).toMatchObject({ fts: { pending: 2 } });
+    makeDue();
+    await durableObject.alarm();
+    expect(await status()).toMatchObject({ fts: { pending: 0, rebuildAt: null } });
+    expect((await readFtsManifest(bucket, ref))?.segments.map((s) => s.docCount)).toEqual([2, 2]);
+
+    // The index still holds the old a.md and the deleted b.md; the vault drops them.
+    const result = await ftsSearch(bucket, ref, "会議", 20);
+    if (result.status !== "ready") throw new Error("unreachable");
+    expect(result.hits.filter((hit) => hit.path === "a.md")).toHaveLength(2);
+    const resolved = await json<{ hits: Array<{ path: string; hash: string | null; content: string | null }> }>(
+      await internalOp(durableObject, {
+        op: "resolveFtsHits",
+        candidates: [
+          ...result.hits.map((hit) => ({ path: hit.path, hash: hit.hash })),
+          { path: "b.md", hash: await hashText("検索エンジンの実験") },
+        ],
+        limit: 10,
+      }),
+    );
+    expect(resolved.hits.map((hit) => hit.path).sort()).toEqual(["a.md", "c.md"]);
+    expect(resolved.hits.find((hit) => hit.path === "a.md")).toMatchObject({
+      hash: await hashText("京都の会議は中止"),
+      content: "京都の会議は中止",
+    });
+
+    // A forced rebuild re-sends every note; the old segments stay searchable meanwhile.
+    await internalOp(durableObject, { op: "ftsRebuild" });
+    expect(await status()).toMatchObject({ fts: { pending: 2 } });
+    const during = await json<{ hits: Array<{ path: string }> }>(
+      await internalOp(durableObject, {
+        op: "resolveFtsHits",
+        candidates: result.hits.map((hit) => ({ path: hit.path, hash: hit.hash })),
+        limit: 10,
+      }),
+    );
+    expect(during.hits.map((hit) => hit.path).sort()).toEqual(["a.md", "c.md"]);
+    await durableObject.alarm();
+    expect(await status()).toMatchObject({ fts: { pending: 0 } });
+    expect((await readFtsManifest(bucket, ref))?.segments).toHaveLength(3);
+  });
+
+  it("re-indexes a vault with a version-1 index into segments and retires the old generation", async () => {
+    const context = await created();
+    const { bucket, store } = memoryBucket();
+    context.env.FTS_BUCKET = bucket;
+    const { durableObject, storage } = context;
+    const ref = { tenantId: "user-1", databaseName: "vault" };
+    await replicate(durableObject, [leafDoc("h:a", "旧世代の会議メモ"), noteDoc("a.md", "1-a", "a.md", ["h:a"])]);
+    await durableObject.alarm();
+    // The index as the previous release left it: one generation, notes untracked per hash.
+    await bucket.put(
+      "fts/user-1/vault/manifest.json",
+      JSON.stringify({ version: 1, generation: "gen-old", shardCount: 16, docCount: 1, totalChars: 8, builtAt: 5 }),
+    );
+    await bucket.put("fts/user-1/vault/gen-old/docs.json.gz", new Uint8Array([1]));
+    storage.sql.exec(`DELETE FROM meta WHERE key = 'fts_rebuild_at'`);
+    storage.sql.exec(`UPDATE index_state SET fts_hash = NULL`);
+
+    // Legacy docs count as current until the note is written to a hashed segment.
+    const live = async () =>
+      json<{ hits: Array<{ path: string }> }>(
+        await internalOp(durableObject, { op: "resolveFtsHits", candidates: [{ path: "a.md", hash: null }], limit: 5 }),
+      );
+    expect((await live()).hits).toHaveLength(1);
+
+    await durableObject.alarm(); // nothing armed, but notes are pending: builds a segment
+    let manifest = await readFtsManifest(bucket, ref);
+    expect(manifest?.segments.map((s) => s.hashed)).toEqual([false, true]);
+    expect((await live()).hits).toHaveLength(0);
+    await durableObject.alarm(); // maintenance: the legacy generation is retired
+    manifest = await readFtsManifest(bucket, ref);
+    expect(manifest?.segments.map((s) => s.hashed)).toEqual([true]);
+    expect(manifest?.retired.map((r) => r.id)).toEqual(["gen-old"]);
+    expect(store.has("fts/user-1/vault/gen-old/docs.json.gz")).toBe(true);
+    await durableObject.alarm();
+    expect(await json(await internalOp(durableObject, { op: "indexStatus" }))).toMatchObject({
+      fts: { pending: 0, rebuildAt: null, error: null },
+    });
   });
 
   it("purge removes indexed vectors", async () => {

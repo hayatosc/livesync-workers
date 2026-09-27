@@ -137,9 +137,11 @@ export interface VaultBindings {
    */
   fullText?: FullTextIndex;
   /**
-   * Cap on the total note text (JS code units) the built-in full-text rebuild
-   * accepts before giving up with an explicit error. Default 8,000,000, sized
-   * for the Durable Object memory and CPU limits; lower it for testing.
+   * Cap on the total note text (JS code units) the built-in full-text index
+   * holds before indexing stops with an explicit error (`indexStatus().fts.error`).
+   * Default 50,000,000 (about 120 MB of Japanese Markdown); the index is
+   * built in segments, so the cap bounds search cost and R2 usage rather
+   * than one pass's memory. Lower it for testing.
    */
   ftsMaxTotalCodeUnits?: number;
   /**

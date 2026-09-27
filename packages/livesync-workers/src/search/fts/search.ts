@@ -7,8 +7,8 @@ import {
 } from "./tokenize.js";
 import { DOCS_FILE_NAME, shardFileName, type FtsDocMeta } from "./build.js";
 
-/** Fetch a generation-relative file ("shard-003.bin.gz"); null if missing. */
-export type FetchGenerationFile = (name: string) => Promise<Uint8Array | null>;
+/** Fetch a segment-relative file ("shard-003.bin.gz"); null if missing. */
+export type FetchSegmentFile = (name: string) => Promise<Uint8Array | null>;
 
 export type SearchMatch = {
   /** Match start, as an index into the doc's normalized code points. */
@@ -18,22 +18,25 @@ export type SearchMatch = {
 };
 
 export type SearchHit = {
+  /** Segment-local doc id. */
   doc: number;
   path: string;
   title?: string;
   mtime?: number;
+  /** Content hash the segment was built from; null for legacy generations. */
+  hash: string | null;
   score: number;
   matches: SearchMatch[];
 };
 
-type Phrase = {
+export type Phrase = {
   tokens: Token[];
   /** Token positions relative to the first token. */
   basePos: number;
   matchLen: number;
 };
 
-function parsePhrases(query: string): Phrase[] {
+export function parsePhrases(query: string): Phrase[] {
   const phrases: Phrase[] = [];
   for (const part of query.split(/\s+/)) {
     if (!part) continue;
@@ -55,25 +58,45 @@ function postingsSize(postings: Posting[]): number {
   return postings.reduce((sum, p) => sum + p.positions.length, 0);
 }
 
+/** A doc of one segment that matched every phrase, before scoring. */
+export type SegmentCandidate = {
+  doc: number;
+  meta: FtsDocMeta;
+  /** Verified phrase occurrences per phrase (BM25 term frequency). */
+  tf: number[];
+  matches: SearchMatch[];
+};
+
+export type SegmentSearchResult = {
+  candidates: SegmentCandidate[];
+  /** Docs matching each phrase on its own (BM25 document frequency), including docs the AND dropped. */
+  df: number[];
+  docCount: number;
+  totalChars: number;
+};
+
 /**
- * Whitespace-separated phrases are ANDed; each phrase is an exact substring
- * match (CJK) / exact word match (ASCII), verified through token positions.
+ * Search one immutable segment: fetch the shards the query touches, verify
+ * each phrase through token positions (exact substring for CJK, exact word
+ * for ASCII), and AND the phrases. Scoring happens across segments in
+ * {@link rankHits}, which needs the corpus totals.
  */
-export async function searchIndex(
-  query: string,
+export async function searchSegment(
+  phrases: Phrase[],
   options: {
     shardCount: number;
-    fetchFile: FetchGenerationFile;
-    limit?: number;
+    fetchFile: FetchSegmentFile;
     maxMatchesPerDoc?: number;
   },
-): Promise<SearchHit[]> {
+): Promise<SegmentSearchResult> {
   const { shardCount, fetchFile } = options;
-  const limit = options.limit ?? 20;
   const maxMatchesPerDoc = options.maxMatchesPerDoc ?? 20;
-
-  const phrases = parsePhrases(query);
-  if (phrases.length === 0) return [];
+  const empty = (docs: FtsDocMeta[]): SegmentSearchResult => ({
+    candidates: [],
+    df: phrases.map(() => 0),
+    docCount: docs.length,
+    totalChars: docs.reduce((sum, doc) => sum + doc.chars, 0),
+  });
 
   const terms = new Set<string>();
   for (const phrase of phrases) {
@@ -86,12 +109,13 @@ export async function searchIndex(
     fetchFile(DOCS_FILE_NAME),
     ...[...shardIds].map((shard) => fetchFile(shardFileName(shard))),
   ]);
-  if (!docsRaw) throw new Error("FTS index docs file is missing");
+  if (!docsRaw) throw new Error("FTS segment docs file is missing");
   const docs = (
     JSON.parse(new TextDecoder().decode(await gunzip(docsRaw))) as {
       docs: FtsDocMeta[];
     }
   ).docs;
+  if (phrases.length === 0) return empty(docs);
 
   const termPostings = new Map<string, Posting[]>();
   const shardList = [...shardIds];
@@ -104,7 +128,9 @@ export async function searchIndex(
     }
   }
 
-  // Verified match start positions per doc, per phrase.
+  // Verified match start positions per doc, per phrase. Every phrase is
+  // evaluated even when an earlier one found nothing, so df stays comparable
+  // across segments.
   const phraseMatches: Array<Map<number, number[]>> = [];
   for (const phrase of phrases) {
     const ordered = [...phrase.tokens].sort(
@@ -112,8 +138,10 @@ export async function searchIndex(
         postingsSize(termPostings.get(a.term) ?? []) -
         postingsSize(termPostings.get(b.term) ?? []),
     );
+    const matches = new Map<number, number[]>();
     if (ordered.some((token) => (termPostings.get(token.term) ?? []).length === 0)) {
-      return []; // AND semantics: one impossible phrase empties the result.
+      phraseMatches.push(matches);
+      continue;
     }
     const positionsByDoc = ordered.map((token) => {
       const byDoc = new Map<number, number[]>();
@@ -122,7 +150,6 @@ export async function searchIndex(
       }
       return byDoc;
     });
-    const matches = new Map<number, number[]>();
     const rarest = ordered[0]!;
     for (const [doc, rarestPositions] of positionsByDoc[0]!) {
       let bases: number[] | null = rarestPositions.map(
@@ -140,38 +167,114 @@ export async function searchIndex(
       }
       if (bases && bases.length > 0) matches.set(doc, bases.sort((a, b) => a - b));
     }
-    if (matches.size === 0) return [];
     phraseMatches.push(matches);
   }
 
-  const hits: SearchHit[] = [];
+  const df = phraseMatches.map((matches) => matches.size);
+  if (phraseMatches.some((matches) => matches.size === 0)) {
+    return { ...empty(docs), df };
+  }
+
+  const candidates: SegmentCandidate[] = [];
   outer: for (const [doc, firstBases] of phraseMatches[0]!) {
     const allMatches: SearchMatch[] = firstBases.map((pos) => ({
       pos,
       len: phrases[0]!.matchLen,
     }));
-    let score = firstBases.length;
+    const tf = [firstBases.length];
     for (let p = 1; p < phraseMatches.length; p += 1) {
       const bases = phraseMatches[p]!.get(doc);
       if (!bases) continue outer;
-      score += bases.length;
+      tf.push(bases.length);
       for (const pos of bases) allMatches.push({ pos, len: phrases[p]!.matchLen });
     }
     const meta = docs[doc];
     if (!meta) continue;
     allMatches.sort((a, b) => a.pos - b.pos);
-    hits.push({
-      doc,
-      path: meta.path,
-      ...(meta.title !== undefined ? { title: meta.title } : {}),
-      ...(meta.mtime !== undefined ? { mtime: meta.mtime } : {}),
-      score: score / Math.log2(4 + meta.chars),
-      matches: allMatches.slice(0, maxMatchesPerDoc),
-    });
+    candidates.push({ doc, meta, tf, matches: allMatches.slice(0, maxMatchesPerDoc) });
+  }
+  return {
+    candidates,
+    df,
+    docCount: docs.length,
+    totalChars: docs.reduce((sum, doc) => sum + doc.chars, 0),
+  };
+}
+
+export type RankOptions = {
+  limit?: number;
+  /** BM25 parameters. */
+  k1?: number;
+  b?: number;
+};
+
+export type RankedHit = SearchHit & {
+  /** Index into the `segments` array passed to {@link rankHits}. */
+  segment: number;
+};
+
+/**
+ * BM25 over whitespace-separated phrases (not over bigrams, whose frequencies
+ * say nothing useful): tf is the verified phrase count in the doc, df the
+ * number of docs the phrase occurs in across all segments, document length
+ * the normalized char count. Segments are immutable, so N and avgdl come from
+ * the segment totals (stale versions inflate them slightly; harmless).
+ * Duplicate paths are not collapsed here: which copy is current is only known
+ * to the vault, which checks (path, hash) after ranking.
+ */
+export function rankHits(segments: SegmentSearchResult[], options: RankOptions = {}): RankedHit[] {
+  const limit = options.limit ?? 20;
+  const k1 = options.k1 ?? 1.2;
+  const b = options.b ?? 0.75;
+  const n = Math.max(1, segments.reduce((sum, s) => sum + s.docCount, 0));
+  const avgdl = Math.max(1, segments.reduce((sum, s) => sum + s.totalChars, 0) / n);
+  const phraseCount = segments[0]?.df.length ?? 0;
+  const idf: number[] = [];
+  for (let p = 0; p < phraseCount; p += 1) {
+    const df = segments.reduce((sum, s) => sum + (s.df[p] ?? 0), 0);
+    idf.push(Math.log(1 + (n - df + 0.5) / (df + 0.5)));
   }
 
+  const hits: RankedHit[] = [];
+  segments.forEach((segment, index) => {
+    for (const candidate of segment.candidates) {
+      const dl = candidate.meta.chars;
+      let score = 0;
+      for (let p = 0; p < candidate.tf.length; p += 1) {
+        const tf = candidate.tf[p]!;
+        score += (idf[p] ?? 0) * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + (b * dl) / avgdl)));
+      }
+      const meta = candidate.meta;
+      hits.push({
+        doc: candidate.doc,
+        segment: index,
+        path: meta.path,
+        ...(meta.title !== undefined ? { title: meta.title } : {}),
+        ...(meta.mtime !== undefined ? { mtime: meta.mtime } : {}),
+        hash: meta.hash ?? null,
+        score,
+        matches: candidate.matches,
+      });
+    }
+  });
   hits.sort((a, b) => b.score - a.score || (b.mtime ?? 0) - (a.mtime ?? 0));
   return hits.slice(0, limit);
+}
+
+/** Search a single segment and rank its hits (tests and one-segment indexes). */
+export async function searchIndex(
+  query: string,
+  options: {
+    shardCount: number;
+    fetchFile: FetchSegmentFile;
+    limit?: number;
+    maxMatchesPerDoc?: number;
+  },
+): Promise<SearchHit[]> {
+  const phrases = parsePhrases(query);
+  if (phrases.length === 0) return [];
+  const result = await searchSegment(phrases, options);
+  return rankHits([result], { ...(options.limit !== undefined ? { limit: options.limit } : {}) });
 }
 
 export type Snippet = { before: string; match: string; after: string };
@@ -179,7 +282,7 @@ export type Snippet = { before: string; match: string; after: string };
 /**
  * Slice a snippet out of the original document text for a match whose
  * position refers to normalized code points. Positions can drift if the doc
- * changed after the index generation was built; the slice is best-effort.
+ * changed after the segment was built; the slice is best-effort.
  */
 export function extractSnippet(
   content: string,

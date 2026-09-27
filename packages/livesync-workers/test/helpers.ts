@@ -86,3 +86,31 @@ export class TestVaultDO extends LiveSyncVaultDO<TestEnv> {
     return testBindings(this.env);
   }
 }
+
+/** Minimal in-memory stand-in for the FTS R2 bucket binding. */
+export function memoryBucket() {
+  const store = new Map<string, Uint8Array>();
+  const bucket = {
+    async put(key: string, body: Uint8Array | string) {
+      store.set(key, typeof body === "string" ? new TextEncoder().encode(body) : body);
+    },
+    async get(key: string) {
+      const body = store.get(key);
+      if (!body) return null;
+      return {
+        arrayBuffer: async () => body.slice().buffer,
+        json: async () => JSON.parse(new TextDecoder().decode(body)),
+      };
+    },
+    async list({ prefix }: { prefix: string }) {
+      return {
+        objects: [...store.keys()].filter((key) => key.startsWith(prefix)).map((key) => ({ key })),
+        truncated: false,
+      };
+    },
+    async delete(keys: string[] | string) {
+      for (const key of Array.isArray(keys) ? keys : [keys]) store.delete(key);
+    },
+  };
+  return { bucket: bucket as unknown as R2Bucket, store };
+}

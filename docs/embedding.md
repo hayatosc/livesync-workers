@@ -81,10 +81,11 @@ if (url.pathname.startsWith("/livesync")) {
 
 ### Optional: an external full-text index
 
-By default full-text search uses an index the Durable Object rebuilds in full
-and stores in R2 (`bucket`). That rebuild holds the whole vault in memory, so
-for large vaults, or to search from your own database, pass `fullText` instead;
-`bucket` can then be left out.
+By default full-text search uses an index the Durable Object keeps in R2
+(`bucket`) as immutable segments, one per indexing pass, so an update costs
+only the changed notes; vaults up to roughly 100 MB of Markdown are fine
+(`ftsMaxTotalCodeUnits` caps the total). To search from your own database
+instead, pass `fullText`; `bucket` can then be left out.
 
 ```ts
 import type { FullTextIndex } from "livesync-workers";
