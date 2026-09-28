@@ -125,11 +125,13 @@ const INDEX_MAX_ATTEMPTS = 20;
 // Newest segment the built-in full-text index wrote (shown as fts.generation).
 const FTS_GENERATION_META_KEY = "fts_generation";
 // Layout of the built-in index this code writes: "2" = per-note segments,
-// "3" = bucketed shards read by range. The whole-vault generation before
-// them had no version meta. A change arms a maintenance pass, which
+// "3" = bucketed shards read by range, "4" = same layout, but the build
+// streams (0.5.x) so a "failed" verdict recorded by an earlier build no
+// longer applies. The whole-vault generation before them had no version
+// meta. A change clears that verdict and arms a maintenance pass, which
 // rewrites what the new code cannot read efficiently.
 const FTS_INDEX_VERSION_META_KEY = "fts_index_version";
-const CURRENT_FTS_INDEX_VERSION = "3";
+const CURRENT_FTS_INDEX_VERSION = "4";
 const FTS_REBUILD_AT_META_KEY = "fts_rebuild_at";
 // Why the last pass gave up; cleared by the next successful pass.
 const FTS_ERROR_META_KEY = "fts_error";
