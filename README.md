@@ -24,6 +24,13 @@ Built for [Kuro](https://usekuro.app). Available to everyone.
 
 Notes written through MCP are regular LiveSync revisions, so they show up in Obsidian on the next sync.
 
+### Search coverage and limits
+
+- **Japanese, Chinese and Korean** are fully supported: full-text search matches substrings (character bigrams, no dictionary), so a query like `会議室` finds it inside any word; ASCII text is matched by whole words, case- and width-insensitively.
+- **Vault size**: vaults of around **100 MB of Markdown** are supported and tested (about 12,000 notes); the full-text index stops updating, with an explicit error in `vaultStatus`, past 50 million characters of text. Attachments do not count.
+- **Large notes**: only the **first million characters** of a note (roughly 1–3 MB, depending on the script) go into the full-text index, so text beyond that point cannot be found by `grepNotes`. Semantic search embeds the whole note in sections and is not affected.
+- **Queries**: a `grepNotes` query may use up to 32 index terms (a few words, or about 60 CJK characters).
+
 The server also sends MCP `instructions` telling assistants to read `AGENTS.md` at the vault root first, if it exists. Put your vault's layout and the rules you want agents to follow (where daily notes live, how to mark AI-written text, …) in that note and every connected assistant will see them before touching the vault.
 
 ## Deploy
@@ -119,7 +126,7 @@ MCP client ──OAuth──▶ Worker ──▶ VaultMCP (McpAgent) ──▶ v
 ```
 
 - Longpoll and continuous `_changes` feeds are waited on in the Worker over a hibernatable WebSocket, so the Durable Object sleeps between writes.
-- The full-text index lives in R2 as immutable segments: each indexing pass (debounced 2 minutes after the last change) writes one segment holding only the notes that changed, and idle passes merge small segments. Postings are stored in small gzipped buckets that a search reads by byte range, so query cost follows the terms asked for rather than the index size. Ranking is BM25 over the query phrases.
+- The full-text index lives in R2 as immutable segments: each indexing pass (debounced 2 minutes after the last change) writes one segment holding only the notes that changed, and idle passes merge small segments and rewrite ones whose text is mostly replaced versions. A note contributes at most its first million characters. Postings are stored in small gzipped buckets that a search reads by byte range, so query cost follows the terms asked for rather than the index size; a query may use up to 32 index terms (about 60 CJK characters). Ranking is BM25 over the query phrases.
 - Vectors live in a Vectorize namespace per vault.
 
 ## Using it as a library
