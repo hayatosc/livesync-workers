@@ -57,6 +57,22 @@ describe("tokenize", () => {
   });
 });
 
+describe("buildIndex term cap", () => {
+  const richDoc = { path: "rich.md", content: "壱弐参肆伍陸漆捌玖拾", hash: "r" }; // 9 bigrams + 2 unigrams = 11 terms
+  const plainDoc = { path: "plain.md", content: "会議", hash: "p" }; // 3 terms
+
+  it("hands back a doc the segment has no room for, and drops one no segment can hold", async () => {
+    const both = await buildIndex([plainDoc, richDoc], { maxTerms: 8 });
+    expect(both.docs.map((doc) => doc.path)).toEqual(["plain.md"]);
+    expect(both.dropped).toEqual([]);
+    const alone = await buildIndex([richDoc, plainDoc], { maxTerms: 8 });
+    expect(alone.docs).toEqual([]);
+    expect(alone.dropped).toEqual(["rich.md"]);
+    // Terms the dropped doc interned do not leak into the files.
+    expect(alone.stats.postingCount).toBe(0);
+  });
+});
+
 describe("codec", () => {
   it("round-trips shard postings through encode/gzip", async () => {
     const postings = new Map<string, Posting[]>([
@@ -91,6 +107,39 @@ describe("codec", () => {
       expect(encodeShard(builder.shardEntries(shard))).toEqual(expected);
     }
     expect(builder.termCount).toBe(byTerm.size);
+  });
+
+  it("PostingsBuilder collect/commitDoc writes the same bytes as add, whatever the token order", () => {
+    const direct = new PostingsBuilder(2);
+    const collected = new PostingsBuilder(2);
+    const docs = [
+      { 会議: [0, 7, 30], 室内: [2], z: [99] },
+      { 会議: [5], 検索: [1, 2, 3] },
+    ];
+    docs.forEach((doc, docId) => {
+      const tokens: Array<[string, number]> = [];
+      for (const [term, positions] of Object.entries(doc)) {
+        direct.add(term, docId, positions);
+        for (const pos of positions) tokens.push([term, pos]);
+      }
+      // Reverse arrival order: boundary unigrams come after bigrams in index mode.
+      for (const [term, pos] of tokens.reverse()) expect(collected.collect(term, pos)).toBe(true);
+      expect(collected.commitDoc(docId)).toBe(tokens.length);
+    });
+    for (const shard of [0, 1]) {
+      expect(encodeShard(collected.shardEntries(shard))).toEqual(encodeShard(direct.shardEntries(shard)));
+    }
+  });
+
+  it("PostingsBuilder refuses new terms past maxTerms and leaves unused terms out of the shards", () => {
+    const builder = new PostingsBuilder(1, { maxTerms: 2 });
+    expect(builder.collect("a", 0)).toBe(true);
+    expect(builder.collect("b", 1)).toBe(true);
+    expect(builder.collect("c", 2)).toBe(false);
+    builder.abortDoc();
+    expect(builder.collect("a", 4)).toBe(true);
+    builder.commitDoc(0);
+    expect([...builder.shardEntries(0)].map(([term]) => term)).toEqual(["a"]);
   });
 
   it("PostingsBuilder rejects out-of-order docs", () => {

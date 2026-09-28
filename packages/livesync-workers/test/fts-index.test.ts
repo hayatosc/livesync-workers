@@ -5,6 +5,7 @@ import {
   deleteFtsIndex,
   ftsSearch,
   planFtsCompaction,
+  planFtsStaleRewrite,
   readFtsManifest,
   retireFtsSegments,
   type FtsManifest,
@@ -37,14 +38,14 @@ describe("fts-index segments", () => {
       { path: "a.md", content: "京都の会議メモ", hash: "a1", mtime: 1 },
       { path: "b.md", content: "検索エンジンの実験", hash: "b1", mtime: 2 },
     ]);
-    expect(first?.manifest.segments).toHaveLength(1);
+    expect(first.manifest!.segments).toHaveLength(1);
     // a.md changed, c.md is new: only they go into the next segment.
     const second = await appendFtsSegment(bucket, ref, [
       { path: "a.md", content: "京都の会議は中止", hash: "a2", mtime: 3 },
       { path: "c.md", content: "会議室の予約", hash: "c1", mtime: 4 },
     ]);
-    expect(second?.manifest.segments.map((s) => s.id)).toEqual([first!.segment.id, second!.segment.id]);
-    expect(second?.manifest.docCount).toBe(4);
+    expect(second.manifest!.segments.map((s) => s.id)).toEqual([first.segment!.id, second.segment!.id]);
+    expect(second.manifest!.docCount).toBe(4);
 
     const result = await ready(bucket, "会議");
     // Both versions of a.md come back; the vault decides which is current.
@@ -53,12 +54,12 @@ describe("fts-index segments", () => {
       ["a.md", "a2"],
       ["c.md", "c1"],
     ]);
-    expect(segmentDirs(store)).toEqual(new Set([first!.segment.id, second!.segment.id]));
+    expect(segmentDirs(store)).toEqual(new Set([first.segment!.id, second.segment!.id]));
   });
 
   it("writes nothing for an empty pass", async () => {
     const { bucket, store } = memoryBucket();
-    expect(await appendFtsSegment(bucket, ref, [])).toBeNull();
+    expect((await appendFtsSegment(bucket, ref, [])).segment).toBeNull();
     expect(store.size).toBe(0);
   });
 
@@ -79,10 +80,10 @@ describe("fts-index segments", () => {
     const appended = await appendFtsSegment(bucket, ref, [{ path: "a.md", content: "旧世代の会議メモ", hash: "a1" }], {
       now: 1_000_000,
     });
-    expect(appended?.manifest.segments.map((s) => s.hashed)).toEqual([false, true]);
+    expect(appended.manifest!.segments.map((s) => s.hashed)).toEqual([false, true]);
 
     const retired = await retireFtsSegments(bucket, ref, ["gen-old"], { now: 1_000_000 });
-    expect(retired?.segments.map((s) => s.id)).toEqual([appended!.segment.id]);
+    expect(retired?.segments.map((s) => s.id)).toEqual([appended.segment!.id]);
     expect(retired?.retired).toEqual([{ id: "gen-old", at: 1_000_000 }]);
     // Still on disk for in-flight searches; swept by the next commit once the grace period passed.
     expect(segmentDirs(store).has("gen-old")).toBe(true);
@@ -117,6 +118,39 @@ describe("fts-index segments", () => {
     expect(planFtsCompaction(manifest, { maxSegments: 2, maxMergedChars: 25 })).toBeNull();
   });
 
+  it("plans a lone rewrite of the segment with the most stale text past the thresholds", () => {
+    const segment = (id: string, totalChars: number) => ({ id, docCount: 1, totalChars, builtAt: 0, hashed: true, format: 2 as const });
+    const manifest: FtsManifest = {
+      version: 2,
+      shardCount: 16,
+      segments: [segment("a", 1_000_000), segment("b", 4_000_000), segment("c", 2_000_000)],
+      retired: [],
+      builtAt: 0,
+      docCount: 3,
+      totalChars: 7_000_000,
+    };
+    const live = new Map([
+      ["a", 500_000], // 50% stale, 500k
+      ["b", 3_400_000], // 15% stale, 600k: under the ratio
+      ["c", 1_400_000], // 30% stale, 600k
+    ]);
+    expect(planFtsStaleRewrite(manifest, live)?.segments.map((s) => s.id)).toEqual(["c"]);
+    expect(planFtsStaleRewrite(manifest, live, { minFreedChars: 700_000 })).toBeNull();
+    expect(planFtsStaleRewrite(manifest, live, { minFreedRatio: 0.1 })?.segments.map((s) => s.id)).toEqual(["b"]);
+    expect(planFtsStaleRewrite(manifest, new Map([["a", 1_000_000]]))).toBeNull();
+  });
+
+  it("refuses a query with more terms than one search may read", async () => {
+    const { bucket } = memoryBucket();
+    await appendFtsSegment(bucket, ref, [{ path: "a.md", content: "会議", hash: "a1" }]);
+    const long =
+      "会議室の予約と議事録の共有と次回の日程調整について検討する定例の打ち合わせを来週の火曜日に設定して関係者へ連絡を送付する予定なので資料の準備を今週中に終わらせたい";
+    const result = await ftsSearch(bucket, ref, long, 10);
+    expect(result.status).toBe("query-too-long");
+    expect(result.status === "query-too-long" && result.tokens).toBeGreaterThan(32);
+    expect((await ftsSearch(bucket, ref, "会議 予約", 10)).status).toBe("ready");
+  });
+
   it("compacts segments, dropping stale versions and duplicate copies", async () => {
     const { bucket, store } = memoryBucket();
     const s1 = await appendFtsSegment(bucket, ref, [
@@ -140,11 +174,11 @@ describe("fts-index segments", () => {
 
     const manifest = (await readFtsManifest(bucket, ref))!;
     const plan = planFtsCompaction(manifest, { maxSegments: 2 })!;
-    expect(plan.segments.map((s) => s.id)).toEqual([s2!.segment.id, s3!.segment.id]);
-    const merged = await compactFtsSegments(bucket, ref, { segments: [s1!.segment, s2!.segment] }, { isLive, now: 10 });
+    expect(plan.segments.map((s) => s.id)).toEqual([s2.segment!.id, s3.segment!.id]);
+    const merged = await compactFtsSegments(bucket, ref, { segments: [s1.segment!, s2.segment!] }, { isLive, now: 10 });
     expect(merged?.segment).toMatchObject({ docCount: 3, hashed: true });
-    expect(merged?.manifest.segments.map((s) => s.id)).toEqual([merged!.segment.id, s3!.segment.id]);
-    expect(merged?.manifest.retired.map((r) => r.id).sort()).toEqual([s1!.segment.id, s2!.segment.id].sort());
+    expect(merged?.manifest.segments.map((s) => s.id)).toEqual([merged!.segment.id, s3.segment!.id]);
+    expect(merged?.manifest.retired.map((r) => r.id).sort()).toEqual([s1.segment!.id, s2.segment!.id].sort());
 
     const result = await ready(bucket, "会議");
     expect(result.hits.map((hit) => [hit.path, hit.hash]).sort()).toEqual([
@@ -157,7 +191,7 @@ describe("fts-index segments", () => {
     expect((await ready(bucket, "会議は中止")).hits.map((hit) => hit.path)).toEqual(["a.md"]);
     expect((await ready(bucket, "会議メモ")).hits).toEqual([]);
     // Merged inputs stay on disk during the grace period.
-    expect(segmentDirs(store).has(s1!.segment.id)).toBe(true);
+    expect(segmentDirs(store).has(s1.segment!.id)).toBe(true);
   });
 
   it("upgrades a format-1 hashed segment to format 2 before merging anything", async () => {

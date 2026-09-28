@@ -55,7 +55,9 @@ export type VaultIndexStatus = {
 
 export type FullTextSearchResult =
   | { status: "ready"; hits: FullTextSearchHit[]; builtAt: number; docCount: number }
-  | { status: "building"; debug?: Record<string, unknown> | null };
+  | { status: "building"; debug?: Record<string, unknown> | null }
+  /** The query has more index terms than one search may look up; shorten it. */
+  | { status: "query-too-long"; maxTokens: number };
 
 const FTS_SNIPPETS_PER_DOC = 3;
 // Segments keep replaced/deleted versions until compaction, so ask the index
@@ -265,6 +267,7 @@ class VaultClient implements Vault {
       const debug = await readFtsPhase(bucket, this.ref);
       return { status: "building", debug };
     }
+    if (result.status === "query-too-long") return { status: "query-too-long", maxTokens: result.maxTokens };
     const candidates = result.hits.filter((hit) => !this.hidden(hit.path));
     // The vault keeps the current versions, drops the rest, and returns the
     // bodies for snippets in the same round trip.

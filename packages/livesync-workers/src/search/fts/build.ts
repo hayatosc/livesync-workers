@@ -7,9 +7,16 @@ import {
   type BucketedShard,
 } from "./codec.js";
 import { PostingsBuilder } from "./postings.js";
-import { normalizeText, tokenize } from "./tokenize.js";
+import { normalizedChars, tokenizeChars } from "./tokenize.js";
 
 export const DEFAULT_SHARD_COUNT = 16;
+/**
+ * Distinct terms one segment may hold. Natural text stays far below this
+ * (a 2M-char Japanese segment has ~140k), and each term costs the builder
+ * ~200 bytes of bookkeeping, so the cap keeps random-looking text (mojibake,
+ * hex dumps read as CJK) from exhausting the 128 MB isolate.
+ */
+export const DEFAULT_MAX_TERMS = 400_000;
 
 export type FtsDocInput = {
   path: string;
@@ -39,6 +46,13 @@ export type FtsBuildResult = {
   /** Segment-relative name (e.g. "shard-003.bin") to file body. */
   files: Map<string, Uint8Array>;
   docs: FtsDocMeta[];
+  /**
+   * Paths left out because they alone hold more than `maxTerms` distinct
+   * terms. The build stops consuming inputs when a doc would push the
+   * segment past `maxTerms`; a doc that only overflowed because of the docs
+   * before it is neither in `docs` nor here, and belongs in the next segment.
+   */
+  dropped: string[];
   stats: { docCount: number; totalChars: number; termCount: number; postingCount: number };
 };
 
@@ -60,46 +74,41 @@ export const INDEX_FILE_NAME = "index.bin";
  */
 export async function buildIndex(
   inputs: Iterable<FtsDocInput> | AsyncIterable<FtsDocInput>,
-  options: { shardCount?: number; bucketCount?: number; format?: 1 | 2 } = {},
+  options: { shardCount?: number; bucketCount?: number; format?: 1 | 2; maxTerms?: number } = {},
 ): Promise<FtsBuildResult> {
   const shardCount = options.shardCount ?? DEFAULT_SHARD_COUNT;
   const bucketCount = options.bucketCount ?? DEFAULT_BUCKET_COUNT;
   const format = options.format ?? 2;
-  const postings = new PostingsBuilder(shardCount);
+  const postings = new PostingsBuilder(shardCount, { maxTerms: options.maxTerms ?? DEFAULT_MAX_TERMS });
   const docs: FtsDocMeta[] = [];
+  const dropped: string[] = [];
   let totalChars = 0;
   let postingCount = 0;
 
   // Inputs may be a lazy generator so callers can read one note at a time
-  // instead of holding every body in memory alongside the postings.
+  // instead of holding every body in memory alongside the postings. Each
+  // note streams through normalization and tokenization straight into the
+  // builder, so the note's own cost is its packed token list.
   for await (const input of inputs) {
     const docId = docs.length;
-    const { chars } = normalizeText(input.content);
+    let overflow = false;
+    const chars = tokenizeChars(normalizedChars(input.content), "index", (term, pos) => {
+      if (!overflow && !postings.collect(term, pos)) overflow = true;
+    });
+    if (overflow) {
+      postings.abortDoc();
+      if (docs.length === 0) dropped.push(input.path);
+      break;
+    }
     docs.push({
       path: input.path,
       ...(input.title !== undefined ? { title: input.title } : {}),
-      chars: chars.length,
+      chars,
       ...(input.mtime !== undefined ? { mtime: input.mtime } : {}),
       ...(input.hash !== undefined ? { hash: input.hash } : {}),
     });
-    totalChars += chars.length;
-
-    const positionsByTerm = new Map<string, number[]>();
-    for (const token of tokenize(chars, "index")) {
-      let positions = positionsByTerm.get(token.term);
-      if (!positions) {
-        positions = [];
-        positionsByTerm.set(token.term, positions);
-      }
-      positions.push(token.pos);
-    }
-    for (const [term, positions] of positionsByTerm) {
-      // Tokens are emitted in ascending position order per mode section, but
-      // index-mode boundary unigrams arrive after the bigrams; keep sorted.
-      positions.sort((a, b) => a - b);
-      postings.add(term, docId, positions);
-      postingCount += positions.length;
-    }
+    totalChars += chars;
+    postingCount += postings.commitDoc(docId);
   }
 
   const files = new Map<string, Uint8Array>();
@@ -128,6 +137,7 @@ export async function buildIndex(
   return {
     files,
     docs,
+    dropped,
     stats: {
       docCount: docs.length,
       totalChars,

@@ -214,7 +214,7 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
 
   server.tool(
     "grepNotes",
-    `Exact-match full-text search over ${label} notes (substring for Japanese/CJK, whole-word for ASCII). Whitespace-separated phrases are ANDed. Use searchNotes for semantic queries instead.`,
+    `Exact-match full-text search over ${label} notes (substring for Japanese/CJK, whole-word for ASCII). Whitespace-separated phrases are ANDed. Keep queries short (a few words, up to about 60 CJK characters in total). Use searchNotes for semantic queries instead.`,
     {
       query: z.string().min(1).max(200).describe("Search phrase(s)."),
       limit: z
@@ -233,6 +233,12 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
           status: "building",
           message: "The full-text index is being built; retry shortly.",
           debug: result.debug ?? null,
+        });
+      }
+      if (result.status === "query-too-long") {
+        return textResult({
+          status: "query-too-long",
+          message: `The query has too many terms (at most ${result.maxTokens} index terms, about ${result.maxTokens * 2} CJK characters or ${result.maxTokens} words); search for a shorter phrase.`,
         });
       }
       return textResult(result);

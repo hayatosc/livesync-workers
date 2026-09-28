@@ -7,10 +7,14 @@ import {
   FTS_SETTLED_PHASES,
   markFtsPhase,
   planFtsCompaction,
+  planFtsStaleRewrite,
   readFtsManifest,
   readFtsPhase,
+  readFtsSegmentDocs,
   retireFtsSegments,
+  type CompactionPlan,
   type FtsManifest,
+  type FtsSegment,
 } from "../search/fts-index.js";
 import type { FtsDocInput } from "../search/fts/build.js";
 import {
@@ -142,7 +146,11 @@ const FTS_SEGMENT_MAX_DOCS = 4_000;
 // Ceiling on the whole index (sum of segment text); passes stop with an
 // explicit error above it. 50M code units is ~120 MB of Japanese Markdown.
 const FTS_MAX_TOTAL_CODE_UNITS = 50_000_000;
-const FTS_MAX_NOTE_BYTES = 2_000_000;
+// One note contributes at most this much text (code units): the built-in
+// index takes the first part of a longer note, an external one skips it.
+// Measured 2026-09: a 2M-code-unit note builds in ~65 MB of heap, so this
+// leaves room for the rest of the segment.
+const FTS_MAX_NOTE_CODE_UNITS = 1_000_000;
 // A pass that dies from a memory reset leaves no SQLite trace (the event's
 // writes roll back), so attempts are counted in the R2 phase marker. After
 // this many interrupted attempts the index is disarmed instead of looping.
@@ -152,6 +160,18 @@ const FTS_MAX_BUILD_ATTEMPTS = 3;
 // alarm event, no re-tokenizing).
 const FTS_COMPACT_MAX_SEGMENTS = 8;
 const FTS_COMPACT_MAX_MERGED_CHARS = 16_000_000;
+// Segments count replaced/deleted versions until compaction drops them, and
+// the size guard counts them too. A segment is rewritten alone once that
+// dead weight is this large (share of its text, and at least this many
+// code units), so a vault that is edited a lot does not grow into the guard.
+const FTS_STALE_REWRITE_MIN_RATIO = 0.25;
+const FTS_STALE_REWRITE_MIN_CHARS = 250_000;
+// Finding stale text means reading every segment's doc list; skip that while
+// the manifest's doc count is within this factor of the live doc count.
+const FTS_STALE_SCAN_DOC_RATIO = 1.2;
+// Set by ftsRebuild: segments built before this are retired once every note
+// has been re-indexed, and the size guard ignores them meanwhile.
+const FTS_REBUILD_EPOCH_META_KEY = "fts_rebuild_epoch";
 // Most candidates one search asks the vault to check against its current state.
 const FTS_RESOLVE_MAX_CANDIDATES = 500;
 // External full-text index (VaultBindings.fullText): notes already
@@ -1404,7 +1424,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       let ftsHash = state?.fts_hash ?? null;
       let ftsFailed = false;
       if (!fullTextCurrent) {
-        const oversized = content.length > FTS_MAX_NOTE_BYTES;
+        const oversized = content.length > FTS_MAX_NOTE_CODE_UNITS;
         if (oversized) console.warn("Full-text index skipping oversized note", { path });
         const ok = await writeFullText(path, (w) =>
           oversized
@@ -1463,6 +1483,9 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     this.ctx.storage.sql.exec(`UPDATE index_state SET fts_hash = NULL, attempts = 0`);
     if (!this.externalFullText()) {
       this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, FTS_ERROR_META_KEY);
+      // The existing segments keep serving searches until the rebuilt ones
+      // cover every note; then they are retired (see runFtsPass).
+      this.setMeta(FTS_REBUILD_EPOCH_META_KEY, String(Date.now()));
       this.armFtsBuild(0);
     }
   }
@@ -1589,12 +1612,20 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       await markFtsPhase(bucket, ref, "segment-start", { ...marker, pending: pending.length });
       const manifest = await readFtsManifest(bucket, ref);
       const maxTotal = this.bindings().ftsMaxTotalCodeUnits ?? FTS_MAX_TOTAL_CODE_UNITS;
-      const indexedChars = manifest?.totalChars ?? 0;
+      const indexedChars = manifest ? this.ftsCountedSegments(manifest).reduce((sum, s) => sum + s.totalChars, 0) : 0;
       try {
         return await this.buildFtsSegment(ref, pending, { marker, budget: maxTotal - indexedChars, maxTotal });
       } catch (error) {
         if (!(error instanceof FtsTooLargeError)) throw error;
-        // Too big for the index; record why and disarm instead of burning CPU.
+        // Over the guard. Dead weight (replaced versions) counts toward it,
+        // so shed the worst segment's first and try again; only a vault that
+        // is too big when live is recorded as such and disarmed.
+        const rewrite = manifest ? await this.planFtsStaleRewrite(ref, manifest, { force: true }) : null;
+        if (rewrite) {
+          console.warn("FTS pass over the size guard; rewriting a segment to drop stale text", { segment: rewrite.segments[0]?.id });
+          await this.runFtsCompaction(ref, rewrite, marker, "current");
+          return true;
+        }
         const message = `vault exceeds the full-text size guard (${error.codeUnits.toLocaleString("en")}+ of ${error.limit.toLocaleString("en")} code units)`;
         console.warn("FTS pass aborted: vault exceeds size guard", { codeUnits: error.codeUnits });
         await markFtsPhase(bucket, ref, "too-large", { codeUnits: error.codeUnits });
@@ -1606,20 +1637,51 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     // Nothing pending: maintenance, one step per event.
     const manifest = await readFtsManifest(bucket, ref);
     if (!manifest) return false;
-    const legacy = manifest.segments.filter((s) => !s.hashed).map((s) => s.id);
-    if (legacy.length > 0) {
-      // Every note is in a hashed segment now; the pre-segment generation is redundant.
-      await retireFtsSegments(bucket, ref, legacy);
-      console.log("FTS legacy generation retired", { segments: legacy });
+    const epoch = this.ftsRebuildEpoch();
+    const outdated = this.ftsOutdatedSegments(manifest).map((s) => s.id);
+    if (outdated.length > 0) {
+      // Every note is in a hashed segment now (and, after a rebuild, in one
+      // built since): the older ones are redundant.
+      await retireFtsSegments(bucket, ref, outdated);
+      this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, FTS_REBUILD_EPOCH_META_KEY);
+      console.log("FTS outdated segments retired", { segments: outdated, rebuild: epoch != null });
       return true;
     }
-    const plan = planFtsCompaction(manifest, {
+    if (epoch != null) {
+      // Nothing pending and nothing older than the rebuild: it is complete.
+      this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, FTS_REBUILD_EPOCH_META_KEY);
+    }
+    const merge = planFtsCompaction(manifest, {
       maxSegments: FTS_COMPACT_MAX_SEGMENTS,
       maxMergedChars: FTS_COMPACT_MAX_MERGED_CHARS,
     });
-    if (!plan) return false;
-    const merged = await compactFtsSegments(bucket, ref, plan, {
-      isLive: (docs) => docs.map((doc) => this.ftsDocIsLive(doc.path, doc.hash ?? null)),
+    if (merge) {
+      await this.runFtsCompaction(ref, merge, marker, "indexed");
+      return true;
+    }
+    const rewrite = await this.planFtsStaleRewrite(ref, manifest);
+    if (!rewrite) return false;
+    await this.runFtsCompaction(ref, rewrite, marker, "current");
+    return true;
+  }
+
+  /**
+   * Merge or rewrite segments. "indexed" keeps the version the index last
+   * recorded for a path (searches never lose a note that way); "current"
+   * keeps only the vault's current content, dropping versions of notes that
+   * are still waiting to be re-indexed, which is what frees space.
+   */
+  private async runFtsCompaction(
+    ref: VaultRef,
+    plan: CompactionPlan,
+    marker: Record<string, unknown>,
+    keep: "indexed" | "current",
+  ): Promise<void> {
+    const merged = await compactFtsSegments(this.ftsBucket(), ref, plan, {
+      isLive: (docs) =>
+        docs.map((doc) =>
+          keep === "indexed" ? this.ftsDocIsLive(doc.path, doc.hash ?? null) : this.ftsDocIsCurrent(doc.path, doc.hash ?? null),
+        ),
       marker,
     });
     if (merged) this.setMeta(FTS_GENERATION_META_KEY, merged.segment.id);
@@ -1628,7 +1690,70 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       into: merged?.segment.id,
       docCount: merged?.segment.docCount,
     });
-    return true;
+  }
+
+  private ftsRebuildEpoch(): number | null {
+    const raw = this.getMeta(FTS_REBUILD_EPOCH_META_KEY);
+    return raw ? Number(raw) || null : null;
+  }
+
+  /** Segments a maintenance step retires: the legacy generation, and those a rebuild replaced. */
+  private ftsOutdatedSegments(manifest: FtsManifest): FtsSegment[] {
+    const epoch = this.ftsRebuildEpoch();
+    return manifest.segments.filter((s) => !s.hashed || (epoch != null && s.builtAt < epoch));
+  }
+
+  /** Whether a segment entry is the vault's current content of its path (see runFtsCompaction). */
+  private ftsDocIsCurrent(path: string, hash: string | null): boolean {
+    if (hash == null) return false;
+    const row = this.first<{ hash: string | null }>(`SELECT hash FROM index_state WHERE path = ?`, path);
+    return row?.hash === hash;
+  }
+
+  private ftsStaleRewriteCandidates(manifest: FtsManifest): FtsSegment[] {
+    return this.ftsCountedSegments(manifest).filter((s) => s.hashed && s.format === 2);
+  }
+
+  /** Cheap check (manifest and doc counts only) for whether a stale scan could find enough to rewrite. */
+  private ftsStaleDocsSuspected(manifest: FtsManifest): boolean {
+    const candidates = this.ftsStaleRewriteCandidates(manifest);
+    if (!candidates.some((s) => s.totalChars >= FTS_STALE_REWRITE_MIN_CHARS)) return false;
+    const liveDocs =
+      this.first<{ count: number }>(`SELECT COUNT(*) AS count FROM index_state WHERE fts_hash IS NOT NULL`)?.count ?? 0;
+    return candidates.reduce((sum, s) => sum + s.docCount, 0) > liveDocs * FTS_STALE_SCAN_DOC_RATIO;
+  }
+
+  /** Segments the size guard counts: all of them, minus those a rebuild in progress will retire. */
+  private ftsCountedSegments(manifest: FtsManifest): FtsSegment[] {
+    const epoch = this.ftsRebuildEpoch();
+    return epoch == null ? manifest.segments : manifest.segments.filter((s) => s.builtAt >= epoch);
+  }
+
+  /**
+   * The segment worth rewriting alone to drop replaced/deleted versions, if
+   * any. Reading every segment's doc list is skipped while the manifest's
+   * doc count says there is little to gain, unless `force` (the size guard
+   * tripped).
+   */
+  private async planFtsStaleRewrite(
+    ref: VaultRef,
+    manifest: FtsManifest,
+    options: { force?: boolean } = {},
+  ): Promise<CompactionPlan | null> {
+    const candidates = this.ftsStaleRewriteCandidates(manifest);
+    if (candidates.length === 0) return null;
+    if (!options.force && !this.ftsStaleDocsSuspected(manifest)) return null;
+    const liveChars = new Map<string, number>();
+    for (const segment of candidates) {
+      const docs = await readFtsSegmentDocs(this.ftsBucket(), ref, segment.id);
+      let live = 0;
+      for (const doc of docs) if (this.ftsDocIsCurrent(doc.path, doc.hash ?? null)) live += doc.chars;
+      liveChars.set(segment.id, live);
+    }
+    return planFtsStaleRewrite({ ...manifest, segments: candidates }, liveChars, {
+      minFreedRatio: FTS_STALE_REWRITE_MIN_RATIO,
+      minFreedChars: FTS_STALE_REWRITE_MIN_CHARS,
+    });
   }
 
   /**
@@ -1655,25 +1780,30 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     async function* inputs(): AsyncGenerator<FtsDocInput> {
       for (const row of pending) {
         if (consumed >= FTS_SEGMENT_MAX_DOCS || codeUnits >= FTS_SEGMENT_MAX_CODE_UNITS) break;
-        consumed += 1;
         const rev = self.rawWinningRow(row.doc_id);
-        const content = rev ? self.fileContentForRow(rev) : null;
-        if (content == null) {
+        const full = rev ? self.fileContentForRow(rev) : null;
+        if (full == null) {
+          consumed += 1;
           console.warn("FTS pass skipping note without a readable body", { path: row.path });
-          skipped.push(row);
-          continue;
-        }
-        if (content.length > FTS_MAX_NOTE_BYTES) {
-          console.warn("FTS pass skipping oversized note", { path: row.path });
           skipped.push(row);
           continue;
         }
         // The body moved on since the vector pass recorded its hash; the
         // change that did it is still in the feed and re-queues the note.
-        if ((await hashText(content)) !== row.hash) {
+        if ((await hashText(full)) !== row.hash) {
+          consumed += 1;
           mismatched += 1;
           continue;
         }
+        // A long note is indexed up to the cap (its first part stays
+        // searchable), and a note the segment has no room for starts the
+        // next one rather than stretching this one.
+        const content = full.length > FTS_MAX_NOTE_CODE_UNITS ? full.slice(0, FTS_MAX_NOTE_CODE_UNITS) : full;
+        if (content.length < full.length) {
+          console.warn("FTS pass indexing only the start of a long note", { path: row.path, codeUnits: full.length });
+        }
+        if (consumed > 0 && codeUnits + content.length > FTS_SEGMENT_MAX_CODE_UNITS) break;
+        consumed += 1;
         codeUnits += content.length;
         if (codeUnits > options.budget) {
           throw new FtsTooLargeError(options.maxTotal - options.budget + codeUnits, options.maxTotal);
@@ -1690,7 +1820,13 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     }
 
     const result = await appendFtsSegment(bucket, ref, inputs(), { marker: options.marker });
-    for (const row of [...written, ...skipped]) {
+    // A note the build handed back (segment full of terms) stays pending for
+    // the next segment; one it dropped (too many terms on its own) is marked
+    // like an oversized note.
+    if (result.dropped.length > 0) console.warn("FTS pass dropping notes with too many distinct terms", { paths: result.dropped });
+    const settled = new Set([...result.docs.map((doc) => doc.path), ...result.dropped]);
+    const indexed = written.filter((row) => settled.has(row.path));
+    for (const row of [...indexed, ...skipped]) {
       this.ctx.storage.sql.exec(
         `UPDATE index_state SET fts_hash = ? WHERE path = ? AND hash = ?`,
         row.hash,
@@ -1698,32 +1834,34 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         row.hash,
       );
     }
-    if (result) this.setMeta(FTS_GENERATION_META_KEY, result.segment.id);
+    if (result.segment) this.setMeta(FTS_GENERATION_META_KEY, result.segment.id);
     this.ctx.storage.sql.exec(`DELETE FROM meta WHERE key = ?`, FTS_ERROR_META_KEY);
     console.log("FTS segment written", {
-      segment: result?.segment.id ?? null,
-      docCount: result?.segment.docCount ?? 0,
+      segment: result.segment?.id ?? null,
+      docCount: result.segment?.docCount ?? 0,
       codeUnits,
       skipped: skipped.length,
-      segments: result?.manifest.segments.length,
+      dropped: result.dropped.length,
+      segments: result.manifest?.segments.length,
       attempts: options.marker.attempts,
     });
-    if (written.length + skipped.length === 0 && mismatched > 0) {
+    if (indexed.length + skipped.length === 0 && mismatched > 0 && written.length === 0) {
       // Only notes whose body moved on: the change that moved it re-arms the pass.
       return consumed < pending.length;
     }
-    return consumed < pending.length || this.hasFtsPending() || this.ftsNeedsMaintenance(result?.manifest);
+    return consumed < pending.length || this.hasFtsPending() || this.ftsNeedsMaintenance(result.manifest);
   }
 
-  /** Whether the idle maintenance step (retire legacy, compact) has work. */
+  /** Whether the idle maintenance step (retire outdated, merge, shed stale text) may have work. */
   private ftsNeedsMaintenance(manifest: FtsManifest | null | undefined): boolean {
     if (!manifest) return false;
     return (
-      manifest.segments.some((s) => !s.hashed) ||
+      this.ftsOutdatedSegments(manifest).length > 0 ||
       planFtsCompaction(manifest, {
         maxSegments: FTS_COMPACT_MAX_SEGMENTS,
         maxMergedChars: FTS_COMPACT_MAX_MERGED_CHARS,
-      }) != null
+      }) != null ||
+      this.ftsStaleDocsSuspected(manifest)
     );
   }
 

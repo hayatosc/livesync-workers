@@ -13,6 +13,11 @@
  * phrase: bigrams for runs of 2+, a unigram only for single-char runs.
  * Consequence: a single-CJK-char query only matches places where that char is
  * adjacent to a word char, separator, or text edge.
+ *
+ * The index build streams: {@link normalizedChars} yields one normalized
+ * char at a time and {@link tokenizeChars} hands each token to a callback as
+ * soon as it is complete, so a note costs no per-char arrays or token list
+ * (a 2M-char note used to need ~130 bytes of heap per char that way).
  */
 
 export type Token = { term: string; pos: number };
@@ -37,8 +42,7 @@ export function normalizeText(text: string): NormalizedText {
   const orig: number[] = [];
   let offset = 0;
   for (const ch of text) {
-    const norm = ch.normalize("NFKC").toLowerCase();
-    for (const nc of norm) {
+    for (const nc of ch.normalize("NFKC").toLowerCase()) {
       chars.push(nc);
       orig.push(offset);
     }
@@ -47,37 +51,68 @@ export function normalizeText(text: string): NormalizedText {
   return { chars, orig };
 }
 
+/** The normalized chars of `text`, one at a time (same sequence as normalizeText().chars). */
+export function* normalizedChars(text: string): IterableIterator<string> {
+  for (const ch of text) {
+    const norm = ch.normalize("NFKC").toLowerCase();
+    if (norm.length === 1) yield norm;
+    else for (const nc of norm) yield nc;
+  }
+}
+
+/**
+ * Tokenize a stream of normalized chars, calling `emit` for each token in
+ * position order (a run's bigrams first, then its boundary unigrams in index
+ * mode). Returns the number of chars consumed.
+ */
+export function tokenizeChars(
+  chars: Iterable<string>,
+  mode: "index" | "query",
+  emit: (term: string, pos: number) => void,
+): number {
+  let i = 0;
+  let run: "word" | "other" | null = null;
+  let runStart = 0;
+  let word = "";
+  let first = "";
+  let prev = "";
+  const flush = (): void => {
+    if (run === "word") {
+      emit(word, runStart);
+    } else if (run === "other") {
+      if (i - runStart === 1) {
+        emit(first, runStart);
+      } else if (mode === "index") {
+        emit(first, runStart);
+        emit(prev, i - 1);
+      }
+    }
+    run = null;
+  };
+  for (const c of chars) {
+    const kind = WORD_RE.test(c) ? "word" : SEP_RE.test(c) ? null : "other";
+    if (kind !== run) {
+      flush();
+      run = kind;
+      runStart = i;
+      word = "";
+      first = c;
+    }
+    if (kind === "word") {
+      word += c;
+    } else if (kind === "other") {
+      if (i > runStart) emit(prev + c, i - 1);
+      prev = c;
+    }
+    i += 1;
+  }
+  flush();
+  return i;
+}
+
 export function tokenize(chars: string[], mode: "index" | "query"): Token[] {
   const tokens: Token[] = [];
-  const n = chars.length;
-  let i = 0;
-  while (i < n) {
-    const c = chars[i]!;
-    if (WORD_RE.test(c)) {
-      let j = i + 1;
-      while (j < n && WORD_RE.test(chars[j]!)) j += 1;
-      tokens.push({ term: chars.slice(i, j).join(""), pos: i });
-      i = j;
-    } else if (SEP_RE.test(c)) {
-      i += 1;
-    } else {
-      let j = i + 1;
-      while (j < n && !WORD_RE.test(chars[j]!) && !SEP_RE.test(chars[j]!)) j += 1;
-      const len = j - i;
-      if (len === 1) {
-        tokens.push({ term: c, pos: i });
-      } else {
-        for (let k = i; k < j - 1; k += 1) {
-          tokens.push({ term: chars[k]! + chars[k + 1]!, pos: k });
-        }
-        if (mode === "index") {
-          tokens.push({ term: chars[i]!, pos: i });
-          tokens.push({ term: chars[j - 1]!, pos: j - 1 });
-        }
-      }
-      i = j;
-    }
-  }
+  tokenizeChars(chars, mode, (term, pos) => tokens.push({ term, pos }));
   return tokens;
 }
 

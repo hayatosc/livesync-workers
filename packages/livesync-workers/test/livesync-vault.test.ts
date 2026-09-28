@@ -620,7 +620,105 @@ describe("LiveSync Vectorize indexing", () => {
     expect(during.hits.map((hit) => hit.path).sort()).toEqual(["a.md", "c.md"]);
     await durableObject.alarm();
     expect(await status()).toMatchObject({ fts: { pending: 0 } });
-    expect((await readFtsManifest(bucket, ref))?.segments).toHaveLength(3);
+    const rebuilt = (await readFtsManifest(bucket, ref))!;
+    expect(rebuilt.segments).toHaveLength(3);
+    // Once every note is in a segment built since the rebuild, the older ones are retired.
+    await durableObject.alarm();
+    const settled = (await readFtsManifest(bucket, ref))!;
+    expect(settled.segments.map((s) => s.id)).toEqual([rebuilt.segments[2]!.id]);
+    expect(settled.retired.map((r) => r.id).sort()).toEqual(rebuilt.segments.slice(0, 2).map((s) => s.id).sort());
+    await durableObject.alarm();
+    expect(await status()).toMatchObject({ fts: { pending: 0, rebuildAt: null, error: null } });
+    expect(storage.sql.exec(`SELECT value FROM meta WHERE key = 'fts_rebuild_epoch'`).toArray()).toEqual([]);
+  });
+
+  it("indexes only the start of a very long note", async () => {
+    const context = await created();
+    const { bucket } = memoryBucket();
+    context.env.FTS_BUCKET = bucket;
+    const { durableObject, storage } = context;
+    const ref = { tenantId: "user-1", databaseName: "vault" };
+    const content = `${"会議".repeat(500_000)}末尾の合図`; // 1,000,005 code units
+    await replicate(durableObject, [leafDoc("h:a", content), noteDoc("a.md", "1-a", "a.md", ["h:a"])]);
+    await durableObject.alarm();
+    storage.sql.exec(`UPDATE meta SET value = '0' WHERE key = 'fts_rebuild_at'`);
+    await durableObject.alarm();
+    const manifest = (await readFtsManifest(bucket, ref))!;
+    expect(manifest.segments.map((s) => s.totalChars)).toEqual([1_000_000]);
+    expect((await ftsSearch(bucket, ref, "会議", 5)).status === "ready").toBe(true);
+    const tail = await ftsSearch(bucket, ref, "末尾の合図", 5);
+    expect(tail.status === "ready" && tail.hits).toEqual([]);
+    expect(await json(await internalOp(durableObject, { op: "indexStatus" }))).toMatchObject({
+      fts: { pending: 0, error: null },
+    });
+  });
+
+  it("rewrites a segment whose text is mostly replaced versions once the vault is idle", async () => {
+    const context = await created();
+    const { bucket } = memoryBucket();
+    context.env.FTS_BUCKET = bucket;
+    const { durableObject, storage } = context;
+    const ref = { tenantId: "user-1", databaseName: "vault" };
+    type Status = { fts: { rebuildAt: number | null; error: string | null; pending: number } };
+    const status = async () => json<Status>(await internalOp(durableObject, { op: "indexStatus" }));
+    const makeDue = () => storage.sql.exec(`UPDATE meta SET value = '0' WHERE key = 'fts_rebuild_at'`);
+
+    await replicate(durableObject, [leafDoc("h:a1", "あ".repeat(300_000)), noteDoc("a.md", "1-a", "a.md", ["h:a1"])]);
+    await durableObject.alarm();
+    makeDue();
+    await durableObject.alarm();
+    const first = (await readFtsManifest(bucket, ref))!;
+    expect(await status()).toMatchObject({ fts: { pending: 0, rebuildAt: null } });
+
+    await replicate(durableObject, [leafDoc("h:a2", "い".repeat(300_000)), noteDoc("a.md", "2-a2", "a.md", ["h:a2"])]);
+    await durableObject.alarm();
+    makeDue();
+    await durableObject.alarm(); // the new version's segment; the old one is now dead weight
+    expect((await readFtsManifest(bucket, ref))!.segments).toHaveLength(2);
+    expect((await status()).fts.rebuildAt).not.toBeNull(); // a maintenance pass is armed
+    await durableObject.alarm();
+    const after = (await readFtsManifest(bucket, ref))!;
+    expect(after.segments.map((s) => s.totalChars)).toEqual([300_000]);
+    expect(after.retired.map((r) => r.id)).toEqual(first.segments.map((s) => s.id));
+    await durableObject.alarm();
+    expect(await status()).toMatchObject({ fts: { pending: 0, rebuildAt: null, error: null } });
+  });
+
+  it("sheds replaced versions before giving up on the size guard", async () => {
+    const context = await created();
+    context.env.ftsMaxTotalCodeUnits = 400_000;
+    const { bucket } = memoryBucket();
+    context.env.FTS_BUCKET = bucket;
+    const { durableObject, storage } = context;
+    const ref = { tenantId: "user-1", databaseName: "vault" };
+    type Status = { fts: { rebuildAt: number | null; error: string | null; pending: number } };
+    const status = async () => json<Status>(await internalOp(durableObject, { op: "indexStatus" }));
+    const makeDue = () => storage.sql.exec(`UPDATE meta SET value = '0' WHERE key = 'fts_rebuild_at'`);
+
+    await replicate(durableObject, [leafDoc("h:a1", "あ".repeat(300_000)), noteDoc("a.md", "1-a", "a.md", ["h:a1"])]);
+    await durableObject.alarm();
+    makeDue();
+    await durableObject.alarm();
+    expect(await status()).toMatchObject({ fts: { pending: 0, error: null } });
+    const first = (await readFtsManifest(bucket, ref))!;
+    expect(first.segments.map((s) => s.totalChars)).toEqual([300_000]);
+
+    // The replacement does not fit next to the old version (600k > 400k)...
+    await replicate(durableObject, [leafDoc("h:a2", "い".repeat(300_000)), noteDoc("a.md", "2-a2", "a.md", ["h:a2"])]);
+    await durableObject.alarm();
+    makeDue();
+    await durableObject.alarm(); // over the guard: the old version's segment is rewritten away
+    expect(await status()).toMatchObject({ fts: { pending: 1, error: null } });
+    const shed = (await readFtsManifest(bucket, ref))!;
+    expect(shed.segments).toEqual([]);
+    expect(shed.retired.map((r) => r.id)).toEqual(first.segments.map((s) => s.id));
+    await durableObject.alarm(); // ...and now it does.
+    expect(await status()).toMatchObject({ fts: { pending: 0, error: null } });
+    expect((await readFtsManifest(bucket, ref))!.segments.map((s) => s.totalChars)).toEqual([300_000]);
+    const hits = await ftsSearch(bucket, ref, "いい", 5);
+    expect(hits.status === "ready" && hits.hits.map((h) => h.path)).toEqual(["a.md"]);
+    await durableObject.alarm();
+    expect(await status()).toMatchObject({ fts: { pending: 0, rebuildAt: null, error: null } });
   });
 
   it("re-indexes a vault with a version-1 index into segments and retires the old generation", async () => {

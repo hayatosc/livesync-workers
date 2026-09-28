@@ -228,11 +228,21 @@ async function putSegment(
   }
 }
 
+export type FtsAppendResult = {
+  /** Null when nothing was indexed (no files written, manifest untouched). */
+  manifest: FtsManifest | null;
+  segment: FtsSegment | null;
+  /** Docs the segment holds; inputs not listed here (and not dropped) were not consumed. */
+  docs: FtsDocMeta[];
+  /** Inputs no segment can hold (see FtsBuildResult.dropped). */
+  dropped: string[];
+};
+
 /**
  * Index the given notes as one new segment and add it to the manifest.
  * The manifest write is the commit point: a pass that dies earlier leaves
- * orphan files the next pass sweeps. Returns null when there was nothing to
- * index (no files are written).
+ * orphan files the next pass sweeps. The build may stop before the last
+ * input (term cap, see buildIndex); the result says which docs made it.
  */
 export async function appendFtsSegment(
   bucket: R2Bucket,
@@ -243,11 +253,11 @@ export async function appendFtsSegment(
     marker?: Record<string, unknown>;
     now?: number;
   } = {},
-): Promise<{ manifest: FtsManifest; segment: FtsSegment } | null> {
+): Promise<FtsAppendResult> {
   const extra = options.marker ?? {};
   const now = options.now ?? Date.now();
   const built = await buildIndex(docs, { shardCount: FTS_SHARD_COUNT });
-  if (built.stats.docCount === 0) return null;
+  if (built.stats.docCount === 0) return { manifest: null, segment: null, docs: [], dropped: built.dropped };
   await markFtsPhase(bucket, ref, "segment-build-done", {
     ...extra,
     docCount: built.stats.docCount,
@@ -285,7 +295,7 @@ export async function appendFtsSegment(
   );
   await writeManifest(bucket, ref, manifest);
   await markFtsPhase(bucket, ref, "segment-complete", { ...extra, segment: id });
-  return { manifest, segment };
+  return { manifest, segment, docs: built.docs, dropped: built.dropped };
 }
 
 /** Drop segments from the manifest (files are deleted by a later sweep). */
@@ -340,6 +350,36 @@ export function planFtsCompaction(
   if (smallest[0]!.totalChars + smallest[1]!.totalChars > maxMergedChars) return null;
   const chosen = new Set(smallest.map((s) => s.id));
   return { segments: manifest.segments.filter((s) => chosen.has(s.id)) };
+}
+
+/** The doc list of one segment (segment-local doc id = array index). */
+export async function readFtsSegmentDocs(bucket: R2Bucket, ref: VaultRef, id: string): Promise<FtsDocMeta[]> {
+  return readSegmentDocs(bucket, basePrefix(ref), id);
+}
+
+/**
+ * Which segment to rewrite alone to drop the text of replaced or deleted
+ * versions: the one that would shed the most, if that is at least
+ * `minFreedRatio` of its text and `minFreedChars`. `liveChars` maps segment
+ * id to the chars of its docs the vault still considers current; segments
+ * missing from it are not considered.
+ */
+export function planFtsStaleRewrite(
+  manifest: FtsManifest,
+  liveChars: Map<string, number>,
+  options: { minFreedRatio?: number; minFreedChars?: number } = {},
+): CompactionPlan | null {
+  const minFreedRatio = options.minFreedRatio ?? 0.25;
+  const minFreedChars = options.minFreedChars ?? 250_000;
+  let best: { segment: FtsSegment; freed: number } | null = null;
+  for (const segment of manifest.segments) {
+    const live = liveChars.get(segment.id);
+    if (live === undefined) continue;
+    const freed = segment.totalChars - live;
+    if (freed < minFreedChars || freed < segment.totalChars * minFreedRatio) continue;
+    if (!best || freed > best.freed) best = { segment, freed };
+  }
+  return best ? { segments: [best.segment] } : null;
 }
 
 async function readSegmentDocs(bucket: R2Bucket, base: string, id: string): Promise<FtsDocMeta[]> {
@@ -458,9 +498,17 @@ export async function deleteFtsIndex(bucket: R2Bucket, ref: VaultRef): Promise<v
   await deleteKeys(bucket, await listAllKeys(bucket, `${basePrefix(ref)}/`));
 }
 
+/**
+ * Most index terms one query may look up. Each term is a byte-range read per
+ * segment (plus cache calls), and a Worker gets ~1,000 subrequests per
+ * request; 32 terms is 64 CJK chars or 32 words, more than a search needs.
+ */
+export const FTS_MAX_QUERY_TOKENS = 32;
+
 export type FtsSearchResult =
   | { status: "ready"; manifest: FtsManifest; hits: RankedHit[] }
-  | { status: "not-built" };
+  | { status: "not-built" }
+  | { status: "query-too-long"; tokens: number; maxTokens: number };
 
 /**
  * Read-through cache for immutable segment files (the Workers Cache API).
@@ -521,6 +569,8 @@ export async function ftsSearch(
   if (!manifest) return { status: "not-built" };
   const phrases = parsePhrases(query);
   if (phrases.length === 0) return { status: "ready", manifest, hits: [] };
+  const tokens = phrases.reduce((sum, phrase) => sum + phrase.tokens.length, 0);
+  if (tokens > FTS_MAX_QUERY_TOKENS) return { status: "query-too-long", tokens, maxTokens: FTS_MAX_QUERY_TOKENS };
   const base = basePrefix(ref);
   const cache = options.cache;
 
