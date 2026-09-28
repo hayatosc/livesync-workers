@@ -632,6 +632,55 @@ describe("LiveSync Vectorize indexing", () => {
     expect(storage.sql.exec(`SELECT value FROM meta WHERE key = 'fts_rebuild_epoch'`).toArray()).toEqual([]);
   });
 
+  it("indexes a note whose recorded hash does not match its body, under that hash", async () => {
+    const context = await created();
+    const { bucket } = memoryBucket();
+    context.env.FTS_BUCKET = bucket;
+    const { durableObject, storage } = context;
+    const ref = { tenantId: "user-1", databaseName: "vault" };
+    const status = async () =>
+      json<{ fts: { pending: number; error: string | null } }>(await internalOp(durableObject, { op: "indexStatus" }));
+    await replicate(durableObject, [leafDoc("h:a", "会議のメモ"), noteDoc("a.md", "1-a", "a.md", ["h:a"])]);
+    await durableObject.alarm();
+    // Whatever left the vault's record disagreeing with the body (an older
+    // build, a conflict): the note must not stay pending forever.
+    storage.sql.exec(`UPDATE index_state SET hash = 'bogus' WHERE path = 'a.md'`);
+    storage.sql.exec(`UPDATE meta SET value = '0' WHERE key = 'fts_rebuild_at'`);
+    await durableObject.alarm();
+    expect(await status()).toMatchObject({ fts: { pending: 0, error: null } });
+    const result = await ftsSearch(bucket, ref, "会議", 5);
+    expect(result.status === "ready" && result.hits.map((hit) => [hit.path, hit.hash])).toEqual([["a.md", "bogus"]]);
+    const live = await json<{ hits: Array<{ path: string }> }>(
+      await internalOp(durableObject, { op: "resolveFtsHits", candidates: [{ path: "a.md", hash: "bogus" }], limit: 5 }),
+    );
+    expect(live.hits.map((hit) => hit.path)).toEqual(["a.md"]);
+  });
+
+  it("does not count a pass that indexed nothing as interrupted", async () => {
+    const context = await created();
+    const { bucket, store } = memoryBucket();
+    context.env.FTS_BUCKET = bucket;
+    const { durableObject, storage } = context;
+    const status = async () =>
+      json<{ fts: { pending: number; error: string | null; rebuildAt: number | null } }>(
+        await internalOp(durableObject, { op: "indexStatus" }),
+      );
+    await replicate(durableObject, [leafDoc("h:a", "会議のメモ"), noteDoc("a.md", "1-a", "a.md", ["h:a"])]);
+    await durableObject.alarm();
+    // A note the vault tracks but whose document is gone: skipped by every pass.
+    storage.sql.exec(
+      `INSERT INTO index_state (path, doc_id, hash, chunks, pending, attempts) VALUES ('ghost.md', 'missing', 'h', 0, 0, 0)`,
+    );
+    for (let i = 0; i < 4; i += 1) {
+      storage.sql.exec(`INSERT OR REPLACE INTO meta (key, value) VALUES ('fts_rebuild_at', '0')`);
+      storage.sql.exec(`UPDATE index_state SET fts_hash = NULL WHERE path = 'ghost.md'`);
+      await durableObject.alarm();
+      expect((await status()).fts.error).toBeNull();
+    }
+    const marker = JSON.parse(new TextDecoder().decode(store.get("fts/user-1/vault/debug.json")));
+    expect(marker).toMatchObject({ phase: "segment-empty", attempts: 1 });
+  });
+
   it("indexes only the start of a very long note", async () => {
     const context = await created();
     const { bucket } = memoryBucket();

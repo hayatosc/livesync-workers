@@ -57,10 +57,11 @@ describe("fts-index segments", () => {
     expect(segmentDirs(store)).toEqual(new Set([first.segment!.id, second.segment!.id]));
   });
 
-  it("writes nothing for an empty pass", async () => {
+  it("writes only a settled phase marker for an empty pass", async () => {
     const { bucket, store } = memoryBucket();
     expect((await appendFtsSegment(bucket, ref, [])).segment).toBeNull();
-    expect(store.size).toBe(0);
+    expect([...store.keys()]).toEqual(["fts/u1/v1/debug.json"]);
+    expect(JSON.parse(new TextDecoder().decode(store.get("fts/u1/v1/debug.json")))).toMatchObject({ phase: "segment-empty" });
   });
 
   it("reads a version-1 manifest as one legacy segment and retires it later", async () => {

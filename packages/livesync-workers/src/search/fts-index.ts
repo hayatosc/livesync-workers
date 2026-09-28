@@ -153,7 +153,15 @@ export async function readFtsPhase(
 }
 
 /** Phases after which the index is consistent; anything else means an interrupted pass. */
-export const FTS_SETTLED_PHASES = ["segment-complete", "compact-complete", "retire-complete", "rebuild-complete", "failed", "too-large"];
+export const FTS_SETTLED_PHASES = [
+  "segment-complete",
+  "segment-empty",
+  "compact-complete",
+  "retire-complete",
+  "rebuild-complete",
+  "failed",
+  "too-large",
+];
 
 function normalizeManifest(raw: FtsManifest | LegacyManifest): FtsManifest {
   if (raw.version === 2) return { ...raw, retired: raw.retired ?? [] };
@@ -257,7 +265,11 @@ export async function appendFtsSegment(
   const extra = options.marker ?? {};
   const now = options.now ?? Date.now();
   const built = await buildIndex(docs, { shardCount: FTS_SHARD_COUNT });
-  if (built.stats.docCount === 0) return { manifest: null, segment: null, docs: [], dropped: built.dropped };
+  if (built.stats.docCount === 0) {
+    // Settle the phase marker, or the pass would count as interrupted next time.
+    await markFtsPhase(bucket, ref, "segment-empty", { ...extra, dropped: built.dropped.length });
+    return { manifest: null, segment: null, docs: [], dropped: built.dropped };
+  }
   await markFtsPhase(bucket, ref, "segment-build-done", {
     ...extra,
     docCount: built.stats.docCount,

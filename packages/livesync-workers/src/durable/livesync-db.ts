@@ -127,11 +127,12 @@ const FTS_GENERATION_META_KEY = "fts_generation";
 // Layout of the built-in index this code writes: "2" = per-note segments,
 // "3" = bucketed shards read by range, "4" = same layout, but the build
 // streams (0.5.x) so a "failed" verdict recorded by an earlier build no
-// longer applies. The whole-vault generation before them had no version
+// longer applies, "5" (0.5.2) clears the verdict a pass that indexed nothing
+// used to earn. The whole-vault generation before them had no version
 // meta. A change clears that verdict and arms a maintenance pass, which
 // rewrites what the new code cannot read efficiently.
 const FTS_INDEX_VERSION_META_KEY = "fts_index_version";
-const CURRENT_FTS_INDEX_VERSION = "4";
+const CURRENT_FTS_INDEX_VERSION = "5";
 const FTS_REBUILD_AT_META_KEY = "fts_rebuild_at";
 // Why the last pass gave up; cleared by the next successful pass.
 const FTS_ERROR_META_KEY = "fts_error";
@@ -1777,7 +1778,6 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     // indexed, or the pass would pick them up again forever.
     const skipped: Array<{ path: string; hash: string }> = [];
     let consumed = 0;
-    let mismatched = 0;
     let codeUnits = 0;
     async function* inputs(): AsyncGenerator<FtsDocInput> {
       for (const row of pending) {
@@ -1790,13 +1790,11 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
           skipped.push(row);
           continue;
         }
-        // The body moved on since the vector pass recorded its hash; the
-        // change that did it is still in the feed and re-queues the note.
-        if ((await hashText(full)) !== row.hash) {
-          consumed += 1;
-          mismatched += 1;
-          continue;
-        }
+        // The note is indexed as its body is now, under the hash the vault
+        // recorded for it (which is what "indexed" is checked against). If
+        // the body moved on since, the change is in the feed and re-queues
+        // the note with its new hash; a note whose recorded hash never
+        // matches its body would otherwise stay pending forever.
         // A long note is indexed up to the cap (its first part stays
         // searchable), and a note the segment has no room for starts the
         // next one rather than stretching this one.
@@ -1847,10 +1845,6 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       segments: result.manifest?.segments.length,
       attempts: options.marker.attempts,
     });
-    if (indexed.length + skipped.length === 0 && mismatched > 0 && written.length === 0) {
-      // Only notes whose body moved on: the change that moved it re-arms the pass.
-      return consumed < pending.length;
-    }
     return consumed < pending.length || this.hasFtsPending() || this.ftsNeedsMaintenance(result.manifest);
   }
 
