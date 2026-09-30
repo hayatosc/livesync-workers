@@ -3,8 +3,10 @@ import type { VaultIndexStatus } from "livesync-workers";
 import { type Env } from "./env.js";
 import { vaultRef } from "./host.js";
 import { SETUP_URI_CLIENT_SCRIPT, SETUP_URI_IDS } from "./setup-uri.js";
+import { VERSION } from "./version.js";
 
 const TITLE = "livesync-workers";
+const REPO_URL = "https://github.com/odiak/livesync-workers";
 
 export function loginPage(next: string, error?: string): Response {
   return htmlPage(
@@ -79,6 +81,7 @@ ${setupUriCard}
 <tr><th>Auth</th><td>OAuth (sign in with the admin password when the client asks)${env.MCP_STATIC_TOKEN ? ", or <code>Authorization: Bearer &lt;MCP_STATIC_TOKEN&gt;</code> (read-only unless <code>MCP_STATIC_TOKEN_SCOPES</code> adds more)" : ""}</td></tr>
 <tr><th>Tools</th><td>listDirectory, listNotes, listRecentNotes, readNote, readDailyNote, searchNotes, grepNotes, vaultStatus, appendToDailyNote, appendToNote, writeNote</td></tr>
 </table></div>
-<div class="card"><h2>Status</h2>${adminBlock}${indexHtml}</div>`,
+<div class="card"><h2>Status</h2>${adminBlock}${indexHtml}</div>
+<p class="muted">${data.admin ? `${TITLE} v${escapeHtml(VERSION)} · ` : ""}<a href="${REPO_URL}/releases">Releases</a> · <a href="${REPO_URL}/blob/main/docs/upgrading.md">How to upgrade</a></p>`,
   );
 }

@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerVaultTools, vaultInstructions, type VaultScope } from "livesync-workers/mcp";
 import type { Env } from "./env.js";
 import { vaultFor } from "./host.js";
+import { VERSION } from "./version.js";
 
 export type McpProps = {
   userId: string;
@@ -12,7 +13,7 @@ export type McpProps = {
 
 export class VaultMCP extends McpAgent<Env, unknown, McpProps> {
   server = new McpServer(
-    { name: "livesync-workers", version: "0.1.0" },
+    { name: "livesync-workers", version: VERSION },
     { instructions: vaultInstructions() },
   );
 

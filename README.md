@@ -46,7 +46,7 @@ The server also sends MCP `instructions` telling assistants to read `AGENTS.md` 
 4. Deploy. Durable Objects, KV, R2, Workers AI and Vectorize are created for you.
 5. Open your Worker's URL. The page shows the LiveSync URI, database name and MCP URL, and warns if a secret is still missing.
 
-Later pushes to your copy of the repository redeploy automatically. Note that the copy is not a fork: it does not receive updates from this repository by itself. See [docs/upgrading.md](docs/upgrading.md) for pulling them in (it is a plain `git merge`; only `wrangler.jsonc` tends to conflict).
+Later pushes to your copy of the repository redeploy automatically. Note that the copy is not a fork: it shares no history with this repository and does not receive updates by itself. To hear about new versions, **Watch** this repository → **Custom** → **Releases**. To upgrade, see [docs/upgrading.md](docs/upgrading.md): it has a prompt you can hand to a coding assistant, and the git commands if you would rather run them yourself.
 
 ### Option B: wrangler
 
