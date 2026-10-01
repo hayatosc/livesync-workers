@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
-import { hashText, splitNoteContentForChunks } from "../src/index.js";
+import { createVault, hashText, splitNoteContentForChunks } from "../src/index.js";
 import { ftsSearch, readFtsManifest } from "../src/search/fts-index.js";
 import { buildIndex } from "../src/search/fts/build.js";
-import { memoryBucket, TestVaultDO, testEnv } from "./helpers.js";
+import { memoryBucket, TestVaultDO, testBindings, testEnv } from "./helpers.js";
 
 type SqliteRow = Record<string, string | number | null>;
 
@@ -141,6 +141,56 @@ describe("LiveSync internal note access", () => {
     await expect(
       json(await internalOp(durableObject, { op: "readNote", path: "gone.md" })),
     ).resolves.toEqual({ content: null });
+  });
+
+  it("hides chunked logical deletions from lists, batch reads, and semantic hit validation", async () => {
+    const { durableObject, env, storage } = await created();
+    const content = "private body ".repeat(100_000);
+    await replicate(durableObject, [
+      leafDoc("h:private", "private child body"),
+      noteDoc("data.md", "1-a", "data.md", [], { deleted: true, data: content }),
+      noteDoc("children.md", "1-b", "children.md", ["h:private"], { deleted: true, padding: content }),
+    ]);
+    expect(storage.sql.exec("SELECT COUNT(*) AS count FROM revs WHERE body_chunked = 1").one())
+      .toEqual({ count: 2 });
+    await expect(json(await internalOp(durableObject, { op: "listMarkdownPaths" })))
+      .resolves.toEqual({ paths: [] });
+    await expect(json(await internalOp(durableObject, { op: "listNoteStats" })))
+      .resolves.toEqual({ files: [] });
+    await expect(json(await internalOp(durableObject, { op: "readNotes", paths: ["data.md", "children.md"] })))
+      .resolves.toEqual({ contents: { "data.md": null, "children.md": null } });
+    env.VAULT_DB = {
+      idFromName: (name: string) => name,
+      get: () => ({ fetch: (request: Request) => durableObject.fetch(request) }),
+    } as unknown as DurableObjectNamespace;
+    env.VECTORIZE.query.mockResolvedValue({ matches: [
+      { score: 1, metadata: { origin: "vault", path: "data.md", hash: await hashText(content), preview: "private preview" } },
+      { score: 1, metadata: { origin: "vault", path: "children.md", hash: await hashText("private child body"), preview: "private preview" } },
+    ] });
+    const vault = createVault(testBindings(env), {
+      ref: { tenantId: "user-1", databaseName: "vault" }, policy: env.policy, internalSecret: "test-secret",
+    });
+    expect(await vault.search("private", 5)).toEqual([]);
+  });
+
+  it("loads only requested note bodies for a batch read", async () => {
+    const { durableObject, storage } = await created();
+    await replicate(durableObject, [
+      noteDoc("wanted.md", "1-a", "wanted.md", [], { data: "wanted" }),
+      noteDoc("unrelated.md", "1-b", "unrelated.md", [], { data: "unrelated".repeat(10_000) }),
+    ]);
+    const returnedIds: string[] = [];
+    const exec = storage.sql.exec.bind(storage.sql);
+    vi.spyOn(storage.sql, "exec").mockImplementation((query, ...bindings) => {
+      const cursor = exec(query, ...bindings);
+      if (query.includes("SELECT r.*")) {
+        returnedIds.push(...cursor.toArray().map((row) => String(row.id)));
+      }
+      return cursor;
+    });
+    await expect(json(await internalOp(durableObject, { op: "readNotes", paths: ["wanted.md"] })))
+      .resolves.toEqual({ contents: { "wanted.md": "wanted" } });
+    expect(returnedIds).toEqual(["wanted.md"]);
   });
 
   it("lists note stats with mtime and size", async () => {
@@ -281,6 +331,36 @@ describe("LiveSync writeNote", () => {
     await expect(json(response)).resolves.toMatchObject({ error: "CONFLICT", path: "n.md" });
   });
 
+  it("rejects replacing a note whose child chunks have not arrived", async () => {
+    const { durableObject } = await created();
+    await replicate(durableObject, [noteDoc("Daily/today.md", "1-n", "Daily/today.md", ["h:late"])]);
+    for (const expectedBaseHash of [await hashText(""), ""]) {
+      const response = await internalOp(durableObject, {
+        op: "writeNote", path: "Daily/today.md", content: "appended", expectedBaseHash,
+      });
+      expect(response.status).toBe(409);
+    }
+    await replicate(durableObject, [leafDoc("h:late", "original body")]);
+    await expect(json(await internalOp(durableObject, { op: "readNote", path: "Daily/today.md" })))
+      .resolves.toEqual({ content: "original body" });
+  });
+
+  it("recreates a logically deleted note as a child of its deleted revision", async () => {
+    const { durableObject } = await created();
+    await replicate(durableObject, [noteDoc("Notes/Note.md", "1-n", "Notes/Note.md", [], { deleted: true })]);
+    const response = await internalOp(durableObject, {
+      op: "writeNote", path: "Notes/Note.md", content: "revived", expectedBaseHash: await hashText(""),
+    });
+    expect(response.status).toBe(200);
+    const note = await json<{ _rev: string; _conflicts?: string[] }>(
+      await durableObject.fetch(new Request("https://db/Notes%2FNote.md?conflicts=true")),
+    );
+    expect(note._rev).toMatch(/^2-/);
+    expect(note._conflicts).toBeUndefined();
+    await expect(json(await internalOp(durableObject, { op: "readNote", path: "Notes/Note.md" })))
+      .resolves.toEqual({ content: "revived" });
+  });
+
   it("follows the vault's lower-cased id convention for new notes", async () => {
     const { durableObject } = await created();
     await replicate(durableObject, [
@@ -418,6 +498,29 @@ describe("LiveSync Vectorize indexing", () => {
     await expect(
       json(await internalOp(durableObject, { op: "indexStatus" })),
     ).resolves.toMatchObject({ indexed: 0 });
+  });
+
+  it("re-embeds unchanged long lines from index version 2, including their tails, only once", async () => {
+    const { durableObject, storage, env } = await created();
+    const content = "x".repeat(5_000) + "tailneedle";
+    await replicate(durableObject, [noteDoc("long.md", "1-a", "long.md", [], { data: content })]);
+    // Model the old completed index: identical content hash, but only one truncated vector.
+    storage.sql.exec(`INSERT INTO index_state (path, doc_id, hash, chunks, pending, attempts)
+      VALUES (?, ?, ?, 1, 0, 0)`, "long.md", "long.md", await hashText(content));
+    storage.sql.exec(`INSERT INTO meta (key, value) VALUES ('index_version', '2')
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
+    storage.sql.exec(`INSERT INTO meta (key, value) VALUES ('indexed_seq', '1')
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
+    await durableObject.alarm();
+    expect(env.AI.run).toHaveBeenCalledTimes(1);
+    const inputs = env.AI.run.mock.calls.flatMap((call) => (call[1] as { text: string[] }).text);
+    expect(inputs).toHaveLength(2);
+    expect(inputs.some((text) => text.includes("tailneedle"))).toBe(true);
+    expect(inputs.every((text) => text.length <= 4_000)).toBe(true);
+    expect(storage.sql.exec("SELECT value FROM meta WHERE key = 'index_version'").one())
+      .toEqual({ value: "3" });
+    await durableObject.alarm();
+    expect(env.AI.run).toHaveBeenCalledTimes(1);
   });
 
   it("re-embeds every note once when the index version changes", async () => {
@@ -632,7 +735,7 @@ describe("LiveSync Vectorize indexing", () => {
     expect(storage.sql.exec(`SELECT value FROM meta WHERE key = 'fts_rebuild_epoch'`).toArray()).toEqual([]);
   });
 
-  it("indexes a note whose recorded hash does not match its body, under that hash", async () => {
+  it("does not expose an FTS candidate whose recorded hash does not match its current body", async () => {
     const context = await created();
     const { bucket } = memoryBucket();
     context.env.FTS_BUCKET = bucket;
@@ -653,7 +756,7 @@ describe("LiveSync Vectorize indexing", () => {
     const live = await json<{ hits: Array<{ path: string }> }>(
       await internalOp(durableObject, { op: "resolveFtsHits", candidates: [{ path: "a.md", hash: "bogus" }], limit: 5 }),
     );
-    expect(live.hits.map((hit) => hit.path)).toEqual(["a.md"]);
+    expect(live.hits).toEqual([]);
   });
 
   it("does not count a pass that indexed nothing as interrupted", async () => {
@@ -861,6 +964,81 @@ describe("LiveSync Vectorize indexing", () => {
     });
     const result = await ftsSearch(bucket, ref, "会議メモ", 5);
     expect(result.status === "ready" && result.hits.map((hit) => hit.path)).toEqual(["a.md"]);
+  });
+
+  it("drops deleted and changed FTS candidates before their indexing alarm runs", async () => {
+    const { durableObject } = await created();
+    await replicate(durableObject, [
+      noteDoc("gone.md", "1-a", "gone.md", [], { data: "deleted private body" }),
+      noteDoc("changed.md", "1-b", "changed.md", [], { data: "old private body" }),
+    ]);
+    await durableObject.alarm();
+    const candidates = [
+      { path: "gone.md", hash: await hashText("deleted private body") },
+      { path: "changed.md", hash: await hashText("old private body") },
+    ];
+    await replicate(durableObject, [
+      noteDoc("gone.md", "2-c", "gone.md", [], { data: "deleted private body", deleted: true,
+        _revisions: { start: 2, ids: ["c", "a"] } }),
+      noteDoc("changed.md", "2-d", "changed.md", [], { data: "new body",
+        _revisions: { start: 2, ids: ["d", "b"] } }),
+    ]);
+    await expect(json(await internalOp(durableObject, { op: "resolveFtsHits", candidates, limit: 10 })))
+      .resolves.toEqual({ hits: [] });
+  });
+
+  it("purge waits for an indexing pass paused in embedding and removes its output", async () => {
+    const { durableObject, env, deletedIds, storage } = await created();
+    await replicate(durableObject, [leafDoc("h:a", "private body"), noteDoc("secret.md", "1-a", "secret.md", ["h:a"])]);
+    let resume!: () => void;
+    let entered!: () => void;
+    const paused = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { resume = resolve; });
+    env.AI.run.mockImplementationOnce(async (_model: string, input: { text: string[] }) => {
+      entered();
+      await gate;
+      return { data: input.text.map(() => [1, 2]) };
+    });
+    const indexing = durableObject.alarm();
+    await paused;
+    const purging = durableObject.fetch(new Request("https://db/internal/purge", {
+      method: "POST", headers: { "X-LiveSync-Internal": "test-secret" },
+    }));
+    resume();
+    await indexing;
+    expect((await purging).status).toBe(200);
+    expect(env.upserted).toHaveLength(1);
+    expect(deletedIds).toEqual(env.upserted.map((vector) => vector.id));
+    expect(storage.sql.exec("SELECT * FROM index_state").toArray()).toEqual([]);
+    expect((await durableObject.fetch(new Request("https://db/", { method: "HEAD" }))).status).toBe(404);
+  });
+
+  it("tracks partial vector batches so a later shortening and deletion clean them all", async () => {
+    const { durableObject, env, storage } = await created();
+    const vectors = new Map<string, VectorizeVector>();
+    let batches = 0;
+    env.VECTORIZE.upsert.mockImplementation(async (batch: VectorizeVector[]) => {
+      if (++batches === 2) throw new Error("second vector batch unavailable");
+      for (const vector of batch) vectors.set(vector.id, vector);
+    });
+    env.VECTORIZE.deleteByIds.mockImplementation(async (ids: string[]) => {
+      for (const id of ids) vectors.delete(id);
+    });
+    const content = Array.from({ length: 60 }, (_, index) => `## Section ${index}\n${"body ".repeat(100)}`).join("\n\n");
+    await replicate(durableObject, [noteDoc("a.md", "1-a", "a.md", [], { data: content })]);
+    await durableObject.alarm();
+    expect(vectors.size).toBe(50);
+    expect(storage.sql.exec("SELECT hash, chunks, pending FROM index_state WHERE path = 'a.md'").one())
+      .toMatchObject({ hash: null, chunks: 60, pending: 1 });
+    await replicate(durableObject, [noteDoc("a.md", "2-b", "a.md", [], {
+      data: "short body", _revisions: { start: 2, ids: ["b", "a"] },
+    })]);
+    await durableObject.alarm();
+    expect(vectors.size).toBe(1);
+    await replicate(durableObject, [{ _id: "a.md", _rev: "3-d", _deleted: true,
+      _revisions: { start: 3, ids: ["d", "b", "a"] } }]);
+    await durableObject.alarm();
+    expect(vectors.size).toBe(0);
   });
 
   it("purge removes indexed vectors", async () => {

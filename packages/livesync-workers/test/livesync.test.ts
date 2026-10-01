@@ -382,7 +382,7 @@ describe("LiveSync revision body chunking", () => {
 
     expect(columns.some((column) => column.name === "body_chunked")).toBe(true);
     expect(columns.some((column) => column.name === "body_available")).toBe(true);
-    expect(migrations).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
+    expect(migrations).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }]);
   });
 
   it("resumes a migration when the column exists before its migration record", () => {
@@ -396,7 +396,27 @@ describe("LiveSync revision body chunking", () => {
     ).all();
 
     expect(columns.filter((column) => column.name === "body_available")).toHaveLength(1);
-    expect(migrations).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
+    expect(migrations).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }]);
+  });
+
+  it("backfills logical deletion metadata for inline and chunked revisions", async () => {
+    const { durableObject, database, storage } = await liveSyncDbCreated();
+    await replicatedDocs(durableObject, [
+      { _id: "live", _rev: "1-a", path: "live.md", data: "live" },
+      { _id: "inline", _rev: "1-b", path: "inline.md", deleted: true },
+      { _id: "large", _rev: "1-c", path: "large.md", deleted: true, data: "x".repeat(1_100_000) },
+    ]);
+    expect(database.prepare("SELECT body_chunked FROM revs WHERE id = 'large'").get())
+      .toEqual({ body_chunked: 1 });
+    // Model a pre-schema-4 object, then recreate it as eviction/upgrade would.
+    database.exec("ALTER TABLE rev_metadata DROP COLUMN soft_deleted");
+    database.exec("DELETE FROM _sql_schema_migrations WHERE id = 4");
+    new TestVaultDO({ storage } as unknown as DurableObjectState, testEnv());
+    expect(database.prepare("SELECT id, soft_deleted FROM rev_metadata ORDER BY id").all())
+      .toEqual([{ id: "inline", soft_deleted: 1 }, { id: "large", soft_deleted: 1 }, { id: "live", soft_deleted: 0 }]);
+    new TestVaultDO({ storage } as unknown as DurableObjectState, testEnv());
+    expect(database.prepare("SELECT COUNT(*) AS count FROM _sql_schema_migrations WHERE id = 4").get())
+      .toEqual({ count: 1 });
   });
 
   it("reconnects revision trees and recomputes winners when migrating to schema 3", async () => {
@@ -415,11 +435,11 @@ describe("LiveSync revision body chunking", () => {
     database.exec(`DELETE FROM revs WHERE id = 'n' AND rev = '2-b'`);
     database.exec(`UPDATE docs SET winning_rev = '1-a', deleted = 0, updated_seq = 1 WHERE id = 'n'`);
     database.exec(`UPDATE revs SET parent_rev = NULL WHERE id = 'short' AND rev = '2-t'`);
-    database.exec(`DELETE FROM _sql_schema_migrations WHERE id = 3`);
+    database.exec(`DELETE FROM _sql_schema_migrations WHERE id >= 3`);
 
     const reopened = new TestVaultDO({ storage } as unknown as DurableObjectState, testEnv());
     expect(database.prepare(`SELECT id FROM _sql_schema_migrations ORDER BY id`).all())
-      .toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
+      .toEqual([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }]);
     expect(database.prepare(`SELECT rev, parent_rev, body_available FROM revs WHERE id = 'n' ORDER BY gen`).all())
       .toEqual([
         { rev: "1-a", parent_rev: null, body_available: 1 },
@@ -852,6 +872,21 @@ describe("LiveSync CouchDB compatibility", () => {
       { _id: "n", _rev: "4-d", _revisions: { start: 4, ids: ["d", "c", "b", "a"] }, _deleted: true },
     ]);
     expect((await durableObject.fetch(new Request("https://db/n"))).status).toBe(404);
+  });
+
+  it("connects a shortened ancestor history even when its immediate parent already exists", async () => {
+    const { durableObject, database } = await liveSyncDbCreated();
+    await replicatedDocs(durableObject, [{ _id: "n", _rev: "1-a", v: "original",
+      _revisions: { start: 1, ids: ["a"] } }]);
+    await replicatedDocs(durableObject, [{ _id: "n", _rev: "3-c", v: "changed",
+      _revisions: { start: 3, ids: ["c", "b"] } }]);
+    await replicatedDocs(durableObject, [{ _id: "n", _rev: "4-d", _deleted: true,
+      _revisions: { start: 4, ids: ["d", "c", "b", "a"] } }]);
+    expect(database.prepare("SELECT parent_rev FROM revs WHERE id = 'n' AND rev = '2-b'").get())
+      .toEqual({ parent_rev: "1-a" });
+    expect((await durableObject.fetch(new Request("https://db/n"))).status).toBe(404);
+    await expect((await durableObject.fetch(new Request("https://db/_all_docs"))).json())
+      .resolves.toMatchObject({ rows: [] });
   });
 
   it("lets a losing leaf be deleted to resolve a conflict", async () => {

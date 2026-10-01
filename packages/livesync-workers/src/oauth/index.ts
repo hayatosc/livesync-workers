@@ -298,6 +298,9 @@ export function createVaultOAuthProvider<Env>(options: VaultOAuthOptions<Env>) {
     accessTokenTTL: options.accessTokenTTL ?? 60 * 60,
     refreshTokenTTL: options.refreshTokenTTL ?? 60 * 60 * 24 * 30,
     allowPlainPKCE: false,
+    tokenExchangeCallback: ({ props, requestedScope }) => ({
+      accessTokenProps: { ...props, scope: requestedScope },
+    }),
     resourceMetadata: { resource_name: options.resourceName, scopes_supported: scopesSupported },
   });
 }

@@ -80,6 +80,7 @@ type ChangeBatch = {
 };
 
 type RevisionMetadata = {
+  soft_deleted: number;
   path: string | null;
   size: number | null;
   mtime: number | null;
@@ -117,7 +118,7 @@ type InternalOp = {
 const INDEXED_SEQ_META_KEY = "indexed_seq";
 const INDEX_VERSION_META_KEY = "index_version";
 // Bump to force a one-time full re-embed (e.g. when vector metadata gains new fields).
-const CURRENT_INDEX_VERSION = "2";
+const CURRENT_INDEX_VERSION = "3";
 const INDEX_BATCH_SIZE = 200;
 const INDEX_ALARM_DELAY_MS = 1_500;
 const INDEX_RETRY_DELAY_MS = 30_000;
@@ -287,6 +288,7 @@ class FtsTooLargeError extends Error {
 
 function revisionMetadata(doc: DocBody): RevisionMetadata {
   return {
+    soft_deleted: doc.deleted === true ? 1 : 0,
     path: typeof doc.path === "string" ? doc.path : null,
     size: typeof doc.size === "number" ? doc.size : null,
     mtime: typeof doc.mtime === "number" ? doc.mtime : null,
@@ -526,6 +528,20 @@ function matchesSelector(doc: DocBody, selector: Selector | null): boolean {
 export abstract class LiveSyncVaultDO<TEnv = unknown> {
   /** Last successful setAlarm, as a cheap time-based throttle (never a hard gate). */
   private lastIndexScheduleAt = 0;
+  private maintenance = Promise.resolve();
+
+  /** Keep external index writes and purge ordered without blocking other DO events. */
+  private async withMaintenance<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.maintenance;
+    let release!: () => void;
+    this.maintenance = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
 
   constructor(
     protected readonly ctx: DurableObjectState,
@@ -595,6 +611,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         size REAL,
         mtime REAL,
         type TEXT,
+        soft_deleted INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (id, rev)
       )
     `);
@@ -699,6 +716,29 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         this.armFtsBuild(0);
         void this.scheduleIndexing(0);
       }
+    }
+    if (schemaVersion < 4) {
+      const metadataColumns = new Set(
+        sql.exec<{ name: string }>(`PRAGMA table_info(rev_metadata)`).toArray().map((column) => column.name),
+      );
+      this.ctx.storage.transactionSync(() => {
+        if (!metadataColumns.has("soft_deleted")) {
+          sql.exec(`ALTER TABLE rev_metadata ADD COLUMN soft_deleted INTEGER NOT NULL DEFAULT 0`);
+        }
+        sql.exec(
+          `UPDATE rev_metadata SET soft_deleted = COALESCE((
+             SELECT json_extract(r.body, '$.deleted') = 1 FROM revs r
+             WHERE r.id = rev_metadata.id AND r.rev = rev_metadata.rev AND r.body_chunked = 0
+           ), 0)`,
+        );
+        const chunked = this.rows<RevRow>(`SELECT r.* FROM revs r
+          JOIN rev_metadata m ON m.id = r.id AND m.rev = r.rev WHERE r.body_chunked = 1`);
+        for (const row of chunked) {
+          sql.exec(`UPDATE rev_metadata SET soft_deleted = ? WHERE id = ? AND rev = ?`,
+            revisionMetadata(cloneBody(this.hydrateRevision(row))).soft_deleted, row.id, row.rev);
+        }
+        sql.exec(`INSERT INTO _sql_schema_migrations (id) VALUES (4)`);
+      });
     }
     sql.exec(`
       CREATE TABLE IF NOT EXISTS index_state (
@@ -867,7 +907,11 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
    * SQLite rows stay, so the caller can retry instead of ending up with an
    * orphaned index that nothing can reach any more.
    */
-  private async deleteDb(): Promise<Response> {
+  private deleteDb(): Promise<Response> {
+    return this.withMaintenance(() => this.purgeDb());
+  }
+
+  private async purgeDb(): Promise<Response> {
     await this.removeAllVectors();
     const ref = this.vaultRef();
     if (ref) {
@@ -930,7 +974,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
           // Single pass over winning revisions; per-path lookups would repeat
           // the JSON-scan fallback that once blew the DO CPU limit.
           const wanted = new Set(paths);
-          for (const row of this.listNoteRevisionsForFts()) {
+          for (const row of this.listNoteRevisionsForFts(paths)) {
             if (wanted.has(row.fts_path) && contents[row.fts_path] == null) {
               contents[row.fts_path] = this.fileContentForRow(row);
             }
@@ -997,10 +1041,15 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       return json({ error: "LiveSync database does not exist" }, { status: 409 });
     }
 
-    const existing = this.findNoteRow(path);
+    const existing = this.findNoteRow(path, true);
     const existingDoc = existing ? cloneBody(existing) : null;
+    const currentContent = existing && !docIsDeleted(existingDoc!)
+      ? this.fileContentForRow(existing)
+      : "";
+    if (currentContent == null) {
+      return json({ error: "CONFLICT", path, reason: "Note content is not fully synced" }, { status: 409 });
+    }
     if (expectedBaseHash) {
-      const currentContent = existing ? (this.fileContentForRow(existing) ?? "") : "";
       if ((await hashText(currentContent)) !== expectedBaseHash) {
         return json({ error: "CONFLICT", path }, { status: 409 });
       }
@@ -1069,7 +1118,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
        JOIN revs r ON r.id = d.id AND r.rev = d.winning_rev
        WHERE d.deleted = 0 AND m.path IS NOT NULL
          AND COALESCE(m.type, '') NOT IN ('leaf', 'chunkpack')
-         AND (r.body_chunked = 1 OR COALESCE(json_extract(r.body, '$.deleted'), 0) != 1)`,
+         AND m.soft_deleted = 0`,
     );
     files.push(...this.rows<LiveSyncFileRow>(
       `SELECT
@@ -1091,13 +1140,13 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     return files;
   }
 
-  private findNoteRow(path: string): RevRow | null {
+  private findNoteRow(path: string, includeDeleted = false): RevRow | null {
     let row = this.first<RevRow>(
       `SELECT r.*
        FROM docs d
        JOIN revs r ON r.id = d.id AND r.rev = d.winning_rev
        JOIN rev_metadata m ON m.id = r.id AND m.rev = r.rev
-       WHERE d.deleted = 0 AND m.path = ?
+       WHERE ${includeDeleted ? "1" : "d.deleted = 0"} AND m.path = ?
        LIMIT 1`,
       path,
     );
@@ -1105,7 +1154,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       `SELECT r.*
        FROM docs d
        JOIN revs r ON r.id = d.id AND r.rev = d.winning_rev
-       WHERE d.deleted = 0
+       WHERE ${includeDeleted ? "1" : "d.deleted = 0"}
          AND r.body_chunked = 0
          AND json_extract(r.body, '$.path') = ?
        LIMIT 1`,
@@ -1113,7 +1162,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     );
     if (!row) return null;
     const hydrated = this.hydrateRevision(row);
-    return docIsDeleted(cloneBody(hydrated)) ? null : hydrated;
+    return !includeDeleted && docIsDeleted(cloneBody(hydrated)) ? null : hydrated;
   }
 
   private fileContent(path: string): string | null {
@@ -1201,7 +1250,11 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     }
   }
 
-  async alarm(): Promise<void> {
+  alarm(): Promise<void> {
+    return this.withMaintenance(() => this.runAlarm());
+  }
+
+  private async runAlarm(): Promise<void> {
     console.log("LiveSync alarm fired", {
       indexedSeq: this.indexedSeq(),
       ftsRebuildAt: this.getMeta(FTS_REBUILD_AT_META_KEY),
@@ -1337,6 +1390,19 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     };
   }
 
+  /** Track every vector a partially successful upsert might leave behind. */
+  private recordPlannedChunks(path: string, docId: string, count: number): void {
+    this.ctx.storage.sql.exec(
+      `INSERT INTO index_state (path, doc_id, hash, chunks, pending, attempts)
+       VALUES (?, ?, NULL, ?, 1, 0)
+       ON CONFLICT(path) DO UPDATE SET
+         doc_id = excluded.doc_id, chunks = MAX(index_state.chunks, excluded.chunks), pending = 1`,
+      path,
+      docId,
+      count,
+    );
+  }
+
   /** Brings vectors (and the external full-text index, if any) up to date for these notes. Returns whether to retry later. */
   private async indexTouchedPaths(
     touchedPaths: Map<string, RevRow | null>,
@@ -1395,6 +1461,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
           content,
           hash,
           previousChunks: state?.chunks ?? 0,
+          onChunksPlanned: (count) => this.recordPlannedChunks(path, row.id, count),
         });
         this.ctx.storage.sql.exec(
           `INSERT INTO index_state (path, doc_id, hash, chunks, pending, attempts)
@@ -1423,6 +1490,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
             content,
             hash,
             previousChunks: state?.chunks ?? 0,
+            onChunksPlanned: (count) => this.recordPlannedChunks(path, row.id, count),
           });
       let ftsHash = state?.fts_hash ?? null;
       let ftsFailed = false;
@@ -1883,7 +1951,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
    * replaced/deleted versions and duplicate paths, and return the bodies of
    * the first `limit` survivors (for snippets) in one round trip.
    */
-  private resolveFtsHits(body: InternalOp & { candidates?: unknown; limit?: unknown }): Response {
+  private async resolveFtsHits(body: InternalOp & { candidates?: unknown; limit?: unknown }): Promise<Response> {
     const candidates = Array.isArray(body.candidates)
       ? body.candidates
           .filter(
@@ -1900,13 +1968,20 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       if (hits.length >= limit) break;
       const hash = typeof candidate.hash === "string" ? candidate.hash : null;
       if (seen.has(candidate.path) || !this.ftsDocIsLive(candidate.path, hash)) continue;
-      seen.add(candidate.path);
       const docId = this.first<{ doc_id: string | null }>(
         `SELECT doc_id FROM index_state WHERE path = ?`,
         candidate.path,
       )?.doc_id;
       const rev = docId ? this.rawWinningRow(docId) : null;
-      const content = rev && !rev.deleted ? this.fileContentForRow(rev) : null;
+      if (!rev || rev.deleted) continue;
+      const metadata = this.first<{ path: string | null; soft_deleted: number }>(
+        `SELECT path, soft_deleted FROM rev_metadata WHERE id = ? AND rev = ?`, rev.id, rev.rev,
+      );
+      if (metadata && (metadata.soft_deleted || metadata.path !== candidate.path)) continue;
+      if (docIsDeleted(cloneBody(this.hydrateRevision(rev)))) continue;
+      const content = this.fileContentForRow(rev);
+      if (content == null || (hash != null && (await hashText(content)) !== hash)) continue;
+      seen.add(candidate.path);
       hits.push({ path: candidate.path, hash, content });
     }
     return json({ hits });
@@ -1917,9 +1992,10 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
    * (findNoteRow) are unusable here: their fallback JSON-scans every winning
    * rev body per call, which blows the DO CPU limit on a full rebuild.
    */
-  private listNoteRevisionsForFts(): Array<
+  private listNoteRevisionsForFts(paths?: string[]): Array<
     RevRow & { fts_path: string; fts_mtime: number | null }
   > {
+    const pathBindings = paths ? [JSON.stringify(paths)] : [];
     type FtsRevRow = RevRow & { fts_path: string; fts_mtime: number | null };
     const rows = this.rows<FtsRevRow>(
       `SELECT r.*, m.path AS fts_path, m.mtime AS fts_mtime
@@ -1928,7 +2004,9 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
        JOIN revs r ON r.id = d.id AND r.rev = d.winning_rev
        WHERE d.deleted = 0 AND m.path IS NOT NULL
          AND COALESCE(m.type, '') NOT IN ('leaf', 'chunkpack')
-         AND (r.body_chunked = 1 OR COALESCE(json_extract(r.body, '$.deleted'), 0) != 1)`,
+         AND m.soft_deleted = 0
+         ${paths ? "AND m.path IN (SELECT value FROM json_each(?))" : ""}`,
+      ...pathBindings,
     );
     rows.push(...this.rows<FtsRevRow>(
       `SELECT r.*,
@@ -1940,10 +2018,12 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
          AND r.body_chunked = 0
          AND json_type(r.body, '$.path') = 'text'
          AND COALESCE(json_extract(r.body, '$.type'), '') NOT IN ('leaf', 'chunkpack')
+         ${paths ? "AND json_extract(r.body, '$.path') IN (SELECT value FROM json_each(?))" : ""}
          AND COALESCE(json_extract(r.body, '$.deleted'), 0) != 1
          AND NOT EXISTS (
            SELECT 1 FROM rev_metadata m WHERE m.id = r.id AND m.rev = r.rev
          )`,
+      ...pathBindings,
     ));
     return rows;
   }
@@ -2159,18 +2239,15 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
    * Connects a revision's ancestors (nearest first) into the stored tree:
    * ancestors the replicator skipped become body-less stubs, and an
    * ancestor stored earlier with a shorter history gets its missing parent
-   * filled in. Stops once an ancestor's parent link is already in place,
-   * since the chain above it was connected when that row was written.
+   * filled in. Walk the complete supplied path: an existing parent may itself
+   * have arrived with a shorter, incomplete history.
    */
   private linkAncestors(id: string, ancestors: string[], seq: number): void {
     for (const [index, rev] of ancestors.entries()) {
       const parentRev = ancestors[index + 1] ?? null;
       const existing = this.rawRevRow(id, rev);
       if (existing) {
-        if (existing.parent_rev) {
-          if (this.rawRevRow(id, existing.parent_rev)) break;
-          continue;
-        }
+        if (existing.parent_rev) continue;
         if (!parentRev) break;
         this.ctx.storage.sql.exec(
           `UPDATE revs SET parent_rev = ? WHERE id = ? AND rev = ?`,
@@ -2237,14 +2314,15 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         }
       }
       this.ctx.storage.sql.exec(
-        `INSERT INTO rev_metadata (id, rev, path, size, mtime, type)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO rev_metadata (id, rev, path, size, mtime, type, soft_deleted)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         row.id,
         row.rev,
         row.metadata.path,
         row.metadata.size,
         row.metadata.mtime,
         row.metadata.type,
+        row.metadata.soft_deleted,
       );
       this.ctx.storage.sql.exec(
         `INSERT INTO changes (seq, id, rev, deleted) VALUES (?, ?, ?, ?)`,

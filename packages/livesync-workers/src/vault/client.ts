@@ -242,8 +242,18 @@ class VaultClient implements Vault {
   }
 
   async search(query: string, topK: number): Promise<VectorSearchHit[]> {
-    const hits = await vectorSearch(this.bindings, this.ref, query, topK);
-    return hits.filter((hit) => !this.hidden(hit.path));
+    return vectorSearch(this.bindings, this.ref, query, topK, async (candidates) => {
+      const paths = [...new Set(candidates.map((candidate) => candidate.path))];
+      const contents = await this.readNotes(paths);
+      const hashes = new Map<string, string>();
+      await Promise.all(paths.map(async (path) => {
+        const content = contents[path];
+        if (content != null) hashes.set(path, await hashText(content));
+      }));
+      return candidates.map((candidate) =>
+        hashes.has(candidate.path) && (candidate.hash == null || hashes.get(candidate.path) === candidate.hash),
+      );
+    });
   }
 
   async grep(query: string, limit: number): Promise<FullTextSearchResult> {
@@ -258,7 +268,9 @@ class VaultClient implements Vault {
     }
     const bucket = this.bindings.bucket;
     if (!bucket) throw new Error("VaultBindings needs either bucket or fullText");
-    const result = await ftsSearch(bucket, this.ref, query, limit * FTS_OVERFETCH + 20, {
+    // The index already ranks every match; retain that immutable ranking once,
+    // then resolve additional candidate pages only while live hits are missing.
+    const result = await ftsSearch(bucket, this.ref, query, Number.MAX_SAFE_INTEGER, {
       ...(defaultFtsCache() ? { cache: defaultFtsCache()! } : {}),
     });
     if (result.status === "not-built") {
@@ -271,13 +283,26 @@ class VaultClient implements Vault {
     const candidates = result.hits.filter((hit) => !this.hidden(hit.path));
     // The vault keeps the current versions, drops the rest, and returns the
     // bodies for snippets in the same round trip.
-    const resolved = await this.internal<{
-      hits: Array<{ path: string; hash: string | null; content: string | null }>;
-    }>({
-      op: "resolveFtsHits",
-      candidates: candidates.map((hit) => ({ path: hit.path, hash: hit.hash })),
-      limit,
-    });
+    type ResolvedHit = { path: string; hash: string | null; content: string | null };
+    const resolved: { hits: ResolvedHit[] } = { hits: [] };
+    const seen = new Set<string>();
+    let pageSize = Math.min(500, limit * FTS_OVERFETCH + 20);
+    for (let start = 0; start < candidates.length && resolved.hits.length < limit;) {
+      const page = candidates.slice(start, start + pageSize).filter((hit) => !seen.has(hit.path));
+      start += pageSize;
+      pageSize = Math.min(500, pageSize * 2);
+      if (page.length === 0) continue;
+      const current = await this.internal<{ hits: ResolvedHit[] }>({
+        op: "resolveFtsHits",
+        candidates: page.map((hit) => ({ path: hit.path, hash: hit.hash })),
+        limit: limit - resolved.hits.length,
+      });
+      for (const hit of current.hits) {
+        if (seen.has(hit.path)) continue;
+        seen.add(hit.path);
+        resolved.hits.push(hit);
+      }
+    }
     const withSnippets: FullTextSearchHit[] = [];
     for (const live of resolved.hits) {
       const hit = candidates.find((c) => c.path === live.path && c.hash === live.hash);

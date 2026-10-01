@@ -51,11 +51,14 @@ export async function upsertNoteVectors(
     content: string;
     hash: string;
     previousChunks: number;
+    /** Record the cleanup bound before any vector writes can partially succeed. */
+    onChunksPlanned?: (count: number) => void;
   },
 ): Promise<number> {
   if (!semanticSearchEnabled(bindings)) return 0; // semantic search off: nothing stored
   const { ref, path, content, hash, previousChunks } = input;
   const chunks = chunkMarkdown(path, content);
+  input.onChunksPlanned?.(chunks.length);
   const mtime = Date.now();
   const namespace = isolation(bindings) === "namespace" ? vaultObjectName(ref) : undefined;
   for (let start = 0; start < chunks.length; start += VECTORIZE_UPSERT_BATCH_SIZE) {
@@ -111,6 +114,7 @@ export async function vectorSearch(
   ref: VaultRef,
   query: string,
   topK: number,
+  validate?: (candidates: Array<{ path: string; hash: string | null }>) => Promise<boolean[]>,
 ): Promise<VectorSearchHit[]> {
   if (!semanticSearchEnabled(bindings)) return [];
   const [qvec] = await bindings.embedder.embed([query.slice(0, EMBED_INPUT_MAX_CHARS)]);
@@ -124,13 +128,21 @@ export async function vectorSearch(
       ? { namespace: vaultObjectName(ref) }
       : { filter: { userId: { $eq: ref.tenantId } } }),
   });
-  return res.matches
+  const matches = res.matches
     .filter((m) => {
       const md = m.metadata ?? {};
       if (namespaced) return true;
       if (md.origin != null && md.origin !== "vault") return false;
       return md.vaultId == null || md.vaultId === ref.databaseName;
-    })
+    });
+  const current = validate
+    ? await validate(matches.map((m) => ({
+        path: String(m.metadata?.path ?? ""),
+        hash: typeof m.metadata?.hash === "string" ? m.metadata.hash : null,
+      })))
+    : matches.map(() => true);
+  return matches
+    .filter((_match, index) => current[index])
     .slice(0, topK)
     .map((m) => {
       const md = m.metadata ?? {};

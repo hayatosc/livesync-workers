@@ -11,19 +11,30 @@ export async function hashText(content: string): Promise<string> {
 /** Split markdown by headings (## / ###); cap chunk length for embedding limits. */
 export function chunkMarkdown(path: string, content: string): MarkdownChunk[] {
   const lines = content.split(/\r?\n/);
+  const prefix = `[${path}]\n`;
+  const maxBodyChars = Math.min(3500, 4000 - prefix.length);
+  if (maxBodyChars <= 0) throw new Error("Note path exceeds embedding chunk size");
   const chunks: MarkdownChunk[] = [];
   let heading = "";
   let buf: string[] = [];
   const flush = () => {
     const text = buf.join("\n").trim();
-    if (text) chunks.push({ text: `[${path}]\n${text}`, heading: heading || path });
+    if (text) chunks.push({ text: `${prefix}${text}`, heading: heading || path });
     buf = [];
   };
 
   const pushLine = (line: string) => {
+    if (line.length > maxBodyChars) {
+      flush();
+      for (let start = 0; start < line.length; start += maxBodyChars) {
+        buf.push(line.slice(start, start + maxBodyChars));
+        flush();
+      }
+      return;
+    }
     buf.push(line);
     const joined = buf.join("\n");
-    if (joined.length > 3500) {
+    if (joined.length > maxBodyChars) {
       const drop = buf.pop()!;
       flush();
       buf.push(drop);
@@ -35,14 +46,14 @@ export function chunkMarkdown(path: string, content: string): MarkdownChunk[] {
     if (hm) {
       flush();
       heading = hm[2]!.trim();
-      buf.push(line);
+      pushLine(line);
       continue;
     }
     pushLine(line);
   }
   flush();
   if (chunks.length === 0 && content.trim()) {
-    chunks.push({ text: `[${path}]\n${content.trim()}`, heading: path });
+    chunks.push({ text: `${prefix}${content.trim()}`, heading: path });
   }
   return chunks;
 }

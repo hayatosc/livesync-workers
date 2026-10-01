@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { createVault, type VaultBindings } from "../src/index.js";
-import { testBindings, testEnv, TEST_SECRET } from "./helpers.js";
+import { memoryBucket, testBindings, testEnv, TEST_SECRET } from "./helpers.js";
+import { appendFtsSegment } from "../src/search/fts-index.js";
+import { hashText } from "../src/search/chunk-md.js";
 
 function vaultWith(
   response: Response | Response[],
@@ -79,7 +81,10 @@ describe("Vault reserved paths", () => {
   });
 
   it("hides reserved notes from search results", async () => {
-    const { vault } = vaultWith([], {
+    const { vault } = vaultWith(Response.json({ contents: {
+      "Daily/2026-06-03.md": "- [ ] 牛乳を買う",
+      "Daily/2026-06-02.md": "Log",
+    } }), {
       searchHits: [
         { path: ".kuro/MEMORY.md", heading: "" },
         { path: "Daily/2026-06-03.md", heading: "Todo", preview: "- [ ] 牛乳を買う" },
@@ -137,5 +142,74 @@ describe("Vault.appendToNote", () => {
       error: "NOT_FOUND",
       path: "missing.md",
     });
+  });
+});
+
+
+describe("Vault search freshness", () => {
+  it("drops deleted and replaced semantic hits while keeping the current version", async () => {
+    const { vault, fetch } = vaultWith(Response.json({ contents: {
+      "gone.md": null, "updated.md": "current", "live.md": "live",
+    } }), { searchHits: [
+      { path: "gone.md", hash: await hashText("gone"), preview: "gone" },
+      { path: "updated.md", hash: await hashText("old"), preview: "old" },
+      { path: "updated.md", hash: await hashText("current"), preview: "current" },
+      { path: "live.md", hash: await hashText("live"), preview: "live" },
+    ] });
+    const hits = await vault.search("query", 8);
+    expect(hits.map((hit) => [hit.path, hit.textPreview])).toEqual([
+      ["updated.md", "current"], ["live.md", "live"],
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await expect(fetch.mock.calls[0]![0].json()).resolves.toEqual({
+      op: "readNotes", paths: ["gone.md", "updated.md", "live.md"],
+    });
+  });
+});
+
+describe("Vault.grep candidate pages", () => {
+  async function indexedVault(includeLive: boolean) {
+    const { bucket } = memoryBucket();
+    const ref = { tenantId: "user-1", databaseName: "notes-test" };
+    const live = "other ".repeat(100) + "needle";
+    const liveHash = await hashText(live);
+    await appendFtsSegment(bucket, ref, [
+      ...Array.from({ length: 40 }, (_, index) => ({
+        path: `gone-${index}.md`, content: "needle", hash: `gone-${index}`,
+      })),
+      ...(includeLive ? [{ path: "live.md", content: live, hash: liveHash }] : []),
+    ]);
+    const get = vi.spyOn(bucket, "get");
+    const fetch = vi.fn(async (request: Request) => {
+      const body = await request.json() as {
+        candidates: Array<{ path: string; hash: string | null }>; limit: number;
+      };
+      const hits = body.candidates.filter((candidate) => candidate.path === "live.md" && candidate.hash === liveHash)
+        .slice(0, body.limit).map((candidate) => ({ ...candidate, content: live }));
+      return Response.json({ hits });
+    });
+    const env = testEnv();
+    const vault = createVault({
+      ...testBindings(env), bucket,
+      vaultDb: { idFromName: (name: string) => name, get: () => ({ fetch }) } as unknown as DurableObjectNamespace,
+    }, { ref, policy: { reservedPaths: [], excludedFolders: [], timeZone: "UTC" }, internalSecret: TEST_SECRET });
+    return { vault, fetch, get };
+  }
+
+  it("continues past stale top candidates without rereading the R2 ranking", async () => {
+    const { vault, fetch, get } = await indexedVault(true);
+    const result = await vault.grep("needle", 1);
+    expect(result.status).toBe("ready");
+    if (result.status !== "ready") throw new Error("not ready");
+    expect(result.hits.map((hit) => hit.path)).toEqual(["live.md"]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(get.mock.calls.filter(([key]) => key.endsWith("manifest.json"))).toHaveLength(1);
+  });
+
+  it("stops once all stale candidates have been resolved", async () => {
+    const { vault, fetch } = await indexedVault(false);
+    const result = await vault.grep("needle", 1);
+    expect(result.status === "ready" && result.hits).toEqual([]);
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 });

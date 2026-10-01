@@ -5,6 +5,8 @@ import { hashText } from "../search/chunk-md.js";
 import type { Vault } from "../vault/client.js";
 import { dateStringIn } from "../types.js";
 
+export { withMcpSessionIsolation } from "./sessions.js";
+
 export const VAULT_SCOPES = ["vault:read", "vault:append", "vault:write"] as const;
 export type VaultScope = (typeof VAULT_SCOPES)[number];
 

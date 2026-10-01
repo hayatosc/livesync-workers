@@ -1,5 +1,5 @@
 import { LiveSyncVaultDO, handleLiveSyncRequest } from "livesync-workers";
-import { VAULT_SCOPES, VAULT_SCOPE_DESCRIPTIONS } from "livesync-workers/mcp";
+import { VAULT_SCOPES, VAULT_SCOPE_DESCRIPTIONS, withMcpSessionIsolation } from "livesync-workers/mcp";
 import { createVaultOAuthProvider } from "livesync-workers/oauth";
 import type { Env } from "./env.js";
 import {
@@ -36,7 +36,10 @@ export class VaultDO extends LiveSyncVaultDO<Env> {
   }
 }
 
-const mcpHandler = VaultMCP.serve("/mcp", { binding: "MCP_OBJECT" });
+const mcpHandler = withMcpSessionIsolation<Env>(
+  VaultMCP.serve("/mcp", { binding: "MCP_OBJECT" }) as unknown as ExportedHandler<Env>,
+  "MCP_OBJECT",
+);
 
 const appHandler: ExportedHandler<Env> = {
   async fetch(request, env, ctx) {
