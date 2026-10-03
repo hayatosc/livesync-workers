@@ -77,6 +77,7 @@ type ChangeRow = {
 type ChangeBatch = {
   rows: ChangeRow[];
   lastSeq: number;
+  pending: number;
 };
 
 type RevisionMetadata = {
@@ -2756,7 +2757,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       {
         results: batch.rows.map((row) => this.changeResult(row, options)),
         last_seq: batch.lastSeq,
-        pending: 0,
+        pending: batch.pending,
       },
       idle ? { headers: { [CHANGES_IDLE_HEADER]: "1" } } : undefined,
     );
@@ -2767,63 +2768,55 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const selector = (options.selector ?? null) as Selector | null;
     const style = String(options.style ?? "main_only");
     const scanLimit = selector ? Math.min(limit * 10, 5000) : limit;
-    // Each document appears once, at its latest change (docs.updated_seq),
-    // with the winner as of now; that is also how the winner switching to an
-    // older revision (after the previous winner was deleted) gets reported.
-    const candidates = this.rows<ChangeRow>(
-      `SELECT updated_seq AS seq, id, winning_rev AS rev, deleted
-       FROM docs
-       WHERE updated_seq > ?
-       ORDER BY updated_seq
-       LIMIT ?`,
-      since,
-      scanLimit,
-    );
-    if (style === "all_docs") {
-      const rows = candidates
-        .map<ChangeRow | null>((row) => {
+    const rows: ChangeRow[] = [];
+    let lastSeq = since;
+
+    // The limit applies to matching rows, not scanned documents. In particular,
+    // a run of chunks must not look like the end of a filtered replication.
+    while (rows.length < limit) {
+      // Each document appears once, at its latest change (including when
+      // deleting a winning revision reveals an older winner).
+      const candidates = this.rows<ChangeRow>(
+        `SELECT updated_seq AS seq, id, winning_rev AS rev, deleted
+         FROM docs
+         WHERE updated_seq > ?
+         ORDER BY updated_seq
+         LIMIT ?`,
+        lastSeq,
+        scanLimit,
+      );
+      for (const row of candidates) {
+        lastSeq = row.seq;
+        if (style === "all_docs") {
           const leaves = this.rawLeafRevs(row.id);
           const matching = selector
-            ? leaves.filter((row) =>
-                matchesSelector(this.publicDoc(this.hydrateRevision(row)), selector),
+            ? leaves.filter((leaf) =>
+                matchesSelector(this.publicDoc(this.hydrateRevision(leaf)), selector),
               )
             : leaves;
-          const winning = this.rawWinningRow(row.id);
-          if (!winning || matching.length === 0) return null;
-          return {
-            seq: row.seq,
-            id: row.id,
-            rev: winning.rev,
-            deleted: winning.deleted,
-            revs: matching.map((row) => row.rev),
-          } satisfies ChangeRow;
-        })
-        .filter((row): row is ChangeRow => row !== null)
-        .sort((a, b) => a.seq - b.seq);
-      const limited = rows.slice(0, limit);
-      return {
-        rows: limited,
-        lastSeq:
-          rows.length > limit
-            ? limited.at(-1)!.seq
-            : candidates.at(-1)?.seq ?? this.currentSeq(),
-      };
+          if (matching.length === 0) continue;
+          rows.push({ ...row, revs: matching.map((leaf) => leaf.rev) });
+        } else {
+          if (selector) {
+            const winning = this.rawWinningRow(row.id);
+            if (!winning || !matchesSelector(this.publicDoc(this.hydrateRevision(winning)), selector)) continue;
+          }
+          rows.push(row);
+        }
+        if (rows.length === limit) break;
+      }
+      if (rows.length < limit && candidates.length < scanLimit) {
+        lastSeq = this.currentSeq();
+        break;
+      }
     }
-
-    const rows = candidates
-      .filter((row) => {
-        if (!selector) return true;
-        const winning = this.rawWinningRow(row.id);
-        if (!winning) return false;
-        return matchesSelector(this.publicDoc(this.hydrateRevision(winning)), selector);
-      });
-    const limited = rows.slice(0, limit);
     return {
-      rows: limited,
-      lastSeq:
-        rows.length > limit
-          ? limited.at(-1)!.seq
-          : candidates.at(-1)?.seq ?? this.currentSeq(),
+      rows,
+      lastSeq,
+      pending: this.first<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM docs WHERE updated_seq > ?`,
+        lastSeq,
+      )?.count ?? 0,
     };
   }
 

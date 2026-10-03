@@ -508,6 +508,58 @@ describe("LiveSync CouchDB compatibility", () => {
     });
   }
 
+  for (const style of ["all_docs", "main_only"]) {
+    it(`scans past long chunk runs before completing filtered ${style} changes`, async () => {
+      const { durableObject } = await liveSyncDbCreated();
+      const docs: Array<{ _id: string; _rev: string; type: string }> = [];
+      const matching = ["日本語.md", "draft/note.md", "daily/note.md"];
+      for (let group = 0; group <= matching.length; group += 1) {
+        // More than two scan windows at limit=2, including a trailing run.
+        for (let chunk = 0; chunk < 45; chunk += 1) {
+          docs.push({ _id: `chunk-${group}-${chunk}`, _rev: "1-c", type: "leaf" });
+        }
+        if (group < matching.length) {
+          docs.push({ _id: matching[group]!, _rev: "1-n", type: "plain" });
+        }
+      }
+      expect((await replicatedDocs(durableObject, docs)).status).toBe(200);
+      const batch = async (since: number) => {
+        const response = await durableObject.fetch(postRequest("https://db/_changes", {
+          since, style, limit: 2, selector: { type: { $ne: "leaf" } },
+        }));
+        expect(response.status).toBe(200);
+        return response.json() as Promise<{
+          results: Array<{ id: string; changes: Array<{ rev: string }> }>;
+          last_seq: number;
+          pending: number;
+        }>;
+      };
+
+      const first = await batch(0);
+      expect(first.results.map((row) => row.id)).toEqual(matching.slice(0, 2));
+      expect(first.last_seq).toBe(92);
+      expect(first.pending).toBe(docs.length - 92);
+      const second = await batch(first.last_seq);
+      expect(second.results).toEqual([{ id: matching[2], seq: 138, changes: [{ rev: "1-n" }] }]);
+      expect(second.last_seq).toBe(docs.length);
+      expect(second.pending).toBe(0);
+      expect(await batch(second.last_seq)).toEqual({ results: [], last_seq: docs.length, pending: 0 });
+    });
+  }
+
+  it("reports remaining changes across unfiltered pages", async () => {
+    const { durableObject } = await liveSyncDbCreated();
+    await replicatedDocs(durableObject, ["a", "b", "c"].map((_id) => ({ _id, _rev: "1-r" })));
+    const first = await durableObject.fetch(new Request("https://db/_changes?limit=2"));
+    await expect(first.json()).resolves.toMatchObject({
+      results: [{ id: "a" }, { id: "b" }], last_seq: 2, pending: 1,
+    });
+    const second = await durableObject.fetch(new Request("https://db/_changes?limit=2&since=2"));
+    await expect(second.json()).resolves.toMatchObject({
+      results: [{ id: "c" }], last_seq: 3, pending: 0,
+    });
+  });
+
   it("compares _id ranges by code point instead of locale", async () => {
     const { durableObject } = await liveSyncDbCreated();
     for (const [index, id] of ["Apple", "Banana", "apple"].entries()) {
