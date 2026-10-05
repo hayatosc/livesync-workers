@@ -74,3 +74,18 @@ it("rebuilds derived search from the recovered DO and rejects stale/deleted hits
   expect(await vault.grep("API", 10)).toMatchObject({ status: "ready", hits: [] });
   expect(await vault.grep("東京", 10)).toMatchObject({ status: "ready", hits: [{ path: "Other/two.md" }] });
 });
+
+it("retains unchanged notes when an old index version starts a new generation", async () => {
+  const ref = { tenantId: "index-upgrade", vaultId: "stable", databaseName: "display" };
+  const stub = bindings.VAULT_DB.get(bindings.VAULT_DB.idFromName(vaultObjectName(ref)));
+  await stub.fetch("https://db/", { method: "PUT" });
+  const vault = createVault({ vaultDb: bindings.VAULT_DB, contentBucket: bindings.CONTENT, bucket: bindings.SEARCH, fullText: index }, { ref, policy: DEFAULT_VAULT_POLICY, internalSecret: "integration-secret" });
+  await vault.writeNote("existing.md", "東京 API", await hashText(""));
+  await runInDurableObject(stub, async (instance: PersistentVaultDO, state) => {
+    await instance.alarm();
+    expect(state.storage.sql.exec<{ fts_hash: string }>("SELECT fts_hash FROM index_state").one().fts_hash).toBeTruthy();
+    state.storage.sql.exec("UPDATE meta SET value = 'old' WHERE key = 'index_version'");
+    await instance.alarm();
+  });
+  expect(await vault.grep("東京", 10)).toMatchObject({ status: "ready", hits: [{ path: "existing.md" }] });
+});

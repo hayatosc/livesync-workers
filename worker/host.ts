@@ -129,3 +129,15 @@ export function vaultFor(env: Env, requestedVaultId?: string, principal = "admin
     internalSecret: requireSecret(env, "SESSION_SECRET"),
   });
 }
+
+/** Connection settings for the same authorized default vault used by admin tools. */
+export function setupVaultConfig(env: Env): VaultConfig {
+  const config = authorizedVaults(env, "admin")[0];
+  if (!config) throw new ConfigError("Vault access denied");
+  return config;
+}
+export function setupVaultPassword(env: Env, config = setupVaultConfig(env)): string {
+  const value = env[config.passwordSecret];
+  if (typeof value !== "string" || !value.trim() || /^change[-_ ]?me/i.test(value.trim())) throw new ConfigError(`Missing secret ${config.passwordSecret}`);
+  return value.trim();
+}

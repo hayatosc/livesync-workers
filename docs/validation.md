@@ -15,8 +15,8 @@
 |---|---:|
 | 既存ライブラリNode回帰 | 156 |
 | Worker Node（既存5件＋所有／読取共有認可2件） | 7 |
-| Cloudflare Workers／SQLite DO／R2統合 | 16 |
-| 合計 | 179 |
+| Cloudflare Workers／SQLite DO／R2統合（当初16＋レビュー追加8） | 24 |
+| 合計 | 187 |
 
 Workers統合の対象：
 
@@ -42,3 +42,7 @@ Workers統合の対象：
 push、PR公開、merge、本番deploy、実Cloudflare資源作成、課金操作、実認証変更、実ユーザーデータ移行は行っていません。
 
 実行ログとコードの復元用アーカイブはリポジトリの`.local/evidence/`に保存します。Gitのローカルコミットとbundle／差分からも復元可能です。
+
+## 完成前レビュー
+
+独立レビューと追加検証は[日本語レビュー報告](review-report-ja.md)を参照してください。索引バージョン更新、複数VaultのSetup URI、添付読取サイズ制限の3件を修正し、SQL障害境界と全スキーマ消失を含む8件のWorkersテストを追加しました。

@@ -33,3 +33,19 @@ it("stores raw binary originals, retains history during GC and rejects oversize/
   const tooLarge = btoa("a".repeat(10 * 1024 * 1024 + 1));
   expect((await op({ op: "writeAttachment", path: "oversize.pdf", content: tooLarge, expectedBaseHash: emptyHash })).status).toBe(413);
 });
+
+it("enforces decoded attachment limits on documents received through LiveSync", async () => {
+  const stub = bindings.VAULT_DB.get(bindings.VAULT_DB.idFromName("attachment-read-limit:vault"));
+  await stub.fetch("https://db/", { method: "PUT" });
+  const data = btoa("a".repeat(10 * 1024 * 1024 + 1));
+  const docs: unknown[] = [];
+  const children: string[] = [];
+  for (let offset = 0; offset < data.length; offset += 60_000) {
+    const id = `h:${offset}`;
+    children.push(id);
+    docs.push({ _id: id, _rev: "1-chunk", type: "leaf", data: data.slice(offset, offset + 60_000) });
+  }
+  docs.push({ _id: "large.pdf", _rev: "1-note", type: "newnote", path: "large.pdf", children, size: 1 });
+  expect((await stub.fetch("https://db/_bulk_docs", { method: "POST", body: JSON.stringify({ docs, new_edits: false }) })).status).toBe(200);
+  expect((await stub.fetch("https://db/internal/op", { method: "POST", headers: { "X-LiveSync-Internal": "integration-secret" }, body: JSON.stringify({ op: "readAttachment", path: "large.pdf" }) })).status).toBe(413);
+});

@@ -1126,7 +1126,10 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         const base64 = await this.fileContentForRow(row);
         if (base64 == null) return json({ error: "NOT_SYNCED" }, { status: 409 });
         if (base64.length > 14_000_000) return json({ error: "TOO_LARGE" }, { status: 413 });
-        return json({ path, base64, contentHash: await hashText(base64), contentType: doc.contentType ?? "application/octet-stream", size: doc.size });
+        let size: number;
+        try { size = atob(base64).length; } catch { return json({ error: "INVALID_BASE64" }, { status: 400 }); }
+        if (size > 10 * 1024 * 1024) return json({ error: "TOO_LARGE" }, { status: 413 });
+        return json({ path, base64, contentHash: await hashText(base64), contentType: doc.contentType ?? "application/octet-stream", size });
       }
       case "listFiles":
         return this.listFiles();
@@ -1450,7 +1453,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     if (this.indexNeedsVersionUpgrade()) {
       // Clearing hashes defeats the unchanged-note skip below, so every note is
       // re-embedded once under the new index version.
-      this.sqlExec(`UPDATE index_state SET hash = NULL`);
+      this.sqlExec(`UPDATE index_state SET hash = NULL, fts_hash = NULL`);
       this.setMeta(INDEXED_SEQ_META_KEY, "0");
       this.setMeta(INDEX_VERSION_META_KEY, CURRENT_INDEX_VERSION);
       await this.bindings().fullText?.beginRebuild?.(ref);

@@ -4,13 +4,12 @@ import { createVaultOAuthProvider } from "livesync-workers/oauth";
 import type { Env } from "./env.js";
 import {
   ConfigError,
-  liveSyncUsername,
-  requireSecret,
+  setupVaultConfig,
+  setupVaultPassword,
   secretValue,
   vaultBindings,
   vaultFor,
   vaultHost,
-  vaultRef,
 } from "./host.js";
 import type { SetupConfig } from "./setup-uri.js";
 import {
@@ -77,13 +76,16 @@ const appHandler: ExportedHandler<Env> = {
     if (url.pathname === "/" && request.method === "GET") {
       const admin = await isAdmin(request, env);
       const configured = {
-        livesync: !!secretValue(env, "LIVESYNC_PASSWORD"),
+        livesync: (() => { try { return !!setupVaultPassword(env); } catch { return false; } })(),
         admin: !!secretValue(env, "ADMIN_PASSWORD"),
         session: !!secretValue(env, "SESSION_SECRET"),
       };
       const data: Parameters<typeof statusPage>[1] = { origin: url.origin, admin, configured };
       if (admin) {
-        data.username = liveSyncUsername(env);
+        const config = setupVaultConfig(env);
+        data.username = config.username;
+        data.databaseName = config.databaseName;
+        data.passwordSecret = config.passwordSecret;
         try {
           const vault = vaultFor(env);
           data.dbExists = await vault.exists();
@@ -98,11 +100,12 @@ const appHandler: ExportedHandler<Env> = {
     // Connection details for the browser-side Setup URI generator (admin only).
     if (url.pathname === "/api/setup-config" && request.method === "GET") {
       if (!(await isAdmin(request, env))) return new Response("Unauthorized", { status: 401 });
+      const selected = setupVaultConfig(env);
       const config: SetupConfig = {
         uri: `${url.origin}/livesync`,
-        username: liveSyncUsername(env),
-        password: requireSecret(env, "LIVESYNC_PASSWORD"),
-        database: vaultRef(env).databaseName,
+        username: selected.username,
+        password: setupVaultPassword(env, selected),
+        database: selected.databaseName,
       };
       return Response.json(config, { headers: { "Cache-Control": "no-store" } });
     }
