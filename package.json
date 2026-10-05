@@ -16,7 +16,11 @@
     "typecheck": "npm run typecheck -w livesync-workers && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.workers.json --noEmit",
     "test": "npm test -w livesync-workers && vitest run && npm run test:workers",
     "cf-typegen": "wrangler types",
-    "test:workers": "vitest run -c vitest.workers.config.ts"
+    "test:workers": "vitest run -c vitest.workers.config.ts",
+    "test:e2e:obsidian": "npm run build && node --use-env-proxy test/e2e/obsidian.mjs",
+    "test:e2e:backend": "npm run build && node test/e2e/backend-check.mjs",
+    "test:e2e:plugin": "node --use-env-proxy test/e2e/plugin.mjs",
+    "test:e2e:install": "node --use-env-proxy test/e2e/install.mjs"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "0.4.0",
@@ -29,6 +33,8 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.22.0",
     "@cloudflare/workers-types": "4.20260501.1",
+    "@vrtmrz/livesync-commonlib": "0.1.35",
+    "@vrtmrz/obsidian-test-session": "0.3.0",
     "typescript": "6.0.3",
     "vitest": "4.1.5",
     "wrangler": "4.87.0"

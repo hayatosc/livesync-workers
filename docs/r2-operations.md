@@ -62,3 +62,7 @@ search/ja-segmenter-nfkc-v1/<encoded-owner>/<encoded-vaultId>/
 検索は文書単位の転置索引をR2から順に読み、Vault全本文を一括保持しません。ただしR2読取数は文書数に比例し、大Vaultの遅延・費用は未ベンチマークです。現在のR2コミット再生と明示移行は全コミット／全管理操作を読むため、巨大な履歴の復元時間・メモリには限界があります。ページ付きチェックポイント／増分再生の運用最適化はまだありません。大量データでの本番適性をこのテスト結果から主張しません。
 
 テストはローカルworkerdの本物のWorkers／DO／R2バインディングです。CPU制限による実強制終了、ネットワーク断、本番R2障害、本番負荷、実ObsidianクライアントのE2E同期は未検証です。保存境界での注入障害、成功head後の応答喪失、管理DB消去後の再生は検証しています。
+
+## 実DO内部のVault識別
+
+実workerdのDO内部では`ctx.id.name`が取得できない場合があります。認証済みWorkerとVaultClientは、`X-LiveSync-Vault-Ref`へ`encodeURIComponent(JSON.stringify(ref))`、既存`X-LiveSync-Internal`へ内部secretを設定します。DOはsecret・実DO ID一致・ホストpolicyを確認して識別情報だけをDO KVへ保持します。R2ホストの識別不能は失敗として返し、本文のSQLite fallbackには入りません。初回の直接内部API／旧源移行呼出も、識別がまだ保持されていなければこの信頼済み参照が必要です。認証前の外部ヘッダーはWorkerが上書きします。

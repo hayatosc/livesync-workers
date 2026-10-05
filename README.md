@@ -75,3 +75,7 @@ Segmenterは原形化や任意の部分一致を保証しません。日本語�
 [運用と復元手順](docs/r2-operations.md)を参照してください。既存SQLite Vaultは自動移行しません。既存データのあるDOを新方式で開くと、明示移行が必要な旨で失敗します。移行先IDの変更によって既存データが自動的にコピーされることもありません。
 
 この変更はクラウド内の実装とローカル統合テストまでです。push、PR公開、merge、本番deploy、実資源作成、実ユーザーデータ移行は実施していません。
+
+## 実Obsidian E2E
+
+`npm run test:e2e:obsidian`は実Obsidianと公式LiveSyncプラグインを使う隔離ローカルE2Eです。インストール・前提検査・実行済み結果・sandboxによるブロッカーは[実Obsidian E2E記録](docs/obsidian-e2e-ja.md)を参照してください。API-onlyの前提検査を実Obsidianの合格として扱いません。

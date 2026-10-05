@@ -1,4 +1,4 @@
-import { INTERNAL_SECRET_HEADER } from "../livesync/http.js";
+import { INTERNAL_SECRET_HEADER, VAULT_REF_HEADER } from "../livesync/http.js";
 import { vaultStub } from "../livesync/handler.js";
 import { hashText } from "../search/chunk-md.js";
 import { vectorSearch, type VectorSearchHit } from "../search/vector-index.js";
@@ -158,6 +158,7 @@ class VaultClient implements Vault {
         headers: {
           "Content-Type": "application/json",
           [INTERNAL_SECRET_HEADER]: this.options.internalSecret,
+          [VAULT_REF_HEADER]: encodeURIComponent(JSON.stringify(this.ref)),
         },
         body: JSON.stringify(body),
       }),
@@ -172,7 +173,7 @@ class VaultClient implements Vault {
 
   async exists(): Promise<boolean> {
     const res = await this.stub().fetch(
-      new Request("https://livesync-db/", { method: "HEAD" }),
+      new Request("https://livesync-db/", { method: "HEAD", headers: { [INTERNAL_SECRET_HEADER]: this.options.internalSecret, [VAULT_REF_HEADER]: encodeURIComponent(JSON.stringify(this.ref)) } }),
     );
     return res.status === 200;
   }
@@ -385,7 +386,7 @@ class VaultClient implements Vault {
     const res = await this.stub().fetch(
       new Request("https://livesync-db/internal/purge", {
         method: "POST",
-        headers: { [INTERNAL_SECRET_HEADER]: this.options.internalSecret },
+        headers: { [INTERNAL_SECRET_HEADER]: this.options.internalSecret, [VAULT_REF_HEADER]: encodeURIComponent(JSON.stringify(this.ref)) },
       }),
     );
     if (!res.ok) throw new Error(`LiveSync vault purge failed (${res.status})`);

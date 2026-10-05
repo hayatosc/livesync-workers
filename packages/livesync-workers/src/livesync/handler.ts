@@ -1,6 +1,7 @@
 import {
   CHANGES_IDLE_HEADER,
   DB_NAME_HEADER,
+  VAULT_REF_HEADER,
   INTERNAL_SECRET_HEADER,
   couchError,
   json,
@@ -190,11 +191,11 @@ class ChangeWatcher {
   }
 
   /** Subscribe first, then read: a write landing in between is still delivered. */
-  static async open(stub: DurableObjectStub, internalSecret: string): Promise<ChangeWatcher> {
+  static async open(stub: DurableObjectStub, internalSecret: string, vaultRef?: string | null): Promise<ChangeWatcher> {
     try {
       const response = await stub.fetch(
         new Request("https://livesync-db/internal/watch", {
-          headers: { Upgrade: "websocket", [INTERNAL_SECRET_HEADER]: internalSecret },
+          headers: { Upgrade: "websocket", [INTERNAL_SECRET_HEADER]: internalSecret, ...(vaultRef ? { [VAULT_REF_HEADER]: vaultRef } : {}) },
         }),
       );
       const socket = response.webSocket;
@@ -290,7 +291,7 @@ async function proxyChanges(
 
   if (feed === "longpoll") {
     const timeout = clampWait(numberParam(options.timeout, MAX_WAIT_MS));
-    const watcher = await ChangeWatcher.open(stub, internalSecret);
+    const watcher = await ChangeWatcher.open(stub, internalSecret, headers.get(VAULT_REF_HEADER));
     try {
       const response = await fetchChanges({ feed: "normal" });
       if (!response.ok || response.headers.get(CHANGES_IDLE_HEADER) !== "1") {
@@ -320,7 +321,7 @@ async function proxyChanges(
     const firstBatch = (await first.json()) as ChangeFeedBatch;
     return continuousChangesProxy(
       fetchChanges,
-      await ChangeWatcher.open(stub, internalSecret),
+      await ChangeWatcher.open(stub, internalSecret, headers.get(VAULT_REF_HEADER)),
       options,
       firstBatch,
     );
@@ -501,11 +502,15 @@ async function routeLiveSyncRequest(
     );
   }
 
+  // Trusted identity forwarding must never expose DO management routes through Basic sync.
+  if (parts[1] === "internal") return withCors(request, host, couchError(404, "not_found", "missing"));
   const dbPath = `/${parts.slice(1).join("/")}`;
   const rewritten = new URL(request.url);
   rewritten.pathname = dbPath;
   const headers = new Headers(request.headers);
   headers.set(DB_NAME_HEADER, decodedDbName);
+  headers.set(VAULT_REF_HEADER, encodeURIComponent(JSON.stringify(auth!.ref)));
+  headers.set(INTERNAL_SECRET_HEADER, host.internalSecret);
   const stub = vaultStub(options.bindings.vaultDb, auth!.ref, options.bindings.objectName);
   if (dbPath === "/_changes" && (request.method === "GET" || request.method === "POST")) {
     return withCors(

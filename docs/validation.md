@@ -15,8 +15,8 @@
 |---|---:|
 | 既存ライブラリNode回帰 | 156 |
 | Worker Node（既存5件＋所有／読取共有認可2件） | 7 |
-| Cloudflare Workers／SQLite DO／R2統合（当初16＋レビュー追加8） | 24 |
-| 合計 | 187 |
+| Cloudflare Workers／SQLite DO／R2統合（当初16＋レビュー追加8＋実runtime識別1） | 25 |
+| 合計 | 188 |
 
 Workers統合の対象：
 
@@ -46,3 +46,5 @@ push、PR公開、merge、本番deploy、実Cloudflare資源作成、課金操�
 ## 完成前レビュー
 
 独立レビューと追加検証は[日本語レビュー報告](review-report-ja.md)を参照してください。索引バージョン更新、複数VaultのSetup URI、添付読取サイズ制限の3件を修正し、SQL障害境界と全スキーマ消失を含む8件のWorkersテストを追加しました。
+
+実Obsidian 1.13.7をこのクラウドへ配置し、実行用ハーネスを追加しました。GUI起動はElectronの標準sandbox要件で停止し、実同期7段階は未実行です。[実Obsidian記録](obsidian-e2e-ja.md)を参照してください。別枠のWranglerローカルサービス検査は成功しています。

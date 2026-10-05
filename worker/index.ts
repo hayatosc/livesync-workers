@@ -4,6 +4,7 @@ import { createVaultOAuthProvider } from "livesync-workers/oauth";
 import type { Env } from "./env.js";
 import {
   ConfigError,
+  requireSecret,
   setupVaultConfig,
   setupVaultPassword,
   secretValue,

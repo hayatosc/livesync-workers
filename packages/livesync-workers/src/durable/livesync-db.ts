@@ -21,6 +21,7 @@ import type { FtsDocInput } from "../search/fts/build.js";
 import {
   CHANGES_IDLE_HEADER,
   DB_NAME_HEADER,
+  VAULT_REF_HEADER,
   INTERNAL_SECRET_HEADER,
   couchError,
   json,
@@ -31,6 +32,7 @@ import {
   isHiddenPath,
   isReservedPath,
   parseVaultObjectName,
+  vaultObjectName,
   type FullTextIndex,
   type FullTextIndexWriter,
   type VaultBindings,
@@ -535,7 +537,27 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   private maintenance = Promise.resolve();
   private writes = Promise.resolve();
   private statements: JournalStatement[] | null = null;
+  private resolvedVaultRef: VaultRef | null = null;
   private journalHead: string | null | undefined;
+
+  private async resolveVaultIdentity(request?: Request): Promise<void> {
+    if (!this.bindings().contentBucket) return; // Preserve the legacy SQLite-only host contract.
+    const supplied = request?.headers.get(VAULT_REF_HEADER);
+    let ref: VaultRef | undefined;
+    if (supplied) {
+      if (!secretEquals(request!.headers.get(INTERNAL_SECRET_HEADER), this.host().internalSecret)) throw new Error("Untrusted vault identity");
+      ref = JSON.parse(decodeURIComponent(supplied)) as VaultRef;
+      if (typeof ref.tenantId !== "string" || !ref.tenantId || typeof ref.databaseName !== "string" || !ref.databaseName || (ref.vaultId !== undefined && (typeof ref.vaultId !== "string" || !ref.vaultId))) throw new Error("Invalid vault identity");
+      const name = (this.bindings().objectName ?? vaultObjectName)(ref);
+      if (!this.bindings().vaultDb.idFromName(name).equals(this.ctx.id)) throw new Error("Vault identity does not match this object");
+      await this.host().loadVaultPolicy(ref);
+      this.resolvedVaultRef = ref;
+      await this.ctx.storage.put("livesync_vault_identity", ref);
+    } else if (!this.resolvedVaultRef) {
+      this.resolvedVaultRef = await this.ctx.storage.get<VaultRef>("livesync_vault_identity") ?? null;
+    }
+    if (this.bindings().contentBucket && !this.vaultRef()) throw new Error("Persistent vault identity unavailable");
+  }
 
   private journal(): R2Journal | null {
     const bucket = this.bindings().contentBucket;
@@ -628,6 +650,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   }
 
   private async persistentRequest(request: Request): Promise<Response> {
+    await this.resolveVaultIdentity(request);
     const journal = this.journal();
     if (new URL(request.url).pathname === "/internal/migrate-r2" && request.method === "POST") {
       if (!secretEquals(request.headers.get(INTERNAL_SECRET_HEADER), this.host().internalSecret)) return couchError(403, "forbidden", "Forbidden");
@@ -1380,7 +1403,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   /** The vault this object holds, recovered from the object name. */
   protected vaultRef(): VaultRef | null {
     const name = this.ctx.id?.name;
-    return name ? parseVaultObjectName(name) : null;
+    return this.resolvedVaultRef ?? (name ? parseVaultObjectName(name) : null);
   }
 
   /**
@@ -1414,6 +1437,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
 
   alarm(): Promise<void> {
     return this.exclusive(async () => {
+      await this.resolveVaultIdentity();
       await this.restoreJournal();
       return this.withMaintenance(() => this.runAlarm());
     });

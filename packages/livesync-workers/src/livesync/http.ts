@@ -1,4 +1,5 @@
 export const INTERNAL_SECRET_HEADER = "X-LiveSync-Internal";
+export const VAULT_REF_HEADER = "X-LiveSync-Vault-Ref";
 export const DB_NAME_HEADER = "X-LiveSync-Db";
 /**
  * Set by the Durable Object on a `_changes` response that returned nothing new
