@@ -139,3 +139,14 @@ npm run test:e2e:cli          # build + 隔離された実同期7段階
 | 制約の確認 | `CapEff=0`、`Seccomp=2` | seccompの値だけで原因を断定しない。管理者が必要なsandbox操作の許可を確認し、標準sandboxを維持して起動検証 |
 
 [LinuxのNoNewPrivs文書](https://docs.kernel.org/userspace-api/no_new_privs.html)が示すとおり、その属性は継承されsetuid execによる権限上昇を抑止するため、helperのファイルmodeだけを直しても起動成功は保証できません。プラットフォームが上記の標準経路を提供した後に、既存`npm run test:e2e:obsidian`で起動と7段階を実測して初めてGUI受け入れを判定します。拒否された所有者変更の再試行、sandboxの迂回・無効化、別環境への切替、本番deployは実施していません。
+
+
+## GitHub Actionsのdraft PR検証
+
+`LiveSync E2E`は`pull_request`（draftを含む）で公式CLIと実Obsidianを別ジョブとして実行します。手動再実行用`workflow_dispatch`もあります。CLIはUbuntu 24.04、GUIは標準user namespace経路を使うUbuntu 22.04 hosted VMで、Node 24・上流lock・固定checksumの公式配布物を使用します。Ubuntu 22.04 runnerは2027年4月に終了予定なので、その前に標準sandboxで動く後継runnerを実測して移行する必要があります。
+
+資格情報はローカルハーネスが毎回生成し、CloudflareアカウントやGitHub Secretsは不要です。checkoutは認証情報を残さず、workflow権限は`contents: read`のみです。root所有／setuid設定、sandbox無効化、sysctl・AppArmor・seccomp変更、deployを行いません。標準sandboxのnamespace前提が満たされなければそのジョブを失敗として記録します。GUIの成功判定は実アプリ・プラグイン版の照合と`actualObsidian: true`および7段階の成功を要求します。
+
+`CI`はbuild、TypeScript、Node／公式Vitest Workersテスト、`.mjs`構文検査、mainとの差分空白検査を実行します。既存設定にESLint／Prettier／Biome等のlint／formatterはありません。空白検査をformatterの合格とは扱わず、無関係なツール導入・全コード整形を避けています。`Publish to npm`はreleaseイベント専用で今回のPRでは実行しません。
+
+失敗時も`actual-obsidian-evidence`と`official-cli-evidence`に結果JSONを保存します。一時Vault・profile・R2／DO保存域・資格情報はアップロード対象外です。CLI成功、GUI成功、型／回帰検査を別々に確認し、GUIの未実行／失敗をE2E完了とは扱いません。
