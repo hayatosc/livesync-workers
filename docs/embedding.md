@@ -1,3 +1,7 @@
+# このフォークでのベクトル検索
+
+既定は`SEMANTIC_SEARCH=off`で、全文検索はSegmenterとBM25を使います。以下のAI／Vectorize設定は任意のセマンティック検索を明示的に有効にする場合だけ必要です。実資源の作成は今回実施していません。
+
 # Embedding livesync-workers in your own Worker
 
 The root of this repository is a single-tenant deployment. The same code is

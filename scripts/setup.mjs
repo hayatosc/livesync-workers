@@ -5,8 +5,8 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const config = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
-const indexName = /"index_name":\s*"([^"]+)"/.exec(config)?.[1] ?? "livesync-notes";
-const bucketName = /"bucket_name":\s*"([^"]+)"/.exec(config)?.[1] ?? "livesync-fts";
+const indexName = /"index_name":\s*"([^"]+)"/.exec(config)?.[1];
+const bucketNames = [...config.matchAll(/"bucket_name":\s*"([^"]+)"/g)].map((match) => match[1]);
 
 function wrangler(args, { allowExisting = true } = {}) {
   console.log(`\n$ wrangler ${args.join(" ")}`);
@@ -24,8 +24,8 @@ function wrangler(args, { allowExisting = true } = {}) {
 }
 
 // Dimensions must match the embedding model (embeddinggemma-300m → 768).
-wrangler(["vectorize", "create", indexName, "--dimensions=768", "--metric=cosine"]);
-wrangler(["r2", "bucket", "create", bucketName]);
+if (indexName) wrangler(["vectorize", "create", indexName, "--dimensions=768", "--metric=cosine"]);
+for (const bucketName of bucketNames) wrangler(["r2", "bucket", "create", bucketName]);
 
 console.log(`
 Done. The KV namespace for OAuth (OAUTH_KV) is provisioned automatically on first deploy.

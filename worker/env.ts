@@ -3,6 +3,12 @@ export interface Env {
   MCP_OBJECT: DurableObjectNamespace;
   OAUTH_KV: KVNamespace;
   FTS_BUCKET: R2Bucket;
+  CONTENT_BUCKET: R2Bucket;
+  /** Immutable default vault ID. Never derive it from the display/database name. */
+  LIVESYNC_VAULT_ID?: string;
+  /** Static vault registry; credentials are references to existing environment secrets. */
+  VAULTS_JSON?: string;
+  [secretName: string]: unknown;
   VECTORIZE: VectorizeIndex;
   AI: Ai;
 

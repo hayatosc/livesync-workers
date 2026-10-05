@@ -93,7 +93,7 @@ type LegacyManifest = {
 };
 
 function basePrefix(ref: VaultRef): string {
-  return `fts/${ref.tenantId}/${ref.databaseName}`;
+  return `fts/${ref.tenantId}/${ref.vaultId ?? ref.databaseName}`;
 }
 
 function manifestKey(ref: VaultRef): string {

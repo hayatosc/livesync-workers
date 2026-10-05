@@ -1,3 +1,7 @@
+# このフォークの更新について
+
+R2永続化方式へ切り替える前に[日本語の移行・復元手順](r2-operations.md)を確認してください。旧SQLite Vaultは暗黙に移行されません。以下は旧upstreamの更新手順で、R2移行の代わりにはなりません。本セッションではpush・deploy・実データ移行を実施していません。
+
 # Upgrading
 
 New versions are published as [GitHub Releases](https://github.com/odiak/livesync-workers/releases).
