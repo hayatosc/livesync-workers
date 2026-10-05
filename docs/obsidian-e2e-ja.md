@@ -100,8 +100,42 @@ rm "$PWD/.local/e2e/xserver/Xauthority"
 
 公式[Obsidian Headless](https://obsidian.md/help/headless)はアプリ不要ですが、[Headless Sync](https://obsidian.md/help/sync/headless)はObsidian Sync契約・サービス向けです。任意のCouchDB互換WorkerやSelf-hosted LiveSyncプラグインの実行経路とは確認できません。実アカウント／契約は作成・利用していません。
 
-別の有効な選択肢は、[公式Self-hosted LiveSync CLI](https://raw.githubusercontent.com/vrtmrz/obsidian-livesync/main/src/apps/cli/README.md)です。公式READMEはObsidian不要で、プラグインと同じ同期コアを使い、CouchDBへのsync／ファイルのpush・pull／Vault mirrorを提供すると説明しています。これをローカルWorkersへ接続したヘッドレス同期E2Eは、権限変更なしで取り組める経路です。ただしObsidianのファイルイベント・API・プラグインロードの保証は別で、実Obsidian E2Eと同一視しません。今回の代替調査ではCLI同期E2E自体はまだ実行していません。
+別の有効な選択肢は、[公式Self-hosted LiveSync CLI](https://raw.githubusercontent.com/vrtmrz/obsidian-livesync/main/src/apps/cli/README.md)です。公式READMEはObsidian不要で、プラグインと同じ同期コアを使い、CouchDBへのsync／ファイルのpush・pull／Vault mirrorを提供すると説明しています。これをローカルWorkersへ接続したヘッドレス同期E2Eは、権限変更なしで取り組める経路です。ただしObsidianのファイルイベント・API・プラグインロードの保証は別で、実Obsidian E2Eと同一視しません。代替調査時点では未実行でしたが、以下の追加検証で公式CLI同期E2Eを実行しました。
 
 読み取りの実行環境確認では`CapEff=0`、`NoNewPrivs=1`、`Seccomp=2`でした。既存Chromiumのsandbox helperもroot所有ではありません。[Linux公式文書](https://docs.kernel.org/userspace-api/no_new_privs.html)によればNoNewPrivsは子へ継承され、setuidによるexec時の権限上昇も抑止します。そのため、前に述べた「同梱helperのroot所有・4755」だけで起動できるとは保証できません。既に観測したuser namespaceのuid_map書込み拒否も残ります。NoNewPrivsやseccompを解除したり、拒否されたchownを再試行したり、別バイナリ経由で迂回していません。
 
 実Obsidianを残す選択肢は、プラットフォームが標準Electron sandboxに必要な機能を許可する実行プロファイル、または標準sandboxで動く別の許可済み環境に同じハーネスを移すことです。この既存コマンド環境内での、確認済みの非root・標準sandbox起動経路は見つかっていません。これは全環境／全代替が不可能という主張ではありません。ソースコード変更はなく、前回の188件の結果は維持しています。
+
+
+## 公式LiveSync CLIの実同期検証（GUI受け入れは未完了）
+
+`npm run test:e2e:cli`で公式ソースの取得・ビルドから実同期まで成功しました。ソースは[公式1.0.34の固定コミット](https://github.com/vrtmrz/obsidian-livesync/blob/27a2d9e8c9672fb8df522470712da3cc6e35af11/src/apps/cli/README.md) `27a2d9e8c9672fb8df522470712da3cc6e35af11`、共有コアは`@vrtmrz/livesync-commonlib 0.1.35`です。ソースと上流lockを変更せず、`npm ci`と公式CLI workspaceのbuildを実行します。CLIが生成する実リビジョン・チャンクを使用し、テスト側でCouch文書を組み立てません。
+
+```bash
+npm run test:e2e:cli:prepare  # 任意: 固定ソースの取得・公式ビルド
+npm run test:e2e:cli          # build + 隔離された実同期7段階
+```
+
+既存のクリーンな同一コミットを使う場合のみ`LIVESYNC_CLI_SOURCE=/absolute/path`を指定できます。既定は`.local/e2e/livesync-cli`です。初回はGitHub/npmへの接続が必要です。公式ソース・ビルドreceiptを再利用し、個別CLIコマンドは45秒で失敗する上限を設けます。
+
+成功した7段階は、ノート／複数チャンクのバイナリ作成、2Vaultの同一パス分離、本文／バイナリ更新と添付リンク維持、バックエンド停止中のローカル更新と再接続、別Nodeプロセス間のPouchDB／チェックポイント維持、削除伝播、DO管理DBの消去＋Workers再起動後のR2復元です。160,003バイトの添付は実splitterで2チャンクになりました。更新後180,011バイトと復元対象の残存添付もSHA-256で原本と照合しています。削除されたノート／添付は新規クライアントへ復元されず、他Vaultの同一パスは残ります。
+
+実LiveSync CLIの削除はCouchDBの`_deleted`だけではなく`deleted: true`のアプリ側記録です。この実形式を変更せず、その伝播・復元後の非再出現を検証します。ローカル資格情報・PouchDB・R2／DO保存域は実行ごとに作成し終了時に破棄します。画像／PDFの拡張子を持つ任意バイト列を使い、画像表示やPDF解析の検証は含みません。
+
+再実行の回帰検査は`npm test`のNode163件＋公式Workers25件＝188件、`npm run typecheck`、build、スクリプト構文検査が成功しました。lint用スクリプトは既存構成にありません。証跡は`.local/e2e/cli-evidence/result.json`、ビルドreceipt・ログ・回帰ログ・checksum・Git bundle・ソースアーカイブに保存します。
+
+**実Obsidian＋公式プラグインのE2Eは未完了です。** CLIはファイルイベント・Obsidian API・プラグインロードを検証しません。結果には`actualObsidian: false`、`overallObsidianE2EComplete: false`を明記し、GUIハーネスと起動失敗の証跡を保持しています。
+
+## 選択中クラウドで標準sandboxを使うための前提
+
+[Electron公式sandbox説明](https://www.electronjs.org/docs/latest/tutorial/sandbox)と[Chromium Linux sandboxの構成](https://chromium.googlesource.com/chromium/src/+/HEAD/sandbox/linux/README.md)に基づき、プラットフォーム管理者が同じ選択環境に適切な実行プロファイルを提供する必要があります。現在のセッションから設定変更や別環境への切替は行いません。
+
+| 条件／標準経路 | この環境での確認 | 再開に必要なもの |
+| --- | --- | --- |
+| 公式Obsidian・CLI・プラグイン | 配布物取得済み | 既存の固定版を使用 |
+| 表示サーバー | 認証付き・TCP無効のXvfbを起動できた | 再実行時に同じ使い捨て表示サーバーを起動 |
+| 非特権user namespace経路 | namespace作成に伴う`/proc/self/uid_map`書込みがread-onlyで拒否 | 承認済みプロファイルで必要なnamespace作成とUID/GID mappingが許可されることを管理者が確認 |
+| 同梱setuid helper経路 | helperはagent所有755。承認済みchownはOS拒否。`NoNewPrivs=1` | 管理者による同梱helperのroot所有4755だけでなく、helperの標準権限動作を実行プロファイルが許可することを確認 |
+| 制約の確認 | `CapEff=0`、`Seccomp=2` | seccompの値だけで原因を断定しない。管理者が必要なsandbox操作の許可を確認し、標準sandboxを維持して起動検証 |
+
+[LinuxのNoNewPrivs文書](https://docs.kernel.org/userspace-api/no_new_privs.html)が示すとおり、その属性は継承されsetuid execによる権限上昇を抑止するため、helperのファイルmodeだけを直しても起動成功は保証できません。プラットフォームが上記の標準経路を提供した後に、既存`npm run test:e2e:obsidian`で起動と7段階を実測して初めてGUI受け入れを判定します。拒否された所有者変更の再試行、sandboxの迂回・無効化、別環境への切替、本番deployは実施していません。

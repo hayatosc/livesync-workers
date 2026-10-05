@@ -20,7 +20,9 @@
     "test:e2e:obsidian": "npm run build && node --use-env-proxy test/e2e/obsidian.mjs",
     "test:e2e:backend": "npm run build && node test/e2e/backend-check.mjs",
     "test:e2e:plugin": "node --use-env-proxy test/e2e/plugin.mjs",
-    "test:e2e:install": "node --use-env-proxy test/e2e/install.mjs"
+    "test:e2e:install": "node --use-env-proxy test/e2e/install.mjs",
+    "test:e2e:cli:prepare": "node test/e2e/prepare-cli.mjs",
+    "test:e2e:cli": "npm run build && node test/e2e/livesync-cli.mjs"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "0.4.0",
