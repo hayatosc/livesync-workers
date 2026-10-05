@@ -12,7 +12,7 @@ Debian公式のXvfbを`.local/e2e/xserver/`へ展開し、Xauthority認証・`-n
 
 さらに、同梱`chrome-sandbox`がroot所有かつ4755である必要があると通知されました。`unshare --user --map-root-user true`による機能確認も`/proc/self/uid_map: Read-only file system`で失敗しました。`--no-sandbox`／sandbox無効化、root所有への変更、setuid権限付与、永続認証情報の追加は行っていません。**インストールは成功、GUI起動と実同期E2Eはブロック、7段階の実同期合格は0件**です。
 
-標準Electron sandboxを利用できる管理者許可済みの実行環境が必要です。現状のAppImageをこの環境で起動する場合、Electronが要求する変更は同梱`chrome-sandbox`のroot所有・4755設定です。これは特権実行ファイルの許可となるため、今回の「新しい永続アクセスを付与しない」範囲では実行しません。sandboxを無効にする手順は提供しません。
+標準Electron sandboxを利用できる管理者許可済みの実行環境が必要です。現状のAppImageをこの環境で起動する場合、Electronが要求する変更は同梱`chrome-sandbox`のroot所有・4755設定です。これは特権実行ファイルの許可となるため、当初の承認前には実行しませんでした。後の限定承認に基づく試行結果は末尾に記録しています。sandboxを無効にする手順は提供しません。
 
 ## 7段階の検証内容（コード化済み・GUI経路は未実行）
 
@@ -87,3 +87,9 @@ rm "$PWD/.local/e2e/xserver/Xauthority"
 追加の内部識別転送は、別の読み取り専用担当にも認可境界をレビューしてもらい、重大な漏れ・競合・既存ホスト互換性回帰は見当たりませんでした。最終の`npm test`はNode163件＋公式Workers25件＝188件が成功し、`npm run typecheck`、build、各E2Eスクリプトの`node --check`、`git diff --check`、ローカルWrangler前提検査も成功しました。GUI起動失敗と実同期未実行はこれらの成功とは別です。
 
 証跡と復元物は`.local/e2e/evidence/`の`result.json`、`summary.json`、ログ、SHA256SUMS、Git bundle、ソースアーカイブに保存しています。実Cloudflare資源作成、実Vault移行、push／PR／merge／本番deploy、dotデスクトップ変更はしていません。
+
+## 同梱sandbox設定への限定承認後の再試行
+
+ユーザーは公式Obsidian同梱`chrome-sandbox`だけをroot所有・4755へ設定する操作を明示承認しました。重複実行とE2Eロックがないことを確認した後、承認済みの昇格実行を試しました。この環境には`sudo`がなく、同一ファイルへの直接の`chown root:root`もOSから`Operation not permitted`で拒否されました。実行ユーザーはuid 1000のままです。所有者はagent:agent、modeは755で変更されていません。
+
+指示どおり拒否時点で設定変更を停止しました。別の昇格経路、sandbox無効化、システムの追加変更は試していません。自動承認レビューの拒否ではなく、実行環境の所有者変更権限不足です。標準sandboxの前提が満たされていないためGUI／実同期E2Eは再開できません。プラットフォーム側で、この同一ファイルに承認済み設定を適用できる管理権限が必要です。証跡は`.local/e2e/evidence/sandbox-approved-attempt.json`です。コード変更はなく、前回成功した188件の結果はそのまま保持します。
