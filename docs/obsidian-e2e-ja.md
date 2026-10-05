@@ -93,3 +93,15 @@ rm "$PWD/.local/e2e/xserver/Xauthority"
 ユーザーは公式Obsidian同梱`chrome-sandbox`だけをroot所有・4755へ設定する操作を明示承認しました。重複実行とE2Eロックがないことを確認した後、承認済みの昇格実行を試しました。この環境には`sudo`がなく、同一ファイルへの直接の`chown root:root`もOSから`Operation not permitted`で拒否されました。実行ユーザーはuid 1000のままです。所有者はagent:agent、modeは755で変更されていません。
 
 指示どおり拒否時点で設定変更を停止しました。別の昇格経路、sandbox無効化、システムの追加変更は試していません。自動承認レビューの拒否ではなく、実行環境の所有者変更権限不足です。標準sandboxの前提が満たされていないためGUI／実同期E2Eは再開できません。プラットフォーム側で、この同一ファイルに承認済み設定を適用できる管理権限が必要です。証跡は`.local/e2e/evidence/sandbox-approved-attempt.json`です。コード変更はなく、前回成功した188件の結果はそのまま保持します。
+
+## Obsidian CLIと代替経路の調査
+
+公式[Obsidian CLI文書](https://obsidian.md/help/cli)は、CLIが実行中のObsidianアプリを操作し、アプリが起動していなければ初回コマンドで起動する方式であると明記しています。plugin:reload、command、evalを使えるため、アプリが正常起動する環境では実プラグインE2Eの操作経路として使えます。このクラウドで同梱`obsidian-cli help`を実行すると「The CLI is unable to find Obsidian. Please make sure Obsidian is running and try again.」と返りました。独立したプラグイン実行ランタイムではありません。既存ハーネスもこの公式CLIを起動手順に使用しています。
+
+公式[Obsidian Headless](https://obsidian.md/help/headless)はアプリ不要ですが、[Headless Sync](https://obsidian.md/help/sync/headless)はObsidian Sync契約・サービス向けです。任意のCouchDB互換WorkerやSelf-hosted LiveSyncプラグインの実行経路とは確認できません。実アカウント／契約は作成・利用していません。
+
+別の有効な選択肢は、[公式Self-hosted LiveSync CLI](https://raw.githubusercontent.com/vrtmrz/obsidian-livesync/main/src/apps/cli/README.md)です。公式READMEはObsidian不要で、プラグインと同じ同期コアを使い、CouchDBへのsync／ファイルのpush・pull／Vault mirrorを提供すると説明しています。これをローカルWorkersへ接続したヘッドレス同期E2Eは、権限変更なしで取り組める経路です。ただしObsidianのファイルイベント・API・プラグインロードの保証は別で、実Obsidian E2Eと同一視しません。今回の代替調査ではCLI同期E2E自体はまだ実行していません。
+
+読み取りの実行環境確認では`CapEff=0`、`NoNewPrivs=1`、`Seccomp=2`でした。既存Chromiumのsandbox helperもroot所有ではありません。[Linux公式文書](https://docs.kernel.org/userspace-api/no_new_privs.html)によればNoNewPrivsは子へ継承され、setuidによるexec時の権限上昇も抑止します。そのため、前に述べた「同梱helperのroot所有・4755」だけで起動できるとは保証できません。既に観測したuser namespaceのuid_map書込み拒否も残ります。NoNewPrivsやseccompを解除したり、拒否されたchownを再試行したり、別バイナリ経由で迂回していません。
+
+実Obsidianを残す選択肢は、プラットフォームが標準Electron sandboxに必要な機能を許可する実行プロファイル、または標準sandboxで動く別の許可済み環境に同じハーネスを移すことです。この既存コマンド環境内での、確認済みの非root・標準sandbox起動経路は見つかっていません。これは全環境／全代替が不可能という主張ではありません。ソースコード変更はなく、前回の188件の結果は維持しています。
