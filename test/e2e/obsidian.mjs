@@ -101,8 +101,12 @@ try {
   await step('note and multi-chunk binary create through real Obsidian → LiveSync → Workers → second Obsidian', async () => {
     await write(writer, '日本語.md', note);
     await write(writer, 'assets/original.pdf', original.toString('base64'), true);
+    await write(writer, 'assets/retained.png', updated.toString('base64'), true);
     await sync(writer); await sync(reader);
-    await expectFile(reader, '日本語.md', Buffer.from(note)); await expectFile(reader, 'assets/original.pdf', original);
+    await expectFile(reader, '日本語.md', Buffer.from(note)); await expectFile(reader, 'assets/original.pdf', original); await expectFile(reader, 'assets/retained.png', updated);
+    const doc = await (await backend.request('a', '/assets%2Foriginal.pdf')).json();
+    assert.ok(doc.children?.length > 1, 'Actual plugin splitter must produce multiple chunks');
+    result.binaryChunks = doc.children.length;
   });
   await step('same paths remain isolated between immutable vaults', async () => {
     await write(foreign, '日本語.md', 'foreign'); await sync(foreign);
@@ -129,6 +133,7 @@ try {
   });
   await step('R2 rebuild after DO cache loss and Worker restart reaches fresh Obsidian without resurrection', async () => {
     await backend.reset('a'); await backend.restart(); const fresh = await startClient('a'); await sync(fresh);
+    await expectFile(fresh, 'assets/retained.png', updated);
     await expectFile(fresh, 'reconnect.md', Buffer.from('after client restart')); await expectDeleted(fresh, '日本語.md'); await expectDeleted(fresh, 'assets/original.pdf');
   });
   result.status = 'passed';

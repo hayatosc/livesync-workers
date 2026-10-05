@@ -80,4 +80,4 @@ Segmenterは原形化や任意の部分一致を保証しません。日本語�
 
 `npm run test:e2e:obsidian`は実Obsidianと公式LiveSyncプラグインを使う隔離ローカルE2Eです。インストール・前提検査・実行済み結果・sandboxによるブロッカーは[実Obsidian E2E記録](docs/obsidian-e2e-ja.md)を参照してください。API-onlyの前提検査を実Obsidianの合格として扱いません。
 
-`npm run test:e2e:cli`は固定版の公式LiveSync CLI／共有コアとローカルWorkers・R2・DOを使い、添付の複数チャンク往復、更新・削除、複数Vault、再接続、R2復元の7段階を検証します。実行済みで成功していますが、実Obsidian＋プラグインE2Eの受け入れはsandbox起動制約により未完了です。
+`npm run test:e2e:cli`は固定版の公式LiveSync CLI／共有コアとローカルWorkers・R2・DOを使い、添付の複数チャンク往復、更新・削除、複数Vault、再接続、R2復元の7段階を検証します。CLIに加え、[draft PR #1](https://github.com/hayatosc/livesync-workers/pull/1)のGitHub Actionsで実Obsidian＋公式プラグインの7段階も成功しました。Codexコンテナのsandbox起動制約は環境固有の記録として保持しています。

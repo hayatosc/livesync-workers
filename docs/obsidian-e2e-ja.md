@@ -150,3 +150,14 @@ npm run test:e2e:cli          # build + 隔離された実同期7段階
 `CI`はbuild、TypeScript、Node／公式Vitest Workersテスト、`.mjs`構文検査、mainとの差分空白検査を実行します。既存設定にESLint／Prettier／Biome等のlint／formatterはありません。空白検査をformatterの合格とは扱わず、無関係なツール導入・全コード整形を避けています。`Publish to npm`はreleaseイベント専用で今回のPRでは実行しません。
 
 失敗時も`actual-obsidian-evidence`と`official-cli-evidence`に結果JSONを保存します。一時Vault・profile・R2／DO保存域・資格情報はアップロード対象外です。CLI成功、GUI成功、型／回帰検査を別々に確認し、GUIの未実行／失敗をE2E完了とは扱いません。
+
+
+### GitHub Actionsでの実GUI合格記録
+
+2026-10-05、[draft PR #1](https://github.com/hayatosc/livesync-workers/pull/1)のhead `a474bed28c69b2bce3168eb59a12f47d97ecf305`で[LiveSync E2E run 37291648624](https://github.com/hayatosc/livesync-workers/actions/runs/37291648624)が成功しました。取得したGUI artifactは`status: passed`、`actualObsidian: true`、7ケース成功で、全5回の起動／再起動readinessに実Obsidian 1.13.7・プラグイン1.0.34を記録しています。標準namespace前提とauthenticated Xvfbが動作し、root所有・setuid・セキュリティ設定変更なしで実アプリの作成・同期・更新・削除・再起動・DO復元を検証しました。これにより、前節の「GUI未完了」はCodexコンテナでの過去の試行結果となります。現在のGUI受け入れ結果はGitHub Actionsの成功です。
+
+[CI run 37291648668](https://github.com/hayatosc/livesync-workers/actions/runs/37291648668)もbuild、構文、空白、型検査、188テストが成功しました。CodeRabbitはdraftを理由にレビューをskipしており、コードレビュー成功とは扱いません。既存v4 ActionsにはNode 20非推奨・runner側Node 24実行への移行警告がありますが、各checkは成功しています。lint／formatterの未設定とUbuntu 22.04の退役予定は引き続き明示しています。
+
+artifactのCLI経由取得はストレージ側403になりましたが、認可済みGitHub connectorのartifact読取で取得し、両結果JSONを確認しました。ローカル証跡は`.local/e2e/github-actions-evidence/`です。Libraryにはアップロードしていません。PRはdraftのままで、merge・deployしていません。
+
+続くGUI検査では実プラグインが作るチャンク数を明示検証し、DO復元後に残存バイナリも原本SHA-256と照合します。最新headの判定はPR checksを参照してください。
