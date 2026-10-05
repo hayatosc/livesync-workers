@@ -1,125 +1,30 @@
-# このフォークの更新について
+# 更新手順
 
-R2永続化方式へ切り替える前に[日本語の移行・復元手順](r2-operations.md)を確認してください。旧SQLite Vaultは暗黙に移行されません。以下は旧upstreamの更新手順で、R2移行の代わりにはなりません。本セッションではpush・deploy・実データ移行を実施していません。
+このフォークはR2正本・不変Vault ID・Segmenter索引を追加しています。upstreamの最新版をそのまま取り込むと、この構成を失う可能性があります。upstreamの変更とこのフォークの差分をレビューし、検証したcommitを選んで更新してください。現在のdraft PRを既存公開npm版と同一仕様とは扱いません。
 
-# Upgrading
+## 更新前
 
-New versions are published as [GitHub Releases](https://github.com/odiak/livesync-workers/releases).
-To be notified, **Watch** this repository → **Custom** → **Releases**.
+1. 現Worker commit、`wrangler.jsonc`の資源名／ID／変数／DO migration履歴を記録する。
+2. コンテンツ正本・旧DO・旧索引を保全し、復元と切戻し条件を[運用文書](r2-operations.md)で確認する。
+3. `npm ci`、build、型検査、全テストと[CLI／GUI E2E](testing.md)を更新候補で実行する。
+4. binding・secret・migration・解析版に変更がないか確認する。既存DO migrationを削除／並べ替えしない。
 
-## If you deployed with the Deploy to Cloudflare button
+SQLiteからR2への切替は通常のWorker更新とは別の明示移行です。新IDの設定だけでは旧データをコピーしません。R2参照を持つDOを旧SQLite方式Workerで直接開くこともできません。
 
-The button does not fork this repository. It creates an independent copy under your
-GitHub/GitLab account as a single commit, with `wrangler.jsonc` rewritten to point at
-the resources it created for you (bucket and index names, binding ids) and the `name`
-in `package.json` changed. Your copy shares no git history with this repository and
-does not receive updates on its own.
+## 反映
 
-### With a coding assistant
-
-Open your copy in Claude Code, Codex, Cursor or similar and give it this prompt:
-
-```text
-This repository is a copy of https://github.com/odiak/livesync-workers made by the
-Deploy to Cloudflare button. It is not a fork, and until its first upgrade it shares
-no git history with upstream. Upgrade it to the latest upstream release by following
-the "If you deployed with the Deploy to Cloudflare button" section of
-https://github.com/odiak/livesync-workers/blob/main/docs/upgrading.md
-
-- Keep my resource names, ids and variables in wrangler.jsonc, and bring in any new
-  bindings, variables and Durable Object migrations from upstream.
-- Read the release notes at https://github.com/odiak/livesync-workers/releases
-  between my current version (packages/livesync-workers/package.json) and the new
-  one, and tell me about any new secrets or variables I need to set in the
-  Cloudflare dashboard.
-- Pushing deploys to production. Show me the result and wait for my OK before pushing.
-```
-
-The rest of this section is what the assistant will do, if you would rather do it by hand.
-
-### First upgrade only: connect your copy to upstream
-
-Git cannot merge two histories that have nothing in common, so first record which
-upstream commit your copy was made from. This changes no files; it only gives later
-merges a common ancestor.
+deployを承認・計画した場合にのみ、検証したcheckoutから実行します。
 
 ```sh
-git remote add upstream https://github.com/odiak/livesync-workers.git
-git fetch upstream --tags
-
-# Prints a commit if your copy is already connected. Then skip to "Every upgrade".
-git merge-base HEAD upstream/main
+npm ci
+npm run build
+npm run deploy
 ```
 
-Find the upstream commit closest to the commit the button created (the root of your
-history):
+Cloudflare Workers Builds等の自動deployを利用している環境では、production branchへのpushがdeployを引き起こす設定かを確認してください。このリポジトリのGitHub ActionsはPR検査とrelease時のnpm公開であり、Workerの本番deploy workflowはありません。必要なsecretは環境側で設定し、Gitへ保存しません。
 
-```sh
-import=$(git rev-list --max-parents=0 HEAD)
-best= min=
-for c in $(git rev-list upstream/main); do
-  n=$(git diff --numstat "$c" "$import" | awk '{ s += $1 + $2 } END { print s + 0 }')
-  if [ -z "$min" ] || [ "$n" -lt "$min" ]; then best=$c min=$n; fi
-  [ "$n" -eq 0 ] && break
-done
-git log -1 --oneline "$best"
-git diff --stat "$best" "$import"
-```
+検索解析版が変わるときは索引を再構築し、切替後の検索を確認します。旧索引は切戻し判断が終わるまで保持します。新Vaultへの書込後のロールバックでは、新しい更新を引き継ぐ復元／レプリケーションと差分確認を先に行ってください。
 
-The diff should list only `wrangler.jsonc` and `package.json`, with a few changed
-lines each. If it lists more, the match is wrong; do not continue. Otherwise record
-that commit as merged, keeping all of your files:
+## 独自ホスト
 
-```sh
-git merge -s ours --allow-unrelated-histories -m "Record upstream ${best:0:7} as the base of this copy" "$best"
-```
-
-### Every upgrade
-
-Merge the latest release tag and push. Workers Builds redeploys on every push to your
-production branch.
-
-```sh
-git fetch upstream --tags
-git merge "$(git tag -l 'v*' --sort=-v:refname | head -n 1)"
-git push
-```
-
-### What conflicts
-
-Usually nothing. The only lines your copy differs in are the ones the button wrote
-(ids and names in `wrangler.jsonc`, `name` in `package.json`), and a merge conflicts
-only when upstream changes those same lines, for example by adding a binding next to
-yours. Keep **your** values and add upstream's change around them; the release notes
-say when a new binding or variable is involved.
-
-If you committed your own changes to the copy after deploying, the files you changed
-can conflict as well. Resolve those as you would any merge conflict.
-
-Secrets live in Cloudflare, not in the repository, so they survive upgrades.
-If an upgrade needs a new secret or variable, add it in the dashboard under
-Settings → Variables and Secrets.
-
-### Durable Object migrations
-
-Upstream ships schema changes as new entries in the `migrations` list in
-`wrangler.jsonc`. Keep the whole list from upstream in order; Cloudflare applies
-only the tags it has not seen for your Worker.
-
-## If you deployed with wrangler
-
-Your clone tracks this repository directly:
-
-```sh
-git pull
-npm install
-npm run build && npm run deploy
-```
-
-New secrets or variables are announced in the release notes; set them with
-`wrangler secret put NAME` or in the dashboard before deploying.
-
-## If you embed the library
-
-Bump `livesync-workers` in your `package.json` and read the changelog for
-breaking changes to `VaultHost`, `VaultPolicy` or the MCP tool surface.
+[組込み契約](embedding.md)の`VaultHost`・`VaultBindings`・MCP操作を更新候補と照合します。root workspaceで検証しているソース版と、既存公開npm版には差があります。パッケージversionだけでR2方式への対応を判断しないでください。

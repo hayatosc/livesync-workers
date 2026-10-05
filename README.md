@@ -1,83 +1,41 @@
 # livesync-workers（R2永続化フォーク）
 
-Obsidian Self-hosted LiveSync互換APIとMCPをCloudflare Workersで提供します。このフォークでは、永続コンテンツをR2、更新の調整と再構築可能な管理DBをVaultごとのSQLite-backed Durable Objectに分けます。
+Obsidian Self-hosted LiveSync互換APIとMCPをCloudflare Workersで提供します。永続データの正本はR2、更新の調整はVaultごとのSQLite-backed Durable Object、検索索引は再生成可能なR2データです。
 
-## 構成
+## 導入と文書
 
-- `CONTENT_BUCKET`：不変のリビジョン本文、バイナリ原本、履歴・削除・同期チェックポイントを復元するコミット列とhead。
-- `VAULT_DB`：原則1Vault=1SQLite DO。本文の代わりにR2参照を保持し、リビジョン競合、勝者、変更フィード、同期進捗を調整します。
-- `FTS_BUCKET`：再生成可能な検索索引。`Intl.Segmenter('ja', { granularity: 'word' })`で解析し、単語位置の転置索引とBM25で検索します。
-- `OAUTH_KV`／`MCP_OBJECT`：既存OAuthとMCPセッションの互換性を維持します。コンテンツ保存のためのD1、追加KV、Queuesは使いません。
-- ベクトル検索は任意です。既定の`SEMANTIC_SEARCH=off`ではAI／Vectorizeバインディングも不要です。既存の`searchNotes`は残し、無効時には`grepNotes`を案内します。
+- [セットアップ・設定・認可](docs/setup.md)：必須binding／secret、LiveSync接続、複数Vault、MCP。
+- [保存・復元・移行](docs/r2-operations.md)：確定点、障害時の再生、GC、旧SQLiteからの移行と切戻し。
+- [テストとCI](docs/testing.md)：公式Workers統合、実Obsidian／公式CLIのE2E、検証済み範囲。
+- [Workerへの組込み](docs/embedding.md)：独自認証・Vault管理を持つホストでの利用。
+- [更新手順](docs/upgrading.md)：このフォークの変更を保った更新。
 
-本文はDOの`revs.body`や`rev_body_chunks`に残しません。新方式の`revs.body`には`{"r2":"…"}`参照のみを保存します。LiveSyncで届く任意のJSONリビジョンとバイナリチャンクを元のまま永続化し、MCPアップロードではバイナリ原本も不変オブジェクトとして保存します。Vault内パスと添付リンクは書き換えません。
+## 構成と対応範囲
 
-## 検証
+| 構成要素 | 役割 |
+| --- | --- |
+| Worker | `/livesync`互換API、`/mcp`、OAuth、管理者向け状態・接続設定画面 |
+| `CONTENT_BUCKET` | 不変リビジョン本文、チャンク、MCP添付原本、履歴・削除・チェックポイントを復元するコミット列とhead |
+| `VAULT_DB` | 原則1Vault＝1SQLite DO。本文はR2参照のみ。競合、勝者、変更seq、同期・索引進捗を管理 |
+| `FTS_BUCKET` | 文書ごとの単語位置索引とactive／building世代 |
+| `OAUTH_KV`／`MCP_OBJECT` | 既存OAuth情報とMCPセッション |
 
-```sh
-npm ci
-npm run build
-npm run typecheck
-npm test
-```
+コンテンツ用D1・Queues・追加KVはありません。AI／Vectorizeは任意のセマンティック検索を有効にする場合だけ必要です。既定の`SEMANTIC_SEARCH=off`では利用しません。
 
-`npm test`は既存Nodeテストに加えて、[Cloudflare公式Vitest Workers統合](https://developers.cloudflare.com/workers/testing/vitest-integration/)を実行します。`vitest.workers.config.ts`と`test/workers/wrangler.jsonc`のローカルWorkers／SQLite DO／R2バインディングを使用します。独自Miniflare起動や実Cloudflare資源の作成はしません。
-
-`npm run test:workers`でWorkersテストだけを実行できます。専用テストの型検査は`tsconfig.workers.json`を使います。既存リポジトリにlintスクリプトはありません。変更の空白検査には`git diff --check`を使用します。
-
-## Vaultと権限
-
-既定Vaultの不変IDは`LIVESYNC_VAULT_ID=primary`です。`LIVESYNC_DATABASE`はLiveSync接続名です。不変IDを変更せずに表示名・接続名を変更できます。旧版の`${tenantId}:${databaseName}`というDO名は、明示的な移行の読み元として維持しています。新しいDO名はエンコードした所有範囲と不変IDから生成します。
-
-複数Vaultには`VAULTS_JSON`で静的な管理情報を設定します。パス接頭辞を認可として扱いません。Basic資格情報は各リクエストで検証し、MCPは各ツール呼出しでスコープと現在の所有／読取権限を検証します。
-
-```json
-[
-  {
-    "vaultId": "work-vault",
-    "tenantId": "owner-a",
-    "databaseName": "work",
-    "displayName": "仕事",
-    "ownerId": "admin",
-    "readers": [],
-    "username": "obsidian-work",
-    "passwordSecret": "WORK_PASSWORD"
-  }
-]
-```
-
-`passwordSecret`は環境シークレットの名前で、設定JSONにパスワードを埋め込みません。Vault IDとusernameは設定内で一意にします。現在のWorkerのOAuthログインは既存の管理者認証のままで、principalは`admin`です。他のprincipalを利用するホストは既存OAuthライブラリの認証フックを実装します。今回、アカウント作成や実認証設定の変更は行っていません。
-
-読取共有の`readers`に含まれるprincipalは、OAuthの書込スコープがあってもそのVaultの所有者でなければ更新できません。管理用DOは静的設定で足りるため追加していません。
-
-## MCP
-
-既存の一覧・読取・全文検索・追記・上書きツールに任意の`vaultId`を追加し、未指定では認可された既定Vaultを使用します。新たに`listVaults`、`listFiles`、`readAttachment`、`uploadAttachment`を提供します。
-
-- `vault:read`：一覧・読取・検索・添付取得。
-- `vault:append`：既存の追記操作。
-- `vault:write`：ノート上書きと添付アップロード。
-
-上書きは前回読取時の`contentHash`が必要です。添付はbase64で入出力し、デコード後の上限は10 MiBです。絶対パス、`..`、空セグメント、バックスラッシュ、制御文字を拒否し、予約パス制限を適用します。読取対象が完全に同期していない場合は更新を拒否します。OCR／音声認識は行いません。画像・PDF・音声の原本と、検索できるMarkdownを別に扱います。
+LiveSyncのリビジョン、本文・バイナリチャンクを保存し、元のVault内パス・添付リンクを維持します。文書CRUD、`_bulk_docs`、`_bulk_get`、`_revs_diff`、`_all_docs`、`_changes`、`_local`等を提供しますが、CouchDB全機能の代替ではありません。通常編集は古い基底revを409で拒否し、`new_edits=false`の同一rev再送は冪等です。`_deleted`とLiveSyncの`deleted: true`を扱います。
 
 ## 全文検索
 
-日本語・英語混在、幅・大小文字、結合文字、識別子、サロゲート文字をWorkersで検証します。NFKC＋小文字化をグラフェムごとに行い、解析語から元のUTF-16範囲へ対応付けて原文をハイライトします。通常の単語はAND、二重引用符で囲んだ語は連続単語位置によるフレーズです。区切り記号そのものの一致は要求しません。
+検索対象は復元できる`.md`の本文・最初のMarkdown見出し（なければファイル名）・見出し・パスです。`Intl.Segmenter('ja', { granularity: 'word' })`とNFKC＋小文字化を索引・クエリで共通に使用します。単語位置付き転置索引をBM25で順位付けし、重みはタイトル3、見出し2、パス1.5、本文1です。
 
-タイトル3、見出し2、パス1.5、本文1の重みを付け、単語数によるBM25で順位付けします。`grepNotes.folder`はVault相対フォルダとその配下に絞り込みます。検索候補の本文ハッシュを現在のVaultと照合し、削除済み・古い版を除外します。
+通常語はAND、二重引用符内は連続単語のフレーズです。区切り記号そのものの一致は要求しません。原文のUTF-16範囲へ対応付けたハイライト、Vault／`grepNotes.folder`の配下絞込みを提供します。原形化・任意部分一致は保証しません。Linderaや新しい2-gram索引は導入していません。旧索引はライブラリの旧ホスト互換用として残りますが、このWorkerはSegmenter索引を使用します。
 
-Segmenterは原形化や任意の部分一致を保証しません。日本語の活用形や語の一部分だけでは見つからない場合があります。Linderaも新しい2-gram索引も導入していません。旧2-gram実装はライブラリの旧ホスト互換性のために残っていますが、このWorkerはSegmenter索引を使用します。
+索引はDO alarmで非同期更新します。古い本文ハッシュと削除済み候補を除外するため、更新直後に新しい検索結果が出ないことがあります。解析版`ja-segmenter-nfkc-v1`をキーに含め、再構築完了後にactive世代を切り替えます。初回はbuilding状態です。現Workerでは100万UTF-16コード単位を超えるノートを索引から除外します。
 
-解析バージョンは`ja-segmenter-nfkc-v1`で、索引キーに含めます。再構築中は以前のactive世代を検索し、全処理完了後にactiveを切り替えます。初回はbuildingを返します。旧R2索引はその場で破壊せず、旧版への切戻しに残します。Workersランタイムの語境界挙動が変わる更新ではテストを確認し、解析バージョンを上げて再構築してください。
+画像・PDF・音声の原本保存はできますが、OCR・PDFテキスト抽出・音声認識はありません。検索できるMarkdownとは別に扱います。E2EE・パス難読化・圧縮した内容のサーバー復号／展開は実装していません。生成する接続設定とE2Eはこれらを無効にしています。
 
-## 整合性・復元・移行
+## 状態と制約
 
-[運用と復元手順](docs/r2-operations.md)を参照してください。既存SQLite Vaultは自動移行しません。既存データのあるDOを新方式で開くと、明示移行が必要な旨で失敗します。移行先IDの変更によって既存データが自動的にコピーされることもありません。
+[draft PR #1](https://github.com/hayatosc/livesync-workers/pull/1)で開発中です。実Obsidian＋公式プラグイン7ケース、公式CLI7ケース、Node／公式Workersテスト188件が成功しています。詳細・対象commitは[検証記録](docs/testing.md)を参照してください。
 
-この変更はクラウド内の実装とローカル統合テストまでです。push、PR公開、merge、本番deploy、実資源作成、実ユーザーデータ移行は実施していません。
-
-## 実Obsidian E2E
-
-`npm run test:e2e:obsidian`は実Obsidianと公式LiveSyncプラグインを使う隔離ローカルE2Eです。インストール・前提検査・実行済み結果・sandboxによるブロッカーは[実Obsidian E2E記録](docs/obsidian-e2e-ja.md)を参照してください。API-onlyの前提検査を実Obsidianの合格として扱いません。
-
-`npm run test:e2e:cli`は固定版の公式LiveSync CLI／共有コアとローカルWorkers・R2・DOを使い、添付の複数チャンク往復、更新・削除、複数Vault、再接続、R2復元の7段階を検証します。CLIに加え、[draft PR #1](https://github.com/hayatosc/livesync-workers/pull/1)のGitHub Actionsで実Obsidian＋公式プラグインの7段階も成功しました。Codexコンテナのsandbox起動制約は環境固有の記録として保持しています。
+実Cloudflare本番deploy・実Vault移行は未実施です。1Vaultの管理メタデータはSQLite DOに収まる必要があり、WorkersのCPU・メモリ・リクエスト制約も残ります。大Vaultの検索費用・速度と巨大履歴の復元は未ベンチマークです。既存SQLiteからの移行は自動ではありません。
