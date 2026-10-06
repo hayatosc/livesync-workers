@@ -283,12 +283,21 @@ class VaultClient implements Vault {
   async grep(query: string, limit: number, folder?: string): Promise<FullTextSearchResult> {
     const inFolder = (path: string) => !folder || path.startsWith(`${folder.replace(/\/$/, "")}/`);
     if (this.bindings.fullText) {
-      const result = await this.bindings.fullText.search(this.ref, query, folder || this.bindings.fullText.sourceHashes ? Number.MAX_SAFE_INTEGER : limit);
+      const shared = this.bindings.fullText.searchWithOptions;
+      const result = shared
+        ? await shared.call(this.bindings.fullText, this.ref, query, limit, {
+            acceptPath: (path) => !this.hidden(path) && inFolder(path),
+            validate: async (candidates) => Promise.all(candidates.map(async ({ path, hash }) => {
+              const content = await this.readNote(path);
+              return content != null && await hashText(content) === hash;
+            })),
+          })
+        : await this.bindings.fullText.search(this.ref, query, folder || this.bindings.fullText.sourceHashes ? Number.MAX_SAFE_INTEGER : limit);
       const candidates = result.hits.filter((hit) => !this.hidden(hit.path) && inFolder(hit.path));
       const hits: FullTextSearchHit[] = [];
       for (const hit of candidates) {
         if (hits.length >= limit) break;
-        if (hit.contentHash !== undefined) {
+        if (!shared && hit.contentHash !== undefined) {
           const current = await this.readNote(hit.path);
           if (current == null || await hashText(current) !== hit.contentHash) continue;
         }

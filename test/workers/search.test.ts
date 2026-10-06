@@ -48,6 +48,7 @@ describe("Workers Intl.Segmenter positional index", () => {
     expect((await index.search(ref, "資料", 10)).hits).toHaveLength(1);
     const writer = await index.openWriter(ref);
     await writer.delete("new.md");
+    await writer.close();
     expect((await index.search(ref, "資料", 10)).hits).toHaveLength(0);
   });
 });

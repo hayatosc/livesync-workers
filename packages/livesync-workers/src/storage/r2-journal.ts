@@ -1,6 +1,6 @@
 /** R2 is authoritative. A single vault DO serializes writers; head CAS also fences stale writers. */
 export type JournalStatement = { sql: string; args: Array<string | number | null> };
-export type JournalCommit = { version: 1 | 2; previous: string | null; statements: JournalStatement[]; checkpoint?: { r2: string; format?: 2 } };
+export type JournalCommit = { version: 1 | 2 | 3; previous: string | null; statements: JournalStatement[]; checkpoint?: { r2: string; format?: 2 } };
 export type JournalHead = { version: 1; commit: string };
 export class JournalConflict extends Error {}
 
@@ -10,7 +10,7 @@ export function contentPrefix(tenantId: string, vaultId: string): string {
 }
 
 export class R2Journal {
-  constructor(readonly bucket: R2Bucket, readonly prefix: string) {}
+  constructor(readonly bucket: R2Bucket, readonly prefix: string, private readonly writeVersion: 1 | 3 = 1) {}
   private observed: { commit: string | null; etag: string | null } | null = null;
   private get headKey() { return `${this.prefix}head.json`; }
 
@@ -59,7 +59,7 @@ export class R2Journal {
     const previous = expected !== undefined && this.observed?.commit === expected ? this.observed : await this.head();
     if (expected !== undefined && previous.commit !== expected) throw new JournalConflict("Stale vault writer");
     const key = `${this.prefix}commits/${crypto.randomUUID()}.json`;
-    const commit: JournalCommit = { version: checkpoint?.format === 2 ? 2 : 1, previous: previous.commit, statements, ...(checkpoint ? { checkpoint } : {}) };
+    const commit: JournalCommit = { version: this.writeVersion === 3 ? 3 : checkpoint?.format === 2 ? 2 : 1, previous: previous.commit, statements, ...(checkpoint ? { checkpoint } : {}) };
     const immutable = await this.put(key, JSON.stringify(commit), { onlyIf: { etagDoesNotMatch: "*" } });
     if (!immutable && await (await this.bucket.get(key))?.text() !== JSON.stringify(commit)) throw new JournalConflict("Commit key already exists; retry with a new immutable key");
     const head: JournalHead = { version: 1, commit: key };
@@ -100,7 +100,7 @@ export class R2Journal {
       const object = await this.bucket.get(key);
       if (!object) throw new Error("Missing committed manifest during replay");
       const value = await object.json<JournalCommit>();
-      if (value.version !== 1 && value.version !== 2) throw new Error("Unsupported journal version");
+      if (value.version !== 1 && value.version !== 2 && value.version !== 3) throw new Error("Unsupported journal version");
       if (value.checkpoint) break;
       key = value.previous;
     }
@@ -152,7 +152,7 @@ export class R2Journal {
       const object = await this.bucket.get(key);
       if (!object) throw new Error(`Missing committed manifest: ${key}`);
       const commit = await object.json<JournalCommit>();
-      if (![1,2].includes(commit.version) || !Array.isArray(commit.statements)) throw new Error("Unsupported content journal version");
+      if (![1,2,3].includes(commit.version) || !Array.isArray(commit.statements)) throw new Error("Unsupported content journal version");
       commits.push(commit);
       key = commit.previous;
     }

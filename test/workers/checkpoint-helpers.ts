@@ -16,6 +16,12 @@ export async function drainCheckpoint(stub: DurableObjectStub) {
 export async function stopCheckpointAlarms(stubs: DurableObjectStub[]) {
   for (const stub of stubs) await runInDurableObject(stub, async (instance: PersistentVaultDO, state) => {
     const scheduler = instance as unknown as { exclusive(operation: () => Promise<void>): Promise<void> };
-    await scheduler.exclusive(async () => { await state.storage.deleteAlarm(); });
+    await scheduler.exclusive(async () => { (instance as unknown as {scheduleIndexing():Promise<void>}).scheduleIndexing=async()=>{}; await state.storage.deleteAlarm(); });
   });
+}
+
+/** Force a checkpoint turn only in tests targeting one snapshot boundary. */
+export async function advanceCheckpoint(instance: PersistentVaultDO, state: DurableObjectState) {
+  state.storage.sql.exec("INSERT INTO meta (key,value) VALUES ('maintenance_turn','checkpoint') ON CONFLICT(key) DO UPDATE SET value='checkpoint'");
+  await instance.alarm();
 }

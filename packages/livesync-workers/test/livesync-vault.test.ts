@@ -518,7 +518,7 @@ describe("LiveSync Vectorize indexing", () => {
     expect(inputs.some((text) => text.includes("tailneedle"))).toBe(true);
     expect(inputs.every((text) => text.length <= 4_000)).toBe(true);
     expect(storage.sql.exec("SELECT value FROM meta WHERE key = 'index_version'").one())
-      .toEqual({ value: "3" });
+      .toEqual({ value: "4" });
     await durableObject.alarm();
     expect(env.AI.run).toHaveBeenCalledTimes(1);
   });

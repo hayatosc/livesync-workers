@@ -11,7 +11,7 @@ npm test
 npm run test:workers
 ```
 
-`npm test`はライブラリNode156件、Worker Node7件、公式Vitest Workers59件の計222件です。`vitest.workers.config.ts`から`test/workers/wrangler.jsonc`のローカルWorkers／SQLite DO／R2 bindingを使用します。[Cloudflare公式Vitest統合](https://developers.cloudflare.com/workers/testing/vitest-integration/)で、独自Miniflare起動は使いません。
+`npm test`はライブラリNode156件、Worker Node7件、公式Vitest Workers69件の計232件です。`vitest.workers.config.ts`から`test/workers/wrangler.jsonc`のローカルWorkers／SQLite DO／R2 bindingを使用します。[Cloudflare公式Vitest統合](https://developers.cloudflare.com/workers/testing/vitest-integration/)で、独自Miniflare起動は使いません。
 
 統合テストは、同期API・リビジョン競合・チャンク／バイナリ、保存境界の注入障害と再試行、R2 head CAS、DO行／スキーマ消失後の再生、削除・checkpoint、GC、明示移行、管理DB圧縮／容量拒否／ページ化復元と保存失敗、Segmenter解析・索引更新／世代切替、Vault越境・MCP scope／更新競合を検証します。実CPU強制終了・本番R2障害を再現したという意味ではありません。
 
@@ -58,11 +58,11 @@ GUI／CLIはそれぞれ次の7段階を検証します。
 
 ## GitHub Actionsと確認済み結果
 
-[CI](../.github/workflows/ci.yml)はbuild、型検査、全222テスト、`.mjs`構文、mainとの差分空白検査を実行します。lint／formatterは未設定で、空白検査をそれらの合格とは扱いません。
+[CI](../.github/workflows/ci.yml)はbuild、型検査、全232テスト、`.mjs`構文、mainとの差分空白検査を実行します。lint／formatterは未設定で、空白検査をそれらの合格とは扱いません。
 
 [LiveSync E2E](../.github/workflows/e2e.yml)はdraftを含むPRでCLIとGUIを別ジョブ実行します。CLIはUbuntu 24.04、GUIはUbuntu 22.04 hosted VMです。通常のnamespace sandboxとauthenticated Xvfbを使い、sysctl・AppArmor・seccomp・setuid変更は行いません。前提検査が失敗した場合はジョブも失敗します。workflow権限は`contents: read`、checkoutは認証情報を残しません。
 
-検証結果と対象headは[PR checks](https://github.com/hayatosc/livesync-workers/pull/1/checks)で確認してください。GUIの結果JSONは実アプリ／プラグイン版と実チャンク数を記録します。
+検証結果と対象headは[Actions一覧](https://github.com/hayatosc/livesync-workers/actions)で確認してください。GUIの結果JSONは実アプリ／プラグイン版と実チャンク数を記録します。
 
 失敗時も結果JSONをActions artifactに保存し、保持期間は14日です。GUIの失敗スクリーンショットも対象ですが、一時Vault／profile／資格情報は対象外です。既存v4 ActionsのNode 20非推奨警告（runnerはNode 24で実行）と、Ubuntu 22.04の2027年4月退役予定があるため、後継runnerは標準sandboxで実測して移行してください。release専用Publish workflowはPRで実行しません。
 
@@ -77,3 +77,9 @@ GUI／CLIはそれぞれ次の7段階を検証します。
 mainのActions 37404146196では、rolling snapshotのケースだけが5秒期限を約172ms超え、他214件は成功しました。同じ旧ケースはローカルで約3645msで完了し、実行中に自動索引alarmと手動alarmが混在していました。対象ケースは自動スケジューラを止めて手動進行に統一し、129文書で128行ページ境界を越える条件を維持します。途中更新・削除・競合・バイナリ・ローカル同期記録削除・復元後の変更フィード一致を省略していません。
 
 対象ケースだけの期限を15秒とし、フェーズ到達は50回、完了drainは1000回の有限ループで検査します。suite全体の期限は引き上げません。変更後の初回ローカル測定は約790ms、対象ケースの独立3回再実行は864／804／906msで成功しました。これはローカル観測で、本番性能ではありません。新しい[本文／文書／件数上限](request-limits.md)の境界テストも実Workers／SQLite／R2で実行します。
+
+## 共有索引・保存統合・公平なalarm
+
+追加10件は、共有木の分割／上書き／削除と旧根の不変性、旧BM25との順位／スコア／フレーズ／原文ハイライト一致、希少語・不一致語のGET件数とLIST不要、manifest CAS競合と派生GC、旧active世代の維持、本文／履歴の同一不変参照とDO全消去後の復元、チェックポイント完了前の索引進捗、writer close失敗の再試行、チェックポイント失敗時の索引進捗、欠落チャンクの上限到達後の再開を検査します。最後のケースはhydrateを55ms遅延させ、50ms境界による延期を確実に起こし、延期ノートのattemptsが20のまま全40件が完了することを要求します。
+
+[同一ハーネスの変更前後測定](shared-performance.md)は任意実行の公式Workers統合テストです。通常CIの232件には含みません。ローカル測定は操作ごとに人工遅延2msを入れ、実R2のネットワーク／課金／CPU上限は測定しません。

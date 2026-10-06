@@ -70,12 +70,19 @@ export type FullTextSearchHit = {
   snippets: Array<{ before: string; match: string; after: string }>;
 };
 
-/** Writes for one indexing pass; `close` is always called at the end of the pass. */
+/** Writes may be staged. Always await `close` to publish the pass; on failure,
+ * retry every attempted path with a fresh writer, including deletions. */
 export interface FullTextIndexWriter {
   upsert(note: FullTextNote): Promise<void>;
   delete(path: string): Promise<void>;
   close(): Promise<void>;
 }
+
+export type FullTextSearchOptions = {
+  acceptPath?: (path: string) => boolean;
+  /** Bounded batches, checked against current authoritative content before returning a hit. */
+  validate?: (candidates: Array<{ path: string; hash: string }>) => Promise<boolean[]>;
+};
 
 /**
  * An externally stored full-text index kept up to date one note at a time
@@ -99,6 +106,8 @@ export interface FullTextIndex {
     builtAt: number;
     docCount: number;
   }>;
+  /** Optional bounded ranking/filtering without requesting the entire corpus of hits. */
+  searchWithOptions?(ref: VaultRef, query: string, limit: number, options: FullTextSearchOptions): ReturnType<FullTextIndex["search"]>;
   /** Drop everything indexed for the vault (the vault is being deleted). */
   deleteVault(ref: VaultRef): Promise<void>;
 }

@@ -46,7 +46,7 @@ describe("R2 authoritative content in real Workers bindings", () => {
     expect(feed.results.some((row) => row.deleted)).toBe(true);
     await runInDurableObject(stub(user), async (_instance, state) => {
       const rows = state.storage.sql.exec<{ body: string; body_chunked: number }>("SELECT body, body_chunked FROM revs WHERE body_available = 1").toArray();
-      expect(rows.every((row) => row.body_chunked === 2 && Object.keys(JSON.parse(row.body)).join() === "r2")).toBe(true);
+      expect(rows.every((row) => row.body_chunked === 2 && Object.keys(JSON.parse(row.body)).sort().join() === "part,r2" && JSON.parse(row.body).part === "body")).toBe(true);
       expect(state.storage.sql.exec("SELECT * FROM rev_body_chunks").toArray()).toHaveLength(0);
     });
   });
