@@ -1,4 +1,5 @@
 import {
+  SegmenterFullTextIndex,
   constantTimeEquals,
   createVault,
   normalizeDatabaseName,
@@ -40,7 +41,30 @@ export function liveSyncUsername(env: Env): string {
 }
 
 export function vaultRef(env: Env): VaultRef {
-  return { tenantId: TENANT_ID, databaseName: normalizeDatabaseName(env.LIVESYNC_DATABASE) };
+  return { tenantId: TENANT_ID, vaultId: env.LIVESYNC_VAULT_ID?.trim() || "primary", databaseName: normalizeDatabaseName(env.LIVESYNC_DATABASE) };
+}
+
+export type VaultConfig = { vaultId: string; tenantId: string; databaseName: string; displayName: string; ownerId: string; readers?: string[]; username: string; passwordSecret: string };
+export function vaultConfigs(env: Env): VaultConfig[] {
+  if (!env.VAULTS_JSON) return [{ ...vaultRef(env), vaultId: vaultRef(env).vaultId!, displayName: vaultRef(env).databaseName, ownerId: "admin", username: liveSyncUsername(env), passwordSecret: "LIVESYNC_PASSWORD" }];
+  let configs: VaultConfig[];
+  try { configs = JSON.parse(env.VAULTS_JSON) as VaultConfig[]; } catch { throw new ConfigError("Invalid VAULTS_JSON"); }
+  if (!Array.isArray(configs) || !configs.length) throw new ConfigError("VAULTS_JSON must contain vaults");
+  const identities = new Set<string>();
+  const usernames = new Set<string>();
+  for (const config of configs) {
+    if (![config.vaultId, config.tenantId, config.databaseName, config.displayName, config.ownerId, config.username, config.passwordSecret].every((value) => typeof value === "string" && value.length > 0 && value.length <= 128) ||
+        !/^[A-Z][A-Z0-9_]*$/.test(config.passwordSecret) || normalizeDatabaseName(config.databaseName) !== config.databaseName ||
+        config.readers && (!Array.isArray(config.readers) || !config.readers.every((reader) => typeof reader === "string"))) throw new ConfigError("Invalid vault configuration");
+    // MCP selects vaultId, so it must also be unique within this registry.
+    if (identities.has(config.vaultId) || usernames.has(config.username)) throw new ConfigError("Duplicate vault ID or username");
+    identities.add(config.vaultId);
+    usernames.add(config.username);
+  }
+  return configs;
+}
+export function authorizedVaults(env: Env, principal: string, write = false): VaultConfig[] {
+  return vaultConfigs(env).filter((config) => config.ownerId === principal || !write && config.readers?.includes(principal));
 }
 
 export function vaultPolicy(env: Env): VaultPolicy {
@@ -53,17 +77,19 @@ export function vaultPolicy(env: Env): VaultPolicy {
 }
 
 export function vaultHost(env: Env): VaultHost {
-  const ref = vaultRef(env);
   return {
     async verifyCredential(username, password) {
-      const expectedUser = liveSyncUsername(env);
-      const expectedPass = secretValue(env, "LIVESYNC_PASSWORD");
-      if (!expectedPass) return null;
-      const userOk = constantTimeEquals(username, expectedUser);
-      const passOk = constantTimeEquals(password, expectedPass);
-      return userOk && passOk ? ref : null;
+      for (const config of vaultConfigs(env)) {
+        const expected = env[config.passwordSecret];
+        if (typeof expected !== "string" || !expected.trim() || /^change[-_ ]?me/i.test(expected.trim())) continue;
+        const userOk = constantTimeEquals(username, config.username);
+        const passOk = constantTimeEquals(password, expected.trim());
+        if (userOk && passOk) return { tenantId: config.tenantId, vaultId: config.vaultId, databaseName: config.databaseName };
+      }
+      return null;
     },
-    async loadVaultPolicy() {
+    async loadVaultPolicy(ref) {
+      if (!vaultConfigs(env).some((config) => config.vaultId === ref.vaultId && config.tenantId === ref.tenantId)) throw new ConfigError("Unknown vault identity");
       return vaultPolicy(env);
     },
     internalSecret: requireSecret(env, "SESSION_SECRET"),
@@ -75,13 +101,27 @@ export function vaultHost(env: Env): VaultHost {
 }
 
 export function semanticSearchOn(env: Env): boolean {
-  return !/^(off|false|0|no)$/i.test((env.SEMANTIC_SEARCH ?? "").trim());
+  return /^(on|true|1|yes)$/i.test((env.SEMANTIC_SEARCH ?? "").trim());
 }
 
 export function vaultBindings(env: Env): VaultBindings {
+  if (!env.CONTENT_BUCKET || !env.FTS_BUCKET) throw new ConfigError("CONTENT_BUCKET and FTS_BUCKET are required; SQLite content fallback is disabled for this Worker");
+  if (semanticSearchOn(env) && (!env.AI || !env.VECTORIZE)) throw new ConfigError("Semantic search requires optional AI and VECTORIZE bindings");
+  const capacityValue = (value: string | undefined, fallback: number, max: number) => {
+    const result = value === undefined ? fallback : Number(value);
+    if (!Number.isSafeInteger(result) || result < 0 || result > max) throw new ConfigError("Invalid SQLite capacity setting");
+    return result;
+  };
+  const sqliteMaxBytes = capacityValue(env.SQLITE_MAX_BYTES, 900_000_000, 9_500_000_000);
+  const sqliteHeadroomBytes = capacityValue(env.SQLITE_HEADROOM_BYTES, 100_000_000, sqliteMaxBytes);
+  if (sqliteHeadroomBytes >= sqliteMaxBytes) throw new ConfigError("SQLite headroom must be below its limit");
   return {
+    sqliteMaxBytes,
+    sqliteHeadroomBytes,
     vaultDb: env.VAULT_DB,
     bucket: env.FTS_BUCKET,
+    contentBucket: env.CONTENT_BUCKET,
+    fullText: new SegmenterFullTextIndex(env.FTS_BUCKET),
     ...(semanticSearchOn(env)
       ? { vectorize: env.VECTORIZE, embedder: workersAiEmbedder(env.AI) }
       : {}),
@@ -89,10 +129,25 @@ export function vaultBindings(env: Env): VaultBindings {
   };
 }
 
-export function vaultFor(env: Env): Vault {
+export function vaultFor(env: Env, requestedVaultId?: string, principal = "admin", write = false): Vault {
+  const configs = authorizedVaults(env, principal, write);
+  const config = requestedVaultId ? configs.find((entry) => entry.vaultId === requestedVaultId) : configs[0];
+  if (!config) throw new ConfigError("Vault access denied");
   return createVault(vaultBindings(env), {
-    ref: vaultRef(env),
+    ref: { tenantId: config.tenantId, vaultId: config.vaultId, databaseName: config.databaseName },
     policy: vaultPolicy(env),
     internalSecret: requireSecret(env, "SESSION_SECRET"),
   });
+}
+
+/** Connection settings for the same authorized default vault used by admin tools. */
+export function setupVaultConfig(env: Env): VaultConfig {
+  const config = authorizedVaults(env, "admin")[0];
+  if (!config) throw new ConfigError("Vault access denied");
+  return config;
+}
+export function setupVaultPassword(env: Env, config = setupVaultConfig(env)): string {
+  const value = env[config.passwordSecret];
+  if (typeof value !== "string" || !value.trim() || /^change[-_ ]?me/i.test(value.trim())) throw new ConfigError(`Missing secret ${config.passwordSecret}`);
+  return value.trim();
 }

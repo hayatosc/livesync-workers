@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Single-tenant deployment of livesync-workers: LiveSync backend + MCP on Cloudflare Workers",
+  "description": "R2-backed LiveSync backend and per-vault MCP on Cloudflare Workers",
   "workspaces": [
     "packages/*"
   ],
@@ -13,9 +13,17 @@
     "deploy": "wrangler deploy",
     "dev": "npm run build && wrangler dev",
     "setup": "node scripts/setup.mjs",
-    "typecheck": "npm run typecheck -w livesync-workers && tsc -p tsconfig.json --noEmit",
-    "test": "npm test -w livesync-workers && vitest run",
-    "cf-typegen": "wrangler types"
+    "typecheck": "npm run typecheck -w livesync-workers && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.workers.json --noEmit",
+    "test": "npm test -w livesync-workers && vitest run && npm run test:workers",
+    "cf-typegen": "wrangler types",
+    "test:workers": "vitest run -c vitest.workers.config.ts",
+    "test:e2e:obsidian": "npm run build && node --use-env-proxy test/e2e/obsidian.mjs",
+    "test:e2e:backend": "npm run build && node test/e2e/backend-check.mjs",
+    "test:e2e:plugin": "node --use-env-proxy test/e2e/plugin.mjs",
+    "test:e2e:install": "node --use-env-proxy test/e2e/install.mjs",
+    "test:e2e:cli:prepare": "node test/e2e/prepare-cli.mjs",
+    "test:e2e:cli": "npm run build && node test/e2e/livesync-cli.mjs",
+    "test:performance": "vitest run -c vitest.performance.config.ts --reporter=verbose"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "0.4.0",
@@ -26,24 +34,21 @@
     "zod": "4.4.1"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.22.0",
     "@cloudflare/workers-types": "4.20260501.1",
+    "@vrtmrz/livesync-commonlib": "0.1.35",
+    "@vrtmrz/obsidian-test-session": "0.3.0",
     "typescript": "6.0.3",
-    "wrangler": "4.87.0",
-    "vitest": "4.1.5"
+    "vitest": "4.1.5",
+    "wrangler": "4.87.0"
   },
   "cloudflare": {
     "bindings": {
-      "VECTORIZE": {
-        "description": "Semantic search index. Enter **768** dimensions and **cosine** metric: the embedding model (Workers AI `@cf/google/embeddinggemma-300m`) requires them."
-      },
       "FTS_BUCKET": {
         "description": "Stores the full-text search index. Any bucket name works."
       },
       "OAUTH_KV": {
         "description": "Stores MCP OAuth clients and tokens. Any namespace name works."
-      },
-      "AI": {
-        "description": "Workers AI, used to compute note embeddings."
       },
       "LIVESYNC_DATABASE": {
         "description": "Database name you will enter in the Obsidian LiveSync plugin. Keep `vault` unless you have a reason."
@@ -59,6 +64,9 @@
       },
       "SESSION_SECRET": {
         "description": "Signs admin session cookies and internal requests. Generate with `openssl rand -hex 32`."
+      },
+      "CONTENT_BUCKET": {
+        "description": "Authoritative vault content, binary originals and recovery journal. Separate from the search bucket."
       }
     }
   }

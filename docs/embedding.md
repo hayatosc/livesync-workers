@@ -1,158 +1,81 @@
-# Embedding livesync-workers in your own Worker
+# 独自Workerへの組込み
 
-The root of this repository is a single-tenant deployment. The same code is
-published as the `livesync-workers` npm package so that a multi-tenant service
-can host many vaults with its own user management.
+独自ユーザー認証や動的Vaultレジストリを持つホスト向けです。以下はこのフォークのworkspaceソース版の契約で、既存公開npm版への対応を保証するものではありません。通常の導入は[セットアップ](setup.md)を使ってください。
 
-## Pieces
+## ホストとbinding
 
-| Import | What |
-|---|---|
-| `livesync-workers` | `LiveSyncVaultDO` (Durable Object base class), `handleLiveSyncRequest`, `createVault`, types, helpers |
-| `livesync-workers/mcp` | `registerVaultTools(server, ctx)` and the vault scope constants (peer: `@modelcontextprotocol/sdk`, `zod`) |
-| `livesync-workers/oauth` | `createVaultOAuthProvider` (peer: `@cloudflare/workers-oauth-provider`) |
-
-## 1. Implement `VaultHost`
+`VaultHost.verifyCredential`はBasic資格情報を認証し、所有範囲・不変ID・接続DB名を返します。`loadVaultPolicy`はそのVaultの存在／所有範囲を確認して、reservedPaths・excludedFolders・timeZone等を返します。DO alarmからも呼ばれるため、認証前の入力やキー接頭辞だけを信用しないでください。
 
 ```ts
-import type { VaultHost, VaultRef } from "livesync-workers";
+import {
+  LiveSyncVaultDO, SegmenterFullTextIndex, handleLiveSyncRequest,
+  createVault, type VaultHost, type VaultBindings,
+} from "livesync-workers";
 
-export function myHost(env: Env): VaultHost {
+// Env、lookupCredential、lookupPolicyは独自ホストで定義する。
+function myHost(env: Env): VaultHost {
   return {
-    // Basic auth from the LiveSync plugin → which vault it grants.
-    async verifyCredential(username, password): Promise<VaultRef | null> {
-      const row = await lookupCredential(env.DB, username, password);
-      return row ? { tenantId: row.userId, databaseName: row.databaseName } : null;
+    async verifyCredential(username, password) {
+      const row = await lookupCredential(env, username, password);
+      return row ? {
+        tenantId: row.ownerId,
+        vaultId: row.immutableVaultId,
+        databaseName: row.databaseName,
+      } : null;
     },
-    // Called from the Worker and from the Durable Object alarm.
-    async loadVaultPolicy(ref) {
-      return {
-        reservedPaths: [".myapp"],           // hidden from MCP and the vault client
-        excludedFolders: await excludedFolders(env.DB, ref.tenantId),
-        timeZone: await userTimeZone(env.DB, ref.tenantId),
-        // Optional: also keep ".obsidian/", ".trash/" and other hidden paths out of search.
-        excludeHiddenPaths: true,
-      };
-    },
+    loadVaultPolicy: (ref) => lookupPolicy(env, ref),
     internalSecret: env.INTERNAL_SECRET,
-    allowedOrigins: [],
     serverName: "my-service",
   };
 }
-```
-
-## 2. Provide bindings
-
-```ts
-import { workersAiEmbedder, type VaultBindings } from "livesync-workers";
-
-export function myBindings(env: Env): VaultBindings {
+function myBindings(env: Env): VaultBindings {
   return {
     vaultDb: env.VAULT_DB,
-    vectorize: env.VECTORIZE,
+    contentBucket: env.CONTENT_BUCKET,
     bucket: env.FTS_BUCKET,
-    embedder: workersAiEmbedder(env.AI),
-    vectorIsolation: "namespace", // or "metadata" (needs a metadata index on userId)
+    fullText: new SegmenterFullTextIndex(env.FTS_BUCKET),
   };
 }
-```
-
-## 3. Export the Durable Object
-
-```ts
-import { LiveSyncVaultDO } from "livesync-workers";
-
 export class VaultDO extends LiveSyncVaultDO<Env> {
   protected host() { return myHost(this.env); }
   protected bindings() { return myBindings(this.env); }
 }
 ```
 
-Bind it as a SQLite-backed class (`new_sqlite_classes`). The object name is
-`${tenantId}:${databaseName}`; the class recovers the vault from it.
+DOはSQLite-backed classとしてbinding／migrationを設定します。`vaultObjectName(ref)`は`vaultId`があればtenantと不変IDをエンコードした名前を生成します。IDなしの旧`${tenantId}:${databaseName}`形式は旧ホスト互換用です。新R2ホストには不変IDを設定してください。
 
-## 4. Route LiveSync traffic
+実workerdではDO内の`ctx.id.name`が使えないことがあります。`handleLiveSyncRequest`と`createVault`は認証済みのVault参照と内部secretを転送します。DOはnamespaceの実ID一致とpolicyを検証して識別情報だけをKVへ保持します。直接内部APIを呼ぶホストもこの契約が必要です。識別できない場合にSQLite本文保存へfallbackさせないでください。
+
+## APIとVaultクライアント
 
 ```ts
-if (url.pathname.startsWith("/livesync")) {
-  return handleLiveSyncRequest(request, { host: myHost(env), bindings: myBindings(env) });
+// Worker.fetch内。urlはrequestのURL。
+if (url.pathname === "/livesync" || url.pathname.startsWith("/livesync/")) {
+  return handleLiveSyncRequest(request, {
+    host: myHost(env), bindings: myBindings(env),
+  });
 }
-```
 
-### Optional: an external full-text index
-
-By default full-text search uses an index the Durable Object keeps in R2
-(`bucket`) as immutable segments, one per indexing pass, so an update costs
-only the changed notes; vaults up to roughly 100 MB of Markdown are fine
-(`ftsMaxTotalCodeUnits` caps the total). To search from your own database
-instead, pass `fullText`; `bucket` can then be left out.
-
-```ts
-import type { FullTextIndex } from "livesync-workers";
-
-const fullText: FullTextIndex = {
-  // One writer per indexing pass; close() is always called.
-  async openWriter(ref) {
-    const db = await connect(env);
-    return {
-      upsert: (note) => db.upsertNote(ref, note), // { path, content, contentHash, mtime }
-      delete: (path) => db.deleteNote(ref, path),
-      close: () => db.end(),
-    };
-  },
-  search: (ref, query, limit) => searchNotes(env, ref, query, limit), // { hits, builtAt, docCount }
-  deleteVault: (ref) => deleteAllNotes(env, ref),
-};
-
-return { vaultDb: env.VAULT_DB, vectorize: env.VECTORIZE, embedder, fullText };
-```
-
-Notes are sent one at a time as they change, tracked separately from the
-vectors: a failed write is retried later without embedding the note again.
-Switching an existing vault over backfills every note (`indexStatus().fullText`
-shows the progress), and the `ftsRebuild` / `reindex` operations re-send them all.
-
-### Optional: Durable Object names
-
-Objects are named `${tenantId}:${databaseName}` unless `objectName` says
-otherwise, e.g. to keep a vault created under another name:
-
-```ts
-return { ...bindings, objectName: () => "knowledge" };
-
-export class VaultDO extends LiveSyncVaultDO<Env> {
-  // The default parses the object name, so say which vault this is.
-  protected vaultRef() { return { tenantId: "team", databaseName: "knowledge" }; }
-  // host() and bindings() as above
-}
-```
-
-## 5. Use the vault client
-
-```ts
+// refは認証済みprincipalに対して認可したVault参照。
 const vault = createVault(myBindings(env), {
-  ref: { tenantId: user.id, databaseName },
+  ref,
   policy: await myHost(env).loadVaultPolicy(ref),
   internalSecret: env.INTERNAL_SECRET,
 });
 await vault.readNote("Projects/Plan.md");
-await vault.search("meeting notes", 8);
-vault.unrestricted(); // same vault without reservedPaths filtering, for host-internal use
+await vault.grep("東京 API", 20, "Projects");
 ```
 
-## 6. MCP tools
+`unrestricted()`はreservedPathsのフィルタを外すホスト内部用です。ユーザー向けツールへ公開する場合の認可はホストの責任です。excludedFoldersは検索対象の設定で、読取権限ではありません。
 
-```ts
-registerVaultTools(this.server, {
-  vault: async () => (await hasVault(userId)) ? vaultFor(userId) : null,
-  hasScope: (scope) => this.props.scope.includes(scope),
-});
-// add your own tools to the same server
-```
+## MCP・OAuth
 
-`createVaultOAuthProvider` gives you the consent page and OAuth endpoints; pass
-`authenticate` (your session lookup) and `loginRedirect`, and extend `scopes`
-with any of your own. To offer a subset per user (a plan or feature flag),
-return `scopes: [...]` from `authenticate`; the consent page shows only those
-(plus required scopes) and the submitted form is validated against the same
-list.
+`livesync-workers/mcp`の`registerVaultTools`へ、現在のスコープとprincipalがアクセスできるVaultを返すcallbackを渡します。書込scopeはreadersではなくownerとして検証してください。実装例は[worker/mcp.ts](../worker/mcp.ts)と[worker/host.ts](../worker/host.ts)です。
+
+`livesync-workers/oauth`の`createVaultOAuthProvider`には独自セッションの`authenticate`、`loginRedirect`、提供scopeを設定します。既存Workerはadmin principalですが、ライブラリを組み込むホストは独自principalを実装できます。MCP依存は`@modelcontextprotocol/sdk`／`zod`、OAuth依存は`@cloudflare/workers-oauth-provider`です。
+
+## 検索と旧ホスト互換
+
+この例はR2のSegmenter索引を明示指定し、AI／Vectorizeを要求しません。任意のベクトル検索にはVectorize・embedderとVault隔離設定を追加します。独自`FullTextIndex`を渡す場合はVault隔離、本文ハッシュ照合、世代再構築の契約を維持してください。
+
+`contentBucket`や不変IDを指定しない旧ホスト向けのSQLite保存・旧全文索引経路はライブラリに残っていますが、root WorkerのR2方式とは別です。旧データを新方式へ移すときは[明示移行](r2-operations.md)を使用します。旧索引の容量guardをSegmenter方式の保証値として流用しないでください。

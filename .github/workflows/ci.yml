@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -15,6 +18,9 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -23,6 +29,16 @@ jobs:
 
       # prepare スクリプトで packages/livesync-workers の build も走る
       - run: npm ci
+
+      - run: npm run build
+
+      - name: Check script syntax
+        run: |
+          node --check scripts/setup.mjs
+          for script in test/e2e/*.mjs; do node --check "$script"; done
+
+      - name: Check changed whitespace (no formatter configured)
+        run: git diff --check origin/main...HEAD
 
       - run: npm run typecheck
 

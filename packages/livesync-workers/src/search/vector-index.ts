@@ -24,7 +24,7 @@ export type VectorSearchHit = {
 type VectorBindings = Pick<VaultBindings, "vectorize" | "embedder" | "vectorIsolation">;
 
 export async function vectorId(ref: VaultRef, path: string, chunkIndex: number): Promise<string> {
-  const digest = await hashText(`${ref.tenantId}\n${ref.databaseName}\n${path}\n${chunkIndex}`);
+  const digest = await hashText(`${ref.tenantId}\n${ref.vaultId ?? ref.databaseName}\n${path}\n${chunkIndex}`);
   return `v1:${digest.slice(0, 60)}`;
 }
 
@@ -76,7 +76,7 @@ export async function upsertNoteVectors(
         metadata: {
           // Legacy key names kept so existing indexes stay valid.
           userId: ref.tenantId,
-          vaultId: ref.databaseName,
+          vaultId: ref.vaultId ?? ref.databaseName,
           origin: "vault",
           path,
           mtime,
@@ -133,7 +133,7 @@ export async function vectorSearch(
       const md = m.metadata ?? {};
       if (namespaced) return true;
       if (md.origin != null && md.origin !== "vault") return false;
-      return md.vaultId == null || md.vaultId === ref.databaseName;
+      return md.vaultId === (ref.vaultId ?? ref.databaseName) || (ref.vaultId === undefined && md.vaultId == null);
     });
   const current = validate
     ? await validate(matches.map((m) => ({

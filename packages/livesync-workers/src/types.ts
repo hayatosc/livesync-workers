@@ -1,5 +1,7 @@
 /** Identifies one LiveSync database (an Obsidian vault) owned by one tenant. */
 export type VaultRef = {
+  /** Immutable vault identity. Legacy hosts may omit it until explicit migration. */
+  vaultId?: string;
   /** Data owner. A multi-tenant host passes its user id; a single-tenant deployment a fixed value. */
   tenantId: string;
   /** CouchDB database name the LiveSync client connects to. */
@@ -61,6 +63,8 @@ export type FullTextNote = {
 
 export type FullTextSearchHit = {
   path: string;
+  /** Source hash, when available, for rejecting stale/deleted search entries. */
+  contentHash?: string;
   score: number;
   matchCount: number;
   snippets: Array<{ before: string; match: string; after: string }>;
@@ -79,6 +83,9 @@ export interface FullTextIndexWriter {
  * in full inside the Durable Object.
  */
 export interface FullTextIndex {
+  readonly sourceHashes?: boolean;
+  beginRebuild?(ref: VaultRef): Promise<void | boolean>;
+  completeRebuild?(ref: VaultRef): Promise<void>;
   /** Called lazily once per indexing pass that has something to write. */
   openWriter(ref: VaultRef): Promise<FullTextIndexWriter>;
   search(
@@ -87,6 +94,7 @@ export interface FullTextIndex {
     limit: number,
   ): Promise<{
     hits: FullTextSearchHit[];
+    building?: boolean;
     /** Time of the newest index write (ms); 0 when unknown. */
     builtAt: number;
     docCount: number;
@@ -119,6 +127,11 @@ export type AnyDurableObjectNamespace = DurableObjectNamespace<any>;
 
 export interface VaultBindings {
   vaultDb: AnyDurableObjectNamespace;
+  /** Authoritative content and recovery journal; separate from derived search. */
+  contentBucket?: R2Bucket;
+  /** Soft used-byte ceiling; leave headroom below the platform SQLite limit. */
+  sqliteMaxBytes?: number;
+  sqliteHeadroomBytes?: number;
   /**
    * Vector index for semantic search. Leave `vectorize` and `embedder` both
    * unset to run without semantic search: notes are still tracked and the
@@ -165,10 +178,21 @@ export function semanticSearchEnabled(
 }
 
 export function vaultObjectName(ref: VaultRef): string {
-  return `${ref.tenantId}:${ref.databaseName}`;
+  return ref.vaultId
+    ? `v1:${encodeURIComponent(ref.tenantId)}:${encodeURIComponent(ref.vaultId)}`
+    : `${ref.tenantId}:${ref.databaseName}`;
 }
 
 export function parseVaultObjectName(name: string): VaultRef | null {
+  if (name.startsWith("v1:")) {
+    const parts = name.split(":");
+    if (parts.length !== 3) return null;
+    try {
+      const tenantId = decodeURIComponent(parts[1]!);
+      const vaultId = decodeURIComponent(parts[2]!);
+      return tenantId && vaultId ? { tenantId, vaultId, databaseName: vaultId } : null;
+    } catch { return null; }
+  }
   const index = name.indexOf(":");
   if (index <= 0) return null;
   return { tenantId: name.slice(0, index), databaseName: name.slice(index + 1) };

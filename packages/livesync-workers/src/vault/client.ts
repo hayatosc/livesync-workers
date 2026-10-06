@@ -1,4 +1,4 @@
-import { INTERNAL_SECRET_HEADER } from "../livesync/http.js";
+import { INTERNAL_SECRET_HEADER, VAULT_REF_HEADER } from "../livesync/http.js";
 import { vaultStub } from "../livesync/handler.js";
 import { hashText } from "../search/chunk-md.js";
 import { vectorSearch, type VectorSearchHit } from "../search/vector-index.js";
@@ -35,6 +35,8 @@ export type VaultNoteStat = {
 };
 
 export type VaultIndexStatus = {
+  checkpoint?: { phase: "compact" | "scan" | "dirty"; startedSeq: number; dirtyKeys: number } | null;
+  capacity?: { databaseSize: number; usedBytes: number; limitBytes: number; headroomBytes: number; writable: boolean };
   indexedSeq: number;
   currentSeq: number;
   indexed: number;
@@ -66,6 +68,10 @@ const FTS_OVERFETCH = 4;
 
 /** Operations on one vault, with the policy's reserved paths enforced. */
 export interface Vault {
+  /** List all files, including attachments, under the same path policy. */
+  listFiles?(): Promise<VaultNoteStat[]>;
+  readAttachment?(path: string): Promise<{ path: string; base64: string; contentHash: string; contentType: string; size: number } | null>;
+  writeAttachment?(path: string, base64: string, expectedBaseHash: string, contentType?: string): Promise<WriteVaultNoteResult>;
   readonly ref: VaultRef;
   readonly policy: VaultPolicy;
   /** Vault-relative Markdown paths, sorted. */
@@ -97,7 +103,7 @@ export interface Vault {
    * Exact-match full-text search. With the built-in R2 index, kicks off a
    * rebuild when no index exists yet.
    */
-  grep(query: string, limit: number): Promise<FullTextSearchResult>;
+  grep(query: string, limit: number, folder?: string): Promise<FullTextSearchResult>;
   dailyNoteSettings(): Promise<DailyNoteSettings | undefined>;
   indexStatus(): Promise<VaultIndexStatus>;
   /** Re-scan every document (e.g. after excluded folders change). */
@@ -154,6 +160,7 @@ class VaultClient implements Vault {
         headers: {
           "Content-Type": "application/json",
           [INTERNAL_SECRET_HEADER]: this.options.internalSecret,
+          [VAULT_REF_HEADER]: encodeURIComponent(JSON.stringify(this.ref)),
         },
         body: JSON.stringify(body),
       }),
@@ -168,9 +175,26 @@ class VaultClient implements Vault {
 
   async exists(): Promise<boolean> {
     const res = await this.stub().fetch(
-      new Request("https://livesync-db/", { method: "HEAD" }),
+      new Request("https://livesync-db/", { method: "HEAD", headers: { [INTERNAL_SECRET_HEADER]: this.options.internalSecret, [VAULT_REF_HEADER]: encodeURIComponent(JSON.stringify(this.ref)) } }),
     );
     return res.status === 200;
+  }
+
+  async listFiles(): Promise<VaultNoteStat[]> {
+    const result = await this.internal<{ files: VaultNoteStat[] }>({ op: "listFiles" });
+    return result.files.filter((file) => !this.hidden(file.path));
+  }
+  async readAttachment(path: string) {
+    if (this.hidden(path)) return null;
+    const response = await this.internalResponse({ op: "readAttachment", path });
+    if (response.status === 404) return null;
+    if (!response.ok) throw new Error(`Attachment read failed (${response.status})`);
+    return response.json<{ path: string; base64: string; contentHash: string; contentType: string; size: number }>();
+  }
+  async writeAttachment(path: string, base64: string, expectedBaseHash: string, contentType?: string): Promise<WriteVaultNoteResult> {
+    if (this.hidden(path)) return { ok: false, path, error: "FORBIDDEN_PATH" };
+    const response = await this.internalResponse({ op: "writeAttachment", path, content: base64, expectedBaseHash, contentType });
+    return response.ok ? { ok: true, path } : { ok: false, path, error: response.status === 409 ? "CONFLICT" : "WRITE_FAILED" };
   }
 
   async listMarkdownPaths(): Promise<string[]> {
@@ -256,12 +280,24 @@ class VaultClient implements Vault {
     });
   }
 
-  async grep(query: string, limit: number): Promise<FullTextSearchResult> {
+  async grep(query: string, limit: number, folder?: string): Promise<FullTextSearchResult> {
+    const inFolder = (path: string) => !folder || path.startsWith(`${folder.replace(/\/$/, "")}/`);
     if (this.bindings.fullText) {
-      const result = await this.bindings.fullText.search(this.ref, query, limit);
+      const result = await this.bindings.fullText.search(this.ref, query, folder || this.bindings.fullText.sourceHashes ? Number.MAX_SAFE_INTEGER : limit);
+      const candidates = result.hits.filter((hit) => !this.hidden(hit.path) && inFolder(hit.path));
+      const hits: FullTextSearchHit[] = [];
+      for (const hit of candidates) {
+        if (hits.length >= limit) break;
+        if (hit.contentHash !== undefined) {
+          const current = await this.readNote(hit.path);
+          if (current == null || await hashText(current) !== hit.contentHash) continue;
+        }
+        hits.push(hit);
+      }
+      if (result.building) { await this.internalResponse({ op: "ftsRebuild" }); return { status: "building" }; }
       return {
         status: "ready",
-        hits: result.hits.filter((hit) => !this.hidden(hit.path)),
+        hits,
         builtAt: result.builtAt,
         docCount: result.docCount,
       };
@@ -280,7 +316,7 @@ class VaultClient implements Vault {
       return { status: "building", debug };
     }
     if (result.status === "query-too-long") return { status: "query-too-long", maxTokens: result.maxTokens };
-    const candidates = result.hits.filter((hit) => !this.hidden(hit.path));
+    const candidates = result.hits.filter((hit) => !this.hidden(hit.path) && inFolder(hit.path));
     // The vault keeps the current versions, drops the rest, and returns the
     // bodies for snippets in the same round trip.
     type ResolvedHit = { path: string; hash: string | null; content: string | null };
@@ -352,7 +388,7 @@ class VaultClient implements Vault {
     const res = await this.stub().fetch(
       new Request("https://livesync-db/internal/purge", {
         method: "POST",
-        headers: { [INTERNAL_SECRET_HEADER]: this.options.internalSecret },
+        headers: { [INTERNAL_SECRET_HEADER]: this.options.internalSecret, [VAULT_REF_HEADER]: encodeURIComponent(JSON.stringify(this.ref)) },
       }),
     );
     if (!res.ok) throw new Error(`LiveSync vault purge failed (${res.status})`);

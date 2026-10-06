@@ -10,6 +10,8 @@
   "vars": {
     // CouchDB database name the LiveSync plugin connects to.
     "LIVESYNC_DATABASE": "vault",
+    "LIVESYNC_VAULT_ID": "primary",
+    "SEMANTIC_SEARCH": "off",
     // Username the LiveSync plugin logs in with (the password is the LIVESYNC_PASSWORD secret).
     "LIVESYNC_USERNAME": "obsidian",
     // Optional variables are left out because every entry here becomes a required
@@ -19,11 +21,12 @@
     //     full-text search keeps working).
     //   MCP_STATIC_TOKEN_SCOPES: extra scopes for MCP_STATIC_TOKEN (vault:append,vault:write).
   },
-  "ai": { "binding": "AI" },
   "kv_namespaces": [{ "binding": "OAUTH_KV" }],
-  "r2_buckets": [{ "binding": "FTS_BUCKET", "bucket_name": "livesync-fts" }],
-  // Create with: wrangler vectorize create livesync-notes --dimensions=768 --metric=cosine
-  "vectorize": [{ "binding": "VECTORIZE", "index_name": "livesync-notes" }],
+  "r2_buckets": [
+    { "binding": "FTS_BUCKET", "bucket_name": "livesync-fts" },
+    { "binding": "CONTENT_BUCKET", "bucket_name": "livesync-content" }
+  ],
+  // Optional semantic search: add AI/Vectorize bindings only when explicitly enabling it.
   "durable_objects": {
     "bindings": [
       { "name": "VAULT_DB", "class_name": "VaultDO" },

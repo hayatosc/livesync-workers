@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": [
+      "@cloudflare/workers-types",
+      "@cloudflare/vitest-pool-workers/types",
+      "node"
+    ]
+  },
+  "include": [
+    "test/workers",
+    "vitest.workers.config.ts",
+    "test/e2e/worker.ts",
+    "test/performance",
+    "vitest.performance.config.ts"
+  ]
+}

@@ -1,0 +1,528 @@
+{
+  "label": "after",
+  "runtime": "local workerd + real local SQLite/R2 bindings",
+  "syntheticContentOperationDelayMs": 2,
+  "productionLatency": false,
+  "results": [
+    {
+      "name": "normal-updates",
+      "samples": 20,
+      "p50Ms": 18,
+      "p95Ms": 20,
+      "foregroundMs": 362,
+      "endToEndMs": 362,
+      "foregroundR2Operations": {
+        "get": 20,
+        "put": 80,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 20,
+        "put": 80,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 126976,
+      "checkpointAlarms": 0,
+      "peakSqliteBytes": 126976,
+      "clientRetries": 0
+    },
+    {
+      "name": "initial-sync",
+      "samples": 8,
+      "p50Ms": 240,
+      "p95Ms": 243,
+      "foregroundMs": 1919,
+      "endToEndMs": 1919,
+      "foregroundR2Operations": {
+        "get": 8,
+        "put": 528,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 8,
+        "put": 528,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 266240,
+      "checkpointAlarms": 0,
+      "peakSqliteBytes": 266240,
+      "clientRetries": 0
+    },
+    {
+      "name": "offline-return-hot",
+      "samples": 8,
+      "p50Ms": 4,
+      "p95Ms": 4,
+      "foregroundMs": 29,
+      "endToEndMs": 30,
+      "foregroundR2Operations": {
+        "get": 8,
+        "put": 0,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 8,
+        "put": 0,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 126976,
+      "checkpointAlarms": 0,
+      "peakSqliteBytes": 126976,
+      "clientRetries": 0
+    },
+    {
+      "name": "concurrent-writers",
+      "samples": 20,
+      "p50Ms": 196,
+      "p95Ms": 351,
+      "foregroundMs": 368,
+      "endToEndMs": 368,
+      "foregroundR2Operations": {
+        "get": 20,
+        "put": 80,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 20,
+        "put": 80,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 126976,
+      "checkpointAlarms": 0,
+      "peakSqliteBytes": 126976,
+      "clientRetries": 0
+    },
+    {
+      "name": "injected-head-429",
+      "samples": 1,
+      "p50Ms": 271,
+      "p95Ms": 271,
+      "foregroundMs": 271,
+      "endToEndMs": 271,
+      "foregroundR2Operations": {
+        "get": 1,
+        "put": 5,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 1,
+        "put": 5,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 118784,
+      "checkpointAlarms": 0,
+      "peakSqliteBytes": 118784,
+      "clientRetries": 0
+    },
+    {
+      "name": "cold-archive-updates",
+      "samples": 10,
+      "p50Ms": 17,
+      "p95Ms": 33,
+      "foregroundMs": 187,
+      "endToEndMs": 187,
+      "foregroundR2Operations": {
+        "get": 13,
+        "put": 40,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 13,
+        "put": 40,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 122880,
+      "checkpointAlarms": 0,
+      "peakSqliteBytes": 122880,
+      "clientRetries": 0
+    },
+    {
+      "name": "long-offline-cold-return",
+      "samples": 9,
+      "p50Ms": 33,
+      "p95Ms": 87,
+      "foregroundMs": 373,
+      "endToEndMs": 373,
+      "foregroundR2Operations": {
+        "get": 81,
+        "put": 0,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 81,
+        "put": 0,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 122880,
+      "checkpointAlarms": 0,
+      "peakSqliteBytes": 122880,
+      "clientRetries": 0
+    },
+    {
+      "name": "checkpoint-boundary-128",
+      "samples": 1,
+      "p50Ms": 17,
+      "p95Ms": 17,
+      "foregroundMs": 17,
+      "endToEndMs": 76,
+      "foregroundR2Operations": {
+        "get": 1,
+        "put": 4,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 1,
+        "put": 19,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 163840,
+      "checkpointAlarms": 13,
+      "peakSqliteBytes": 163840,
+      "clientRetries": 0
+    },
+    {
+      "name": "checkpoint-boundary-128",
+      "samples": 1,
+      "p50Ms": 17,
+      "p95Ms": 17,
+      "foregroundMs": 17,
+      "endToEndMs": 76,
+      "foregroundR2Operations": {
+        "get": 1,
+        "put": 4,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 1,
+        "put": 19,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 163840,
+      "checkpointAlarms": 13,
+      "peakSqliteBytes": 163840,
+      "clientRetries": 0
+    },
+    {
+      "name": "checkpoint-boundary-128",
+      "samples": 1,
+      "p50Ms": 18,
+      "p95Ms": 18,
+      "foregroundMs": 18,
+      "endToEndMs": 78,
+      "foregroundR2Operations": {
+        "get": 1,
+        "put": 4,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 1,
+        "put": 19,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 163840,
+      "checkpointAlarms": 13,
+      "peakSqliteBytes": 163840,
+      "clientRetries": 0
+    },
+    {
+      "name": "checkpoint-boundary-128",
+      "samples": 1,
+      "p50Ms": 18,
+      "p95Ms": 18,
+      "foregroundMs": 18,
+      "endToEndMs": 87,
+      "foregroundR2Operations": {
+        "get": 1,
+        "put": 4,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 1,
+        "put": 19,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 163840,
+      "checkpointAlarms": 13,
+      "peakSqliteBytes": 163840,
+      "clientRetries": 0
+    },
+    {
+      "name": "checkpoint-boundary-128",
+      "samples": 1,
+      "p50Ms": 20,
+      "p95Ms": 20,
+      "foregroundMs": 20,
+      "endToEndMs": 80,
+      "foregroundR2Operations": {
+        "get": 1,
+        "put": 4,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 1,
+        "put": 19,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 163840,
+      "checkpointAlarms": 13,
+      "peakSqliteBytes": 163840,
+      "clientRetries": 0
+    },
+    {
+      "name": "checkpoint-boundary-1024",
+      "samples": 1,
+      "p50Ms": 17,
+      "p95Ms": 17,
+      "foregroundMs": 18,
+      "endToEndMs": 247,
+      "foregroundR2Operations": {
+        "get": 1,
+        "put": 4,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 1,
+        "put": 47,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 675840,
+      "checkpointAlarms": 41,
+      "peakSqliteBytes": 679936,
+      "clientRetries": 0
+    },
+    {
+      "name": "checkpoint-boundary-1024",
+      "samples": 1,
+      "p50Ms": 26,
+      "p95Ms": 26,
+      "foregroundMs": 26,
+      "endToEndMs": 328,
+      "foregroundR2Operations": {
+        "get": 1,
+        "put": 4,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 1,
+        "put": 47,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 675840,
+      "checkpointAlarms": 41,
+      "peakSqliteBytes": 679936,
+      "clientRetries": 0
+    },
+    {
+      "name": "checkpoint-boundary-1024",
+      "samples": 1,
+      "p50Ms": 17,
+      "p95Ms": 17,
+      "foregroundMs": 17,
+      "endToEndMs": 204,
+      "foregroundR2Operations": {
+        "get": 1,
+        "put": 4,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 1,
+        "put": 47,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 675840,
+      "checkpointAlarms": 41,
+      "peakSqliteBytes": 679936,
+      "clientRetries": 0
+    },
+    {
+      "name": "checkpoint-boundary-1024",
+      "samples": 1,
+      "p50Ms": 19,
+      "p95Ms": 19,
+      "foregroundMs": 19,
+      "endToEndMs": 208,
+      "foregroundR2Operations": {
+        "get": 1,
+        "put": 4,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 1,
+        "put": 47,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 675840,
+      "checkpointAlarms": 41,
+      "peakSqliteBytes": 679936,
+      "clientRetries": 0
+    },
+    {
+      "name": "checkpoint-boundary-1024",
+      "samples": 1,
+      "p50Ms": 19,
+      "p95Ms": 19,
+      "foregroundMs": 19,
+      "endToEndMs": 208,
+      "foregroundR2Operations": {
+        "get": 1,
+        "put": 4,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 1,
+        "put": 47,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 675840,
+      "checkpointAlarms": 41,
+      "peakSqliteBytes": 679936,
+      "clientRetries": 0
+    },
+    {
+      "name": "checkpoint-boundary-4096",
+      "samples": 1,
+      "p50Ms": 23,
+      "p95Ms": 23,
+      "foregroundMs": 23,
+      "endToEndMs": 814,
+      "foregroundR2Operations": {
+        "get": 1,
+        "put": 4,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 1,
+        "put": 144,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 2404352,
+      "checkpointAlarms": 137,
+      "peakSqliteBytes": 2416640,
+      "clientRetries": 0
+    },
+    {
+      "name": "checkpoint-boundary-4096",
+      "samples": 1,
+      "p50Ms": 21,
+      "p95Ms": 21,
+      "foregroundMs": 21,
+      "endToEndMs": 734,
+      "foregroundR2Operations": {
+        "get": 1,
+        "put": 4,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 1,
+        "put": 144,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 2404352,
+      "checkpointAlarms": 137,
+      "peakSqliteBytes": 2416640,
+      "clientRetries": 0
+    },
+    {
+      "name": "checkpoint-boundary-4096",
+      "samples": 1,
+      "p50Ms": 18,
+      "p95Ms": 18,
+      "foregroundMs": 19,
+      "endToEndMs": 775,
+      "foregroundR2Operations": {
+        "get": 1,
+        "put": 4,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "contentR2Operations": {
+        "get": 1,
+        "put": 144,
+        "head": 0,
+        "list": 0,
+        "delete": 0
+      },
+      "sqliteBytes": 2404352,
+      "checkpointAlarms": 137,
+      "peakSqliteBytes": 2416640,
+      "clientRetries": 0
+    }
+  ]
+}

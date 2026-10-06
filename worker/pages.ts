@@ -1,7 +1,7 @@
 import { escapeHtml, htmlPage } from "livesync-workers/oauth";
 import type { VaultIndexStatus } from "livesync-workers";
 import { type Env } from "./env.js";
-import { vaultRef } from "./host.js";
+import { setupVaultConfig } from "./host.js";
 import { SETUP_URI_CLIENT_SCRIPT, SETUP_URI_IDS } from "./setup-uri.js";
 import { VERSION } from "./version.js";
 
@@ -25,13 +25,17 @@ export type StatusPageData = {
   admin: boolean;
   configured: { livesync: boolean; admin: boolean; session: boolean };
   username?: string;
+  databaseName?: string;
+  passwordSecret?: string;
   dbExists?: boolean;
   index?: VaultIndexStatus | null;
   indexError?: string;
 };
 
 export function statusPage(env: Env, data: StatusPageData): Response {
-  const ref = vaultRef(env);
+  let configurationError = false;
+  let ref = { databaseName: "unavailable", passwordSecret: "unavailable" };
+  try { ref = setupVaultConfig(env); } catch (error) { configurationError = true; data.indexError ??= error instanceof Error ? error.message : String(error); }
   const missing = Object.entries(data.configured)
     .filter(([, ok]) => !ok)
     .map(
@@ -40,12 +44,12 @@ export function statusPage(env: Env, data: StatusPageData): Response {
           key
         ] ?? key,
     );
-  const warn =
+  const warn = (configurationError ? `<div class="card" style="border-color:#f59e0b"><h2>Vault configuration unavailable</h2><p>Check the vault registry and admin access settings.</p></div>` : "") + (
     missing.length > 0
       ? `<div class="card" style="border-color:#f59e0b"><h2>Setup incomplete</h2><p>Missing (or placeholder) secrets: <code>${missing
           .map(escapeHtml)
           .join("</code>, <code>")}</code>.</p><p class="muted">Set them with <code>wrangler secret put NAME</code> (or in the Cloudflare dashboard under Settings → Variables and Secrets), then reload.</p></div>`
-      : "";
+      : "");
   const indexHtml = data.admin
     ? data.indexError
       ? `<p class="muted">Index status unavailable: ${escapeHtml(data.indexError)}</p>`
@@ -70,9 +74,9 @@ export function statusPage(env: Env, data: StatusPageData): Response {
 <div class="card"><h2>Obsidian → Self-hosted LiveSync</h2><table>
 <tr><th>Remote Type</th><td>CouchDB</td></tr>
 <tr><th>URI</th><td><code>${escapeHtml(data.origin)}/livesync</code></td></tr>
-<tr><th>Database name</th><td><code>${escapeHtml(ref.databaseName)}</code></td></tr>
+<tr><th>Database name</th><td><code>${escapeHtml(data.databaseName ?? ref.databaseName)}</code></td></tr>
 <tr><th>Username</th><td>${data.username ? `<code>${escapeHtml(data.username)}</code>` : '<span class="muted">(sign in to view)</span>'}</td></tr>
-<tr><th>Password</th><td><span class="muted">the <code>LIVESYNC_PASSWORD</code> secret</span></td></tr>
+<tr><th>Password</th><td><span class="muted">the <code>${escapeHtml(data.passwordSecret ?? ref.passwordSecret)}</code> secret</span></td></tr>
 <tr><th>End-to-End Encryption</th><td><strong>off</strong> (the server must read notes to index them)</td></tr>
 </table></div>
 ${setupUriCard}
