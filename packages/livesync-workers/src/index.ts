@@ -31,3 +31,5 @@ export { type VectorSearchHit } from "./search/vector-index.js";
 export * from "./credentials.js";
 
 export { SegmenterFullTextIndex, analyzeWords, SEGMENTER_ANALYZER } from "./search/segmenter-index.js";
+
+export { REQUEST_LIMITS } from "./livesync/limits.js";

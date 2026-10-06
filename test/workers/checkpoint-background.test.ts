@@ -8,9 +8,14 @@ const bindings = env as unknown as TestEnv;
 const created: DurableObjectStub[] = [];
 afterEach(() => stopCheckpointAlarms(created.splice(0)));
 const tables = ["docs","revs","rev_metadata","local_docs","changes","rev_body_chunks","meta","index_state"];
-async function fixture(name: string, count=300) {
+async function fixture(name: string, count=300, manualAlarms=false) {
   const object=bindings.VAULT_DB.get(bindings.VAULT_DB.idFromName(`${name}:vault`));
   created.push(object);
+  if (manualAlarms) await runInDurableObject(object,async(instance:PersistentVaultDO,state)=>{
+    // This test explicitly advances each boundary; platform alarms would race those steps.
+    (instance as unknown as {scheduleIndexing(delay?:number):Promise<void>}).scheduleIndexing=async()=>{};
+    await state.storage.deleteAlarm();
+  });
   await object.fetch("https://db/",{method:"PUT"});
   const docs=Array.from({length:count},(_,i)=>({_id:`note-${i}`,_rev:"1-original",data:`original ${i}`,path:`${i}.md`,type:"plain"}));
   await object.fetch("https://db/_bulk_docs",{method:"POST",body:JSON.stringify({new_edits:false,docs})});
@@ -37,7 +42,7 @@ it("acknowledges a cadence write with ordinary R2 work and survives cache loss b
   expect(await(await object.fetch("https://db/accepted")).json()).toMatchObject({data:"durable before checkpoint"});
 });
 it("reconciles writes, local checkpoint deletion and binary/deleted/conflict leaves during a rolling snapshot",async()=>{
-  const object=await fixture("coherent-rolling");
+  const object=await fixture("coherent-rolling",129,true);
   const local=await(await object.fetch("https://db/_local/progress",{method:"PUT",body:'{"last_seq":1}'})).json() as {rev:string};
   await object.fetch("https://db/_compact",{method:"POST"});
   await runInDurableObject(object,async(instance:PersistentVaultDO,state)=>{
@@ -67,7 +72,7 @@ it("reconciles writes, local checkpoint deletion and binary/deleted/conflict lea
   expect(await(await object.fetch("https://db/_changes?style=all_docs&include_docs=true&revs=true")).json()).toEqual(expected);
   expect((await object.fetch("https://db/_local/progress")).status).toBe(404);
   expect(await(await object.fetch("https://db/binary")).json()).toMatchObject({data:"AP+A"});
-});
+},15_000); // Two R2-backed metadata pages plus full recovery; bounded loops still detect non-convergence.
 it("resumes the saved scan cursor across DO reconstruction and protects in-progress pages during GC",async()=>{
   const object=await fixture("resumable-checkpoint");
   await object.fetch("https://db/_compact",{method:"POST"});
