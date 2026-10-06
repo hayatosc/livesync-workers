@@ -8,6 +8,10 @@ export class E2EVaultDO extends LiveSyncVaultDO<Env> {
   protected host() { return vaultHost(this.env); }
   protected bindings() { return vaultBindings(this.env); }
   async fetch(request: Request): Promise<Response> {
+    if (new URL(request.url).pathname === "/e2e/checkpoint-status") {
+      if (request.headers.get("X-E2E-Token") !== this.env.SESSION_SECRET) return new Response("Forbidden", { status: 403 });
+      return Response.json({ pending: this.storage.sql.exec("SELECT id FROM checkpoint_work").toArray().length > 0 });
+    }
     if (new URL(request.url).pathname === "/e2e/reset-cache") {
       if (request.headers.get("X-E2E-Token") !== this.env.SESSION_SECRET) return new Response("Forbidden", { status: 403 });
       this.storage.transactionSync(() => {
@@ -22,7 +26,7 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/e2e/ready") return Response.json({ localE2E: true });
-    if (url.pathname === "/e2e/reset-cache" && request.method === "POST") {
+    if ((url.pathname === "/e2e/reset-cache" && request.method === "POST") || url.pathname === "/e2e/checkpoint-status") {
       if (request.headers.get("X-E2E-Token") !== env.SESSION_SECRET) return new Response("Forbidden", { status: 403 });
       const config = vaultConfigs(env).find((v) => v.vaultId === url.searchParams.get("vaultId"));
       if (!config) return new Response("Not Found", { status: 404 });

@@ -1,11 +1,14 @@
 import { env, runInDurableObject } from "cloudflare:test";
-import { it, expect } from "vitest";
+import { it, expect, afterEach } from "vitest";
 import { PersistentVaultDO, type TestEnv } from "./entry.js";
 import type { VaultBindings } from "../../packages/livesync-workers/src/types.js";
 import { R2Journal, contentPrefix } from "../../packages/livesync-workers/src/storage/r2-journal.js";
+import { drainCheckpoint, stopCheckpointAlarms } from "./checkpoint-helpers.js";
 const bindings = env as unknown as TestEnv;
 const cacheTables = ["docs", "revs", "rev_metadata", "local_docs", "changes", "rev_body_chunks", "meta", "index_state"];
-function stub(name: string) { return bindings.VAULT_DB.get(bindings.VAULT_DB.idFromName(`${name}:vault`)); }
+const created: DurableObjectStub[] = [];
+afterEach(() => stopCheckpointAlarms(created.splice(0)));
+function stub(name: string) { const object = bindings.VAULT_DB.get(bindings.VAULT_DB.idFromName(`${name}:vault`)); created.push(object); return object; }
 async function revisions(object: DurableObjectStub, count = 8) {
   for (let i = 1; i <= count; i++) {
     const response = await object.fetch("https://db/_bulk_docs", { method: "POST", body: JSON.stringify({ new_edits: false, docs: [{ _id: "note", _rev: `${i}-r${i}`, _revisions: { start: i, ids: Array.from({ length: i }, (_, j) => `r${i-j}`) }, type: "plain", path: "Note.md", data: `body ${i}` }] }) });
@@ -18,6 +21,7 @@ it("compacts metadata while preserving history, conflict ancestry, monotonic fee
   await revisions(object);
   const feed = await (await object.fetch("https://db/_changes?style=all_docs&revs=true&include_docs=true")).json();
   expect((await object.fetch("https://db/_compact", { method: "POST" })).status).toBe(202);
+  await drainCheckpoint(object);
   await runInDurableObject(object, async (_instance, state) => {
     expect(state.storage.sql.exec("SELECT * FROM revs").toArray()).toHaveLength(1);
     expect(state.storage.sql.exec("SELECT * FROM rev_metadata").toArray()).toHaveLength(1);
@@ -31,6 +35,7 @@ it("compacts metadata while preserving history, conflict ancestry, monotonic fee
     expect((state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key='indexed_seq'").toArray()[0]?.value)).toBeDefined();
   });
   await object.fetch("https://db/_compact", { method: "POST" });
+  await drainCheckpoint(object);
   await runInDurableObject(object, async (_instance, state) => { expect(state.storage.sql.exec("SELECT * FROM changes").toArray()).toHaveLength(1); });
   await runInDurableObject(object, async (_instance, state) => { for (const table of cacheTables) state.storage.sql.exec(`DELETE FROM ${table}`); });
   expect(await (await object.fetch("https://db/note?rev=1-r1")).json()).toMatchObject({ data: "body 1" });
@@ -99,12 +104,16 @@ for (const boundary of ["objects/", "snapshot-page", "snapshot-manifest", "commi
         };
       } });
       mutable.bindings = () => ({ ...original(), contentBucket: faultBucket });
-      try { expect((await instance.fetch(new Request("https://db/_compact", { method: "POST" }))).status).toBe(500); }
+      try {
+        expect((await instance.fetch(new Request("https://db/_compact", { method: "POST" }))).status).toBe(202);
+        for (let slices=0; slices<100 && !fired; slices++) await instance.alarm();
+      }
       finally { mutable.bindings = original; }
       expect(fired).toBe(true);
     });
     for (let i=1; i<=3; i++) expect(await (await object.fetch(`https://db/note?rev=${i}-r${i}`)).json()).toMatchObject({ data: `body ${i}` });
     expect((await object.fetch("https://db/_compact", { method: "POST" })).status).toBe(202);
+  await drainCheckpoint(object);
     await runInDurableObject(object, async (_instance, state) => { for (const table of cacheTables) state.storage.sql.exec(`DELETE FROM ${table}`); });
     expect(await (await object.fetch("https://db/note?rev=1-r1")).json()).toMatchObject({ data: "body 1" });
   });
@@ -119,6 +128,7 @@ it("retains conflict leaves and deleted leaves after compaction, reconstruction 
   await object.fetch("https://db/doc?rev=2-b", { method: "DELETE" });
   const expected = await (await object.fetch("https://db/_changes?style=all_docs&include_docs=true&revs=true")).json();
   expect((await object.fetch("https://db/_compact", { method: "POST" })).status).toBe(202);
+  await drainCheckpoint(object);
   await runInDurableObject(object, async (_instance, state) => { for (const table of cacheTables) state.storage.sql.exec(`DELETE FROM ${table}`); });
   expect(await (await object.fetch("https://db/_changes?style=all_docs&include_docs=true&revs=true")).json()).toEqual(expected);
   expect((await object.fetch('https://db/doc?open_revs=["1-root"]&latest=true')).status).toBe(200);
@@ -148,6 +158,7 @@ it("compacts a reverse-inserted ancestry across multiple archive pages without c
     { _id: "deep", _rev: "131-g131", _revisions: { start: 131, ids: Array.from({ length: 131 }, (_, i) => `g${131-i}`) }, data: "leaf" },
   ] }) });
   expect((await object.fetch("https://db/_compact", { method: "POST" })).status).toBe(202);
+  await drainCheckpoint(object);
   await runInDurableObject(object, async (_instance, state) => { expect(state.storage.sql.exec("SELECT * FROM revs").toArray()).toHaveLength(1); });
   const leaves = await (await object.fetch('https://db/deep?open_revs=["1-g1"]&latest=true')).json() as unknown[];
   expect(leaves).toHaveLength(1);
@@ -182,6 +193,7 @@ it("publishes the current update together with its automatic checkpoint at the r
   // Reach the cadence without issuing thousands of redundant integration requests.
   await runInDurableObject(object, async (_instance, state) => { state.storage.sql.exec("INSERT INTO meta (key,value) VALUES ('monotonic_seq','4095') ON CONFLICT(key) DO UPDATE SET value='4095'"); });
   expect((await object.fetch("https://db/note", { method: "PUT", body: '{"_rev":"2-r2","data":"automatic"}' })).status).toBe(200);
+  await drainCheckpoint(object);
   await runInDurableObject(object, async (_instance, state) => {
     expect(state.storage.sql.exec("SELECT * FROM revs").toArray()).toHaveLength(1);
     expect(state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key='checkpoint_seq'").one().value).toBe("4096");
@@ -198,6 +210,7 @@ it("extends archived incomplete ancestry when an offline client supplies a late 
   const bulk = (docs: unknown[]) => object.fetch("https://db/_bulk_docs", { method: "POST", body: JSON.stringify({ new_edits: false, docs }) });
   await bulk([{ _id: "doc", _rev: "4-d", _revisions: { start: 4, ids: ["d", "c"] }, data: "D" }, { _id: "doc", _rev: "2-b", data: "B" }]);
   await object.fetch("https://db/_compact", { method: "POST" });
+  await drainCheckpoint(object);
   expect((await bulk([{ _id: "doc", _rev: "3-c", _revisions: { start: 3, ids: ["c", "b", "a"] }, data: "C" }])).status).toBe(200);
   expect(await (await object.fetch("https://db/doc?rev=2-b")).json()).toMatchObject({ data: "B" });
   expect(await (await object.fetch('https://db/doc?open_revs=["1-a"]&latest=true')).json()).toEqual([expect.objectContaining({ ok: expect.objectContaining({ _rev: "4-d" }) })]);

@@ -1,6 +1,7 @@
 import { env } from "cloudflare:test";
 import { it, expect } from "vitest";
 import type { TestEnv } from "./entry.js";
+import { drainCheckpoint } from "./checkpoint-helpers.js";
 const bindings = env as unknown as TestEnv;
 it("preserves filtered replication completion, conflict leaves, ancestor history and bulk API behavior", async () => {
   const stub = bindings.VAULT_DB.get(bindings.VAULT_DB.idFromName("protocol:vault"));
@@ -25,6 +26,7 @@ it("preserves filtered replication completion, conflict leaves, ancestor history
   expect(diff).toEqual({ note: { missing: ["3-missing"] } });
   expect((await stub.fetch("https://db/_bulk_get", { method: "POST", body: '{"docs":[{"id":"note","rev":"2-a"}],"revs":true}' })).status).toBe(200);
   expect((await stub.fetch("https://db/_compact", { method: "POST" })).status).toBe(202);
+  await drainCheckpoint(stub);
   expect((await stub.fetch("https://db/note?rev=2-a")).status).toBe(200);
   const suppliedAncestor = await stub.fetch("https://db/_bulk_docs", { method: "POST", body: JSON.stringify({ new_edits: false, docs: [{ _id: "note", _rev: "1-root", type: "plain", path: "Note.md", data: "original body" }] }) });
   expect(suppliedAncestor.status).toBe(200);

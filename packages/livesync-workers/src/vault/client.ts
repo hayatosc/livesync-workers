@@ -35,6 +35,7 @@ export type VaultNoteStat = {
 };
 
 export type VaultIndexStatus = {
+  checkpoint?: { phase: "compact" | "scan" | "dirty"; startedSeq: number; dirtyKeys: number } | null;
   capacity?: { databaseSize: number; usedBytes: number; limitBytes: number; headroomBytes: number; writable: boolean };
   indexedSeq: number;
   currentSeq: number;

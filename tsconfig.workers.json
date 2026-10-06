@@ -10,6 +10,8 @@
   "include": [
     "test/workers",
     "vitest.workers.config.ts",
-    "test/e2e/worker.ts"
+    "test/e2e/worker.ts",
+    "test/performance",
+    "vitest.performance.config.ts"
   ]
 }

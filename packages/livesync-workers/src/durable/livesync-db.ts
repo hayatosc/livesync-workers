@@ -531,13 +531,26 @@ function matchesSelector(doc: DocBody, selector: Selector | null): boolean {
  *     protected bindings() { return myBindings(this.env); }
  *   }
  */
+const CHECKPOINT_KEYS: Record<string, string[]> = {
+  meta: ["key"], revs: ["id", "rev"], rev_metadata: ["id", "rev"], docs: ["id"],
+  local_docs: ["id"], changes: ["seq"], index_state: ["path"],
+};
+type CheckpointWork = {
+  phase: "compact" | "scan" | "dirty";
+  startedSeq: number;
+  table: number;
+  cursor: number;
+  references: Array<{ r2: string }>;
+  previous: { r2: string } | null;
+};
+
 export abstract class LiveSyncVaultDO<TEnv = unknown> {
   /** Last successful setAlarm, as a cheap time-based throttle (never a hard gate). */
   private lastIndexScheduleAt = 0;
   private maintenance = Promise.resolve();
   private writes = Promise.resolve();
   private statements: JournalStatement[] | null = null;
-  private checkpointRequested = false;
+  private contentJournal: R2Journal | null = null;
   private resolvedVaultRef: VaultRef | null = null;
   private journalHead: string | null | undefined;
 
@@ -565,7 +578,9 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     if (!bucket) return null; // legacy host compatibility; deployed Worker always opts in
     const ref = this.vaultRef();
     if (!ref) throw new Error("R2 storage requires a named vault DO");
-    return new R2Journal(bucket, contentPrefix(ref.tenantId, ref.vaultId ?? ref.databaseName));
+    const prefix = contentPrefix(ref.tenantId, ref.vaultId ?? ref.databaseName);
+    if (!this.contentJournal || this.contentJournal.bucket !== bucket || this.contentJournal.prefix !== prefix) this.contentJournal = new R2Journal(bucket, prefix);
+    return this.contentJournal;
   }
 
   private sqlExec<T extends Record<string, SqlStorageValue> = Record<string, SqlStorageValue>>(query: string, ...args: unknown[]): SqlStorageCursor<T> {
@@ -601,6 +616,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const applied = force ? null : this.getMeta("r2_applied_head");
     this.statements = null;
     const clear = () => {
+      this.sqlExec("DELETE FROM checkpoint_work");
+      this.sqlExec("DELETE FROM checkpoint_dirty");
       for (const table of ["docs", "revs", "rev_metadata", "local_docs", "changes", "rev_body_chunks", "meta", "index_state"]) this.sqlExec(`DELETE FROM ${table}`);
     };
     let fullReset = !applied;
@@ -621,36 +638,158 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     }
   }
 
-  private async *snapshotPages(): AsyncGenerator<JournalStatement[]> {
-    for (const table of ["meta", "revs", "rev_metadata", "docs", "local_docs", "changes", "index_state"]) {
-      let cursor = 0;
-      while (true) {
-        const rows = this.rows<Record<string, string | number | null>>(`SELECT rowid AS snapshot_rowid, * FROM ${table} WHERE rowid > ? ORDER BY rowid LIMIT 128`, cursor);
-        if (!rows.length) break;
+  private checkpointWork(): CheckpointWork | null {
+    const row = this.first<{ state: string }>("SELECT state FROM checkpoint_work WHERE id = 1");
+    return row ? JSON.parse(row.state) as CheckpointWork : null;
+  }
+
+  private saveCheckpointWork(work: CheckpointWork): void {
+    this.sqlExec("INSERT INTO checkpoint_work (id,state) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state", JSON.stringify(work));
+  }
+
+  private async requestCheckpoint(schedule = true): Promise<void> {
+    if (!this.checkpointWork()) this.saveCheckpointWork({ phase: "compact", startedSeq: this.currentSeq(), table: 0, cursor: 0, references: [], previous: null });
+    if (schedule) await this.scheduleIndexing(25);
+  }
+
+  private snapshotRow(table: string, row: Record<string, SqlStorageValue>): JournalStatement {
+    const columns = Object.keys(row);
+    return { sql: `INSERT OR REPLACE INTO ${table} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`, args: Object.values(row) as JournalStatement["args"] };
+  }
+
+  private async checkpointPage(work: CheckpointWork, statements: JournalStatement[]): Promise<void> {
+    work.references.push({ r2: await this.journal()!.putBody(JSON.stringify({ statements })) });
+    if (work.references.length === 128) {
+      work.previous = { r2: await this.journal()!.putBody(JSON.stringify({ references: work.references, previous: work.previous })) };
+      work.references = [];
+    }
+  }
+
+  /** One bounded maintenance slice; requests retain their ordinary durable commit. */
+  private async runCheckpointSlice(): Promise<void> {
+    const work = this.checkpointWork();
+    const journal = this.journal();
+    if (!work || !journal) return;
+    let canonicalChanged = false;
+    try {
+      if (work.phase === "compact") {
+        this.statements = [];
+        canonicalChanged = true;
+        // Normalize one legacy history per event, keeping even 2 MB rows bounded.
+        const legacy = this.first<RevRow>(`SELECT id,rev,rev_history FROM revs WHERE rev_history IS NOT NULL AND rev_history NOT LIKE '{"r2":%' LIMIT 1`);
+        if (legacy) {
+          const r2 = await journal.putBody(legacy.rev_history!);
+          this.sqlExec("UPDATE revs SET rev_history=? WHERE id=? AND rev=?", JSON.stringify({ r2 }), legacy.id, legacy.rev);
+        } else {
+          const rows = this.rows<RevRow>(`SELECT r.* FROM revs r WHERE r.seq <= ? AND EXISTS (SELECT 1 FROM revs child WHERE child.id=r.id AND child.parent_rev=r.rev) ORDER BY r.gen,r.id,r.rev LIMIT 32`, work.startedSeq);
+          const groups = new Map<string,RevRow[]>();
+          for (const row of rows) (groups.get(row.id) ?? (groups.set(row.id,[]),groups.get(row.id)!)).push(row);
+          const entries = [...groups];
+          for (let i=0; i<entries.length; i+=6) {
+            const results = await Promise.allSettled(entries.slice(i,i+6).map(([id,records]) => this.archiveRows(id,records)));
+            const failure = results.find(result => result.status === "rejected");
+            if (failure?.status === "rejected") throw failure.reason;
+          }
+          for (const row of rows) {
+            this.sqlExec("DELETE FROM rev_metadata WHERE id=? AND rev=?", row.id,row.rev);
+            this.sqlExec("DELETE FROM revs WHERE id=? AND rev=?", row.id,row.rev);
+          }
+          if (!rows.length) {
+            this.setMeta("monotonic_seq",String(this.currentSeq()));
+            this.sqlExec("DELETE FROM changes WHERE seq NOT IN (SELECT MAX(seq) FROM changes GROUP BY id)");
+            work.phase = "scan";
+          }
+        }
+        const statements = this.statements!;
+        this.statements = null;
+        if (statements.length) {
+          this.journalHead = await journal.commit(statements,this.journalHead);
+          this.setMeta("r2_applied_head",this.journalHead);
+        }
+        this.saveCheckpointWork(work);
+        return;
+      }
+      if (work.phase === "scan") {
+        const tables = Object.keys(CHECKPOINT_KEYS);
+        const table = tables[work.table]!;
+        const rows = this.rows<Record<string, SqlStorageValue>>(`SELECT rowid AS snapshot_rowid,* FROM ${table} WHERE rowid > ? ORDER BY rowid LIMIT 128`,work.cursor);
         const statements: JournalStatement[] = [];
         for (const source of rows) {
-          cursor = Number(source.snapshot_rowid);
+          work.cursor = Number(source.snapshot_rowid);
           const { snapshot_rowid: _, ...row } = source;
           if (table === "meta" && row.key === "r2_applied_head") continue;
-          const columns = Object.keys(row);
-          statements.push({ sql: `INSERT INTO ${table} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`, args: Object.values(row) });
+          statements.push(this.snapshotRow(table,row));
         }
-        if (statements.length) yield statements;
+        if (statements.length) await this.checkpointPage(work,statements);
+        if (rows.length < 128) {
+          work.table++; work.cursor = 0;
+          if (work.table === tables.length) work.phase = "dirty";
+        }
+        this.saveCheckpointWork(work);
+        return;
       }
+      const dirty = this.rows<{ table_name: string; row_key: string }>("SELECT table_name,row_key FROM checkpoint_dirty ORDER BY table_name,row_key LIMIT 128");
+      if (dirty.length) {
+        const statements = dirty.map(({table_name: table,row_key}) => {
+          const keys = CHECKPOINT_KEYS[table]!;
+          const args = JSON.parse(row_key) as JournalStatement["args"];
+          const where = keys.map(key => `${key}=?`).join(" AND ");
+          const row = this.first<Record<string,SqlStorageValue>>(`SELECT * FROM ${table} WHERE ${where}`,...args);
+          return row ? this.snapshotRow(table,row) : { sql: `DELETE FROM ${table} WHERE ${where}`,args };
+        });
+        await this.checkpointPage(work,statements);
+        // The cursor/root and consumed changes advance atomically after immutable R2 writes.
+        this.ctx.storage.transactionSync(() => {
+          for (const row of dirty) this.sqlExec("DELETE FROM checkpoint_dirty WHERE table_name=? AND row_key=?",row.table_name,row.row_key);
+          this.saveCheckpointWork(work);
+        });
+        return;
+      }
+      // No input can mutate SQLite during this exclusive event. The final overlay
+      // records the compaction watermark, and the head CAS publishes that exact state.
+      await this.checkpointPage(work,[{ sql:"INSERT OR REPLACE INTO meta (key,value) VALUES (?,?)",args:["checkpoint_seq",String(work.startedSeq)] }]);
+      const checkpoint = { r2: await journal.putBody(JSON.stringify({ references: work.references,previous:work.previous,ordered:true })), format: 2 as const };
+      canonicalChanged = true;
+      this.journalHead = await journal.commit([],this.journalHead,checkpoint);
+      this.ctx.storage.transactionSync(() => {
+        this.sqlExec("DELETE FROM checkpoint_work");
+        this.sqlExec("DELETE FROM checkpoint_dirty");
+        this.setMeta("checkpoint_seq",String(work.startedSeq));
+        this.setMeta("r2_applied_head",this.journalHead!);
+      });
+    } catch (error) {
+      this.statements = null;
+      if (canonicalChanged) {
+        await this.restoreJournal(true);
+        if (this.dbExists()) await this.requestCheckpoint(false);
+      }
+      throw error;
     }
   }
 
   private async archiveRows(id: string, records: RevRow[]): Promise<void> {
     const journal = this.journal()!;
-    const previous = this.getMeta(`archive:${id}`);
-    const r2 = await journal.putBody(JSON.stringify({ records, previous: previous ? JSON.parse(previous) : null }));
+    const prior = this.getMeta(`archive:${id}`);
+    let previous: { r2: string } | null = prior ? JSON.parse(prior) : null;
+    // Preserve 128-record archive pages despite smaller maintenance slices.
+    // Replacing an immutable page keeps every older version in the journal.
+    if (previous) {
+      const page = JSON.parse(await journal.body(previous.r2)) as { records: RevRow[]; previous: { r2: string } | null };
+      const incoming = new Set(records.map(record => record.rev));
+      const merged = [...records, ...page.records.filter(record => !incoming.has(record.rev))];
+      if (merged.length <= 128) { records = merged; previous = page.previous; }
+    }
+    const r2 = await journal.putBody(JSON.stringify({ records, previous }));
     this.setMeta(`archive:${id}`, JSON.stringify({ r2 }));
   }
 
   private async archivedRevRow(id: string, rev: string): Promise<RevRow | null> {
     const journal = this.journal();
     let pointer = this.getMeta(`archive:${id}`);
-    if (!journal) return null;
+    if (!journal || !pointer) return null;
+    const generation = parseRev(rev)?.gen;
+    const maximum = this.first<{ gen: number }>("SELECT MAX(gen) AS gen FROM revs WHERE id = ?", id)?.gen;
+    if (generation != null && maximum != null && generation >= maximum) return null;
     const seen = new Set<string>();
     while (pointer) {
       const key = JSON.parse(pointer).r2 as string;
@@ -662,6 +801,11 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       pointer = page.previous ? JSON.stringify(page.previous) : null;
     }
     return null;
+  }
+
+  private checkpointProgress() {
+    const work = this.checkpointWork();
+    return work ? { phase: work.phase, startedSeq: work.startedSeq, dirtyKeys: this.first<{ count: number }>("SELECT COUNT(*) AS count FROM checkpoint_dirty")!.count } : null;
   }
 
   private capacity() {
@@ -715,7 +859,6 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     }
     await this.restoreJournal();
     if (journal) this.statements = [];
-    this.checkpointRequested = false;
     try {
       const path = new URL(request.url).pathname;
       let growth = ["PUT", "DELETE"].includes(request.method) || (request.method === "POST" && path === "/_bulk_docs");
@@ -725,16 +868,15 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       }
       let blocked = false;
       if (journal && growth && !this.capacity().writable) {
-        await this.handleCompact();
-        blocked = !this.capacity().writable;
+        await this.requestCheckpoint();
+        blocked = true;
       }
       const response = blocked ? json({ error: "SQLITE_CAPACITY", capacity: this.capacity() }, { status: 507 }) : await this.route(request);
-      if (journal && !blocked && growth && this.currentSeq() - Number(this.getMeta("checkpoint_seq") ?? 0) >= 4096) await this.handleCompact();
+      if (journal && !blocked && growth && this.currentSeq() - Number(this.getMeta("checkpoint_seq") ?? 0) >= 4096) await this.requestCheckpoint();
       const statements = this.statements;
       this.statements = null;
-      if (journal && (statements?.length || this.checkpointRequested)) {
-        const checkpoint = this.checkpointRequested ? await journal.snapshot(this.snapshotPages()) : undefined;
-        this.journalHead = await journal.commit(checkpoint ? [] : statements ?? [], this.journalHead, checkpoint);
+      if (journal && statements?.length) {
+        this.journalHead = await journal.commit(statements, this.journalHead);
         this.setMeta("r2_applied_head", this.journalHead);
         this.notifyWatchers();
       }
@@ -984,6 +1126,20 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       this.setMeta(FTS_INDEX_VERSION_META_KEY, CURRENT_FTS_INDEX_VERSION);
       this.armFtsBuild(0);
     }
+    sql.exec("CREATE TABLE IF NOT EXISTS checkpoint_work (id INTEGER PRIMARY KEY CHECK(id = 1), state TEXT NOT NULL)");
+    sql.exec("CREATE TABLE IF NOT EXISTS checkpoint_dirty (table_name TEXT NOT NULL, row_key TEXT NOT NULL, PRIMARY KEY(table_name,row_key))");
+    for (const [table, keys] of Object.entries(CHECKPOINT_KEYS)) {
+      for (const event of ["INSERT", "UPDATE", "DELETE"]) {
+        const versions = event === "UPDATE" ? ["OLD", "NEW"] : [event === "DELETE" ? "OLD" : "NEW"];
+        const changes = versions.map(version => {
+          const rowKey = `json_array(${keys.map(key => `${version}.${key}`).join(",")})`;
+          const condition = table === "meta" ? ` AND ${version}.key <> 'r2_applied_head'` : "";
+          return `INSERT INTO checkpoint_dirty (table_name,row_key) SELECT '${table}', ${rowKey} WHERE NOT EXISTS (SELECT 1 FROM checkpoint_dirty WHERE table_name='${table}' AND row_key=${rowKey})${condition};`;
+        }).join(" ");
+        sql.exec(`CREATE TRIGGER IF NOT EXISTS checkpoint_${table}_${event} AFTER ${event} ON ${table}
+          WHEN EXISTS (SELECT 1 FROM checkpoint_work WHERE json_extract(state,'$.phase') <> 'compact') BEGIN ${changes} END`);
+      }
+    }
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_revs_id ON revs (id)`);
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_revs_parent ON revs (id, parent_rev)`);
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_changes_id ON changes (id)`);
@@ -1137,6 +1293,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       if (fullText) await fullText.deleteVault(ref);
       else await deleteFtsIndex(this.ftsBucket(), ref);
     }
+    this.sqlExec("DELETE FROM checkpoint_work");
+    this.sqlExec("DELETE FROM checkpoint_dirty");
     this.sqlExec(`DELETE FROM docs`);
     this.sqlExec(`DELETE FROM rev_body_chunks`);
     this.sqlExec(`DELETE FROM rev_metadata`);
@@ -1157,7 +1315,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       case "contentGc": {
         const journal = this.journal();
         if (!journal) return json({ error: "R2_STORAGE_REQUIRED" }, { status: 409 });
-        const garbage = await journal.collectGarbage({ execute: body.execute === true });
+        const work = this.checkpointWork();
+        const garbage = await journal.collectGarbage({ execute: body.execute === true, roots: work ? [work.references, work.previous] : [] });
         return json({ execute: body.execute === true, keys: garbage });
       }
       case "listMarkdownPaths": {
@@ -1254,6 +1413,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
               }
             : {}),
           capacity: this.capacity(),
+          checkpoint: this.checkpointProgress(),
           indexedSeq: this.indexedSeq(),
           currentSeq: this.currentSeq(),
           indexed: this.first<{ count: number }>(
@@ -1510,7 +1670,9 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   alarm(): Promise<void> {
     return this.exclusive(async () => {
       await this.resolveVaultIdentity();
-      await this.restoreJournal();
+      // Pure maintenance can use the last confirmed local head. A new instance or
+      // lost applied marker reloads it; every canonical publication still uses CAS.
+      if (!this.checkpointWork() || this.journalHead === undefined || this.getMeta("r2_applied_head") !== this.journalHead) await this.restoreJournal();
       return this.withMaintenance(() => this.runAlarm());
     });
   }
@@ -1521,6 +1683,12 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       ftsRebuildAt: this.getMeta(FTS_REBUILD_AT_META_KEY),
     });
     try {
+      if (this.journal() && (this.checkpointWork() || this.currentSeq() - Number(this.getMeta("checkpoint_seq") ?? 0) >= 4096)) {
+        if (!this.checkpointWork()) await this.requestCheckpoint(false);
+        await this.runCheckpointSlice();
+        await this.scheduleIndexing(this.checkpointWork() ? 25 : 0);
+        return;
+      }
       const { more, retry, worked } = await this.runIndexing();
       if (more) await this.scheduleIndexing(0);
       else if (retry) await this.scheduleIndexing(INDEX_RETRY_DELAY_MS);
@@ -2584,7 +2752,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     if (journal && row.ancestors) {
       const hot: string[] = [];
       for (const rev of row.ancestors) {
-        if (await this.archivedRevRow(row.id, rev)) break;
+        if (!this.rawRevRow(row.id,rev) && await this.archivedRevRow(row.id, rev)) break;
         hot.push(rev);
       }
       row.ancestors = hot;
@@ -3044,42 +3212,10 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
 
   private async handleCompact(): Promise<Response> {
     if (this.journal()) {
-      const captured = this.statements;
-      this.statements = null; // The paged checkpoint replaces a potentially huge SQL mutation list.
-      try {
-        const missing = this.requireDb();
-        if (missing) return missing;
-        this.setMeta("monotonic_seq", String(this.currentSeq()));
-        this.setMeta("checkpoint_seq", String(this.currentSeq()));
-        // Normalize legacy histories before paging records; older commits remain valid and readable.
-        while (true) {
-          const rows = this.rows<RevRow>(`SELECT id, rev, rev_history FROM revs WHERE rev_history IS NOT NULL AND rev_history NOT LIKE '{"r2":%' LIMIT 1`);
-          if (!rows.length) break;
-          for (const row of rows) {
-            const r2 = await this.journal()!.putBody(row.rev_history!);
-            this.sqlExec("UPDATE revs SET rev_history = ? WHERE id = ? AND rev = ?", JSON.stringify({ r2 }), row.id, row.rev);
-          }
-        }
-        // Parents have lower generations. Delete them first so removing a child
-        // cannot turn a still-present old ancestor into a false leaf.
-        // Archive in bounded pages. Parent links and historical bodies remain retrievable.
-        while (true) {
-          const rows = this.rows<RevRow>(`SELECT r.* FROM revs r WHERE EXISTS (SELECT 1 FROM revs child WHERE child.id = r.id AND child.parent_rev = r.rev) ORDER BY r.gen, r.id, r.rev LIMIT 128`);
-          if (!rows.length) break;
-          const groups = new Map<string, RevRow[]>();
-          for (const row of rows) (groups.get(row.id) ?? (groups.set(row.id, []), groups.get(row.id)!)).push(row);
-          for (const [id, records] of groups) await this.archiveRows(id, records);
-          for (const row of rows) {
-            this.sqlExec(`DELETE FROM rev_metadata WHERE id = ? AND rev = ?`, row.id, row.rev);
-            this.sqlExec(`DELETE FROM revs WHERE id = ? AND rev = ?`, row.id, row.rev);
-          }
-        }
-        // Indexing reads the current winner for each changed ID, so coalescing also
-        // preserves unprocessed work without retaining every intermediate update.
-        this.sqlExec(`DELETE FROM changes WHERE seq NOT IN (SELECT MAX(seq) FROM changes GROUP BY id)`);
-        this.checkpointRequested = true;
-        return json({ ok: true, capacity: this.capacity(), checkpoint: true }, { status: 202 });
-      } finally { this.statements = captured; }
+      const missing = this.requireDb();
+      if (missing) return missing;
+      await this.requestCheckpoint();
+      return json({ ok: true, pending: true, capacity: this.capacity() }, { status: 202 });
     }
     const missing = this.requireDb();
     if (missing) return missing;

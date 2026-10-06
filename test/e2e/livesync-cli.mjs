@@ -104,7 +104,7 @@ try {
     assert.ok(changes.results.some(row => (row.deleted || row.doc?.deleted) && row.doc?.path === 'assets/original.pdf'));
   });
   await step('R2 recovery after DO cache loss and backend restart reaches a fresh official CLI client', async () => {
-    await backend.reset('a'); await backend.restart();
+    await backend.compact('a'); await backend.reset('a'); await backend.restart();
     const fresh = await client('fresh-after-recovery', 'a'); await sync(fresh);
     await expectFile(fresh, 'assets/retained.png', updated); await expectFile(fresh, 'reconnect.md', Buffer.from('after process restart')); await expectMissing(fresh, '日本語.md'); await expectMissing(fresh, 'assets/original.pdf');
     await sync(foreign); await expectFile(foreign, '日本語.md', Buffer.from('foreign'));

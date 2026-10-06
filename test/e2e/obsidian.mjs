@@ -136,7 +136,7 @@ try {
     await sync(writer); await sync(reader); await expectDeleted(reader, '日本語.md'); await expectDeleted(reader, 'assets/original.pdf');
   });
   await step('R2 rebuild after DO cache loss and Worker restart reaches fresh Obsidian without resurrection', async () => {
-    await backend.reset('a'); await backend.restart(); const fresh = await startClient('a'); await sync(fresh);
+    await backend.compact('a'); await backend.reset('a'); await backend.restart(); const fresh = await startClient('a'); await sync(fresh);
     await expectFile(fresh, 'assets/retained.png', updated);
     await expectFile(fresh, 'reconnect.md', Buffer.from('after client restart')); await expectDeleted(fresh, '日本語.md'); await expectDeleted(fresh, 'assets/original.pdf');
   });

@@ -11,7 +11,7 @@ npm test
 npm run test:workers
 ```
 
-`npm test`はライブラリNode156件、Worker Node7件、公式Vitest Workers44件の計207件です。`vitest.workers.config.ts`から`test/workers/wrangler.jsonc`のローカルWorkers／SQLite DO／R2 bindingを使用します。[Cloudflare公式Vitest統合](https://developers.cloudflare.com/workers/testing/vitest-integration/)で、独自Miniflare起動は使いません。
+`npm test`はライブラリNode156件、Worker Node7件、公式Vitest Workers52件の計215件です。`vitest.workers.config.ts`から`test/workers/wrangler.jsonc`のローカルWorkers／SQLite DO／R2 bindingを使用します。[Cloudflare公式Vitest統合](https://developers.cloudflare.com/workers/testing/vitest-integration/)で、独自Miniflare起動は使いません。
 
 統合テストは、同期API・リビジョン競合・チャンク／バイナリ、保存境界の注入障害と再試行、R2 head CAS、DO行／スキーマ消失後の再生、削除・checkpoint、GC、明示移行、管理DB圧縮／容量拒否／ページ化復元と保存失敗、Segmenter解析・索引更新／世代切替、Vault越境・MCP scope／更新競合を検証します。実CPU強制終了・本番R2障害を再現したという意味ではありません。
 
@@ -58,7 +58,7 @@ GUI／CLIはそれぞれ次の7段階を検証します。
 
 ## GitHub Actionsと確認済み結果
 
-[CI](../.github/workflows/ci.yml)はbuild、型検査、全207テスト、`.mjs`構文、mainとの差分空白検査を実行します。lint／formatterは未設定で、空白検査をそれらの合格とは扱いません。
+[CI](../.github/workflows/ci.yml)はbuild、型検査、全215テスト、`.mjs`構文、mainとの差分空白検査を実行します。lint／formatterは未設定で、空白検査をそれらの合格とは扱いません。
 
 [LiveSync E2E](../.github/workflows/e2e.yml)はdraftを含むPRでCLIとGUIを別ジョブ実行します。CLIはUbuntu 24.04、GUIはUbuntu 22.04 hosted VMです。通常のnamespace sandboxとauthenticated Xvfbを使い、sysctl・AppArmor・seccomp・setuid変更は行いません。前提検査が失敗した場合はジョブも失敗します。workflow権限は`contents: read`、checkoutは認証情報を残しません。
 
@@ -69,3 +69,5 @@ GUI／CLIはそれぞれ次の7段階を検証します。
 ## 検証外
 
 本番負荷・費用、本番R2障害／実ネットワーク断、CPU上限による実強制終了、巨大履歴の復元、実ユーザー移行、E2EE／圧縮した同期、OAuthブラウザからMcpAgentまでの完全E2Eは未検証です。MCP scope／Vault認可はSDKトランスポートと実Workersの統合で検証しています。詳細な容量制約は[運用文書](r2-operations.md)を参照してください。
+
+バックグラウンドチェックポイントは途中更新／削除、カーソル再開、未完了ページのGC保護、保存失敗再試行、同時更新、head 429／外部head CAS、順序付きカタログ境界を検証します。実CLI／GUIの復元ケースも圧縮を完了してからDOキャッシュを消去します。性能試験は別途`npm run test:performance`で実行します。[測定条件と結果](performance.md)を参照してください。

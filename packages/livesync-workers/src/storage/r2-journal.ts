@@ -1,6 +1,6 @@
 /** R2 is authoritative. A single vault DO serializes writers; head CAS also fences stale writers. */
 export type JournalStatement = { sql: string; args: Array<string | number | null> };
-export type JournalCommit = { version: 1; previous: string | null; statements: JournalStatement[]; checkpoint?: { r2: string } };
+export type JournalCommit = { version: 1 | 2; previous: string | null; statements: JournalStatement[]; checkpoint?: { r2: string; format?: 2 } };
 export type JournalHead = { version: 1; commit: string };
 export class JournalConflict extends Error {}
 
@@ -11,16 +11,29 @@ export function contentPrefix(tenantId: string, vaultId: string): string {
 
 export class R2Journal {
   constructor(readonly bucket: R2Bucket, readonly prefix: string) {}
+  private observed: { commit: string | null; etag: string | null } | null = null;
   private get headKey() { return `${this.prefix}head.json`; }
 
   async head(): Promise<{ commit: string | null; etag: string | null }> {
     const object = await this.bucket.get(this.headKey);
-    if (!object) return { commit: null, etag: null };
+    if (!object) return this.observed = { commit: null, etag: null };
     const head = await object.json<JournalHead>();
     if (head.version !== 1 || !head.commit.startsWith(`${this.prefix}commits/`)) {
       throw new Error("Invalid content journal head");
     }
-    return { commit: head.commit, etag: object.etag };
+    return this.observed = { commit: head.commit, etag: object.etag };
+  }
+
+  /** Retry only explicit throttling/unavailability; CAS still fences every head write. */
+  private async put(key: string, value: Parameters<R2Bucket["put"]>[1], options?: R2PutOptions): Promise<R2Object | null> {
+    for (let attempt = 0; ; attempt++) {
+      try { return await this.bucket.put(key,value,options); }
+      catch (error) {
+        const status = (error as { status?: number; statusCode?: number }).status ?? (error as { statusCode?: number }).statusCode;
+        if (attempt >= 3 || !(status === 429 || status === 503 || /\b(?:429|503)\b|TooManyRequests|Too Many Requests|SlowDown/i.test(String(error)))) throw error;
+        await new Promise(resolve => setTimeout(resolve,250 * 2 ** attempt));
+      }
+    }
   }
 
   async putBody(body: string): Promise<string> {
@@ -31,7 +44,7 @@ export class R2Journal {
     const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
     const hash = [...digest].map((b) => b.toString(16).padStart(2, "0")).join("");
     const key = `${this.prefix}objects/${hash}`;
-    await this.bucket.put(key, bytes, { onlyIf: { etagDoesNotMatch: "*" } });
+    await this.put(key, bytes, { onlyIf: { etagDoesNotMatch: "*" } });
     return key;
   }
 
@@ -42,18 +55,23 @@ export class R2Journal {
     return object.text();
   }
 
-  async commit(statements: JournalStatement[], expected?: string | null, checkpoint?: { r2: string }): Promise<string> {
-    const previous = await this.head();
+  async commit(statements: JournalStatement[], expected?: string | null, checkpoint?: { r2: string; format?: 2 }): Promise<string> {
+    const previous = expected !== undefined && this.observed?.commit === expected ? this.observed : await this.head();
     if (expected !== undefined && previous.commit !== expected) throw new JournalConflict("Stale vault writer");
     const key = `${this.prefix}commits/${crypto.randomUUID()}.json`;
-    const commit: JournalCommit = { version: 1, previous: previous.commit, statements, ...(checkpoint ? { checkpoint } : {}) };
-    const immutable = await this.bucket.put(key, JSON.stringify(commit), { onlyIf: { etagDoesNotMatch: "*" } });
-    if (!immutable) throw new JournalConflict("Commit key already exists; retry with a new immutable key");
+    const commit: JournalCommit = { version: checkpoint?.format === 2 ? 2 : 1, previous: previous.commit, statements, ...(checkpoint ? { checkpoint } : {}) };
+    const immutable = await this.put(key, JSON.stringify(commit), { onlyIf: { etagDoesNotMatch: "*" } });
+    if (!immutable && await (await this.bucket.get(key))?.text() !== JSON.stringify(commit)) throw new JournalConflict("Commit key already exists; retry with a new immutable key");
     const head: JournalHead = { version: 1, commit: key };
-    const result = await this.bucket.put(this.headKey, JSON.stringify(head), {
+    const result = await this.put(this.headKey, JSON.stringify(head), {
       onlyIf: previous.etag ? { etagMatches: previous.etag } : { etagDoesNotMatch: "*" },
     });
-    if (!result) throw new JournalConflict("The vault journal changed; reload and retry");
+    if (!result) {
+      const current = await this.head();
+      if (current.commit === key) return key; // A transient failure lost only the acknowledgement.
+      throw new JournalConflict("The vault journal changed; reload and retry");
+    }
+    this.observed = { commit: key, etag: result.etag };
     return key;
   }
 
@@ -82,7 +100,7 @@ export class R2Journal {
       const object = await this.bucket.get(key);
       if (!object) throw new Error("Missing committed manifest during replay");
       const value = await object.json<JournalCommit>();
-      if (value.version !== 1) throw new Error("Unsupported journal version");
+      if (value.version !== 1 && value.version !== 2) throw new Error("Unsupported journal version");
       if (value.checkpoint) break;
       key = value.previous;
     }
@@ -95,17 +113,24 @@ export class R2Journal {
       if (value.checkpoint) {
         let catalog: { r2: string } | null = value.checkpoint;
         const catalogs = new Set<string>();
-        let first = true;
+        const root = JSON.parse(await this.body(catalog.r2)) as { ordered?: boolean };
+        const keys: string[] = [];
         while (catalog) {
           if (catalogs.has(catalog.r2)) throw new Error("Checkpoint catalog cycle");
-          catalogs.add(catalog.r2);
-          const manifest: { references: Array<{ r2: string }>; previous?: { r2: string } | null } = JSON.parse(await this.body(catalog.r2));
+          catalogs.add(catalog.r2); keys.push(catalog.r2);
+          const manifest: { previous?: { r2: string } | null } = JSON.parse(await this.body(catalog.r2));
+          catalog = manifest.previous ?? null;
+        }
+        // Old checkpoints contain independent INSERT rows; new overlays require creation order.
+        if (root.ordered) keys.reverse();
+        let first = true;
+        for (const key of keys) {
+          const manifest = JSON.parse(await this.body(key)) as { references: Array<{ r2: string }> };
           for (const page of manifest.references) {
             const data = JSON.parse(await this.body(page.r2)) as { statements: JournalStatement[] };
             yield { statements: data.statements, reset: first };
             first = false;
           }
-          catalog = manifest.previous ?? null;
         }
         // Also handles empty checkpoints.
         yield { statements: [], reset: first, commit: commitKey };
@@ -127,7 +152,7 @@ export class R2Journal {
       const object = await this.bucket.get(key);
       if (!object) throw new Error(`Missing committed manifest: ${key}`);
       const commit = await object.json<JournalCommit>();
-      if (commit.version !== 1 || !Array.isArray(commit.statements)) throw new Error("Unsupported content journal version");
+      if (![1,2].includes(commit.version) || !Array.isArray(commit.statements)) throw new Error("Unsupported content journal version");
       commits.push(commit);
       key = commit.previous;
     }
@@ -135,7 +160,7 @@ export class R2Journal {
   }
 
   /** Dry run by default. Only unreachable objects older than the grace period are candidates. */
-  async collectGarbage(options: { execute?: boolean; graceMs?: number } = {}): Promise<string[]> {
+  async collectGarbage(options: { execute?: boolean; graceMs?: number; roots?: unknown[] } = {}): Promise<string[]> {
     const before = await this.head();
     const live = new Set<string>([this.headKey]);
     const protect = async (value: unknown): Promise<void> => {
@@ -159,6 +184,7 @@ export class R2Journal {
       }
       for (const entry of Object.values(value)) if (entry !== pointer) await protect(entry);
     };
+    await protect(options.roots);
     let key = before.commit;
     const seen = new Set<string>();
     while (key) {

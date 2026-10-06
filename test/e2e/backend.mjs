@@ -47,6 +47,14 @@ export async function startBackend() {
   try { await start(); } catch (error) { await stop(); await rm(directory, { recursive: true, force: true }); throw new Error(`${error.message}\n${output.replaceAll(secret, "[redacted]").replaceAll(password, "[redacted]").replace(/env\.(SESSION_SECRET|E2E_PASSWORD)[^\n]*/g, "env.$1 [redacted]")}`); }
   return { origin, secret, password, vaults,
     async request(vaultId, suffix = '', options = {}) { return fetch(`${origin}/livesync/vault-${vaultId}${suffix}`, { ...options, headers: { Authorization: `Basic ${Buffer.from(`${vaultId}:${password}`).toString('base64')}`, 'Content-Type': 'application/json', ...options.headers } }); },
+    async compact(vaultId) {
+      const response = await this.request(vaultId, '/_compact', { method: 'POST' });
+      if (response.status !== 202) throw new Error('Background compaction was not accepted');
+      await eventually(async () => {
+        const status = await fetch(`${origin}/e2e/checkpoint-status?vaultId=${vaultId}`, { headers: { 'X-E2E-Token': secret } });
+        if (!status.ok || (await status.json()).pending) throw new Error('Checkpoint is still pending');
+      });
+    },
     async reset(vaultId) { const response = await fetch(`${origin}/e2e/reset-cache?vaultId=${vaultId}`, { method: 'POST', headers: { 'X-E2E-Token': secret } }); if (!response.ok) throw new Error('Cache reset failed'); },
     async pause() { await stop(); },
     async resume() { await start(); },
