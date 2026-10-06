@@ -89,3 +89,14 @@ it("retains unchanged notes when an old index version starts a new generation", 
   });
   expect(await vault.grep("東京", 10)).toMatchObject({ status: "ready", hits: [{ path: "existing.md" }] });
 });
+
+it("does not restart a rebuild generation already in progress", async () => {
+  const ref = { tenantId: "idempotent-rebuild", vaultId: "one", databaseName: "display" };
+  expect(await index.beginRebuild(ref)).toBe(true);
+  const writer = await index.openWriter(ref);
+  await writer.upsert({ path: "one.md", content: "東京", contentHash: "one", mtime: null });
+  await writer.close();
+  expect(await index.beginRebuild(ref)).toBe(false);
+  await index.completeRebuild(ref);
+  expect((await index.search(ref, "東京", 10)).hits.map(hit => hit.path)).toEqual(["one.md"]);
+});

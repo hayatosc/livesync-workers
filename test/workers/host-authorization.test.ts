@@ -61,3 +61,14 @@ it("uses real host registry authorization and keeps equal paths isolated across 
   expect(authorizedVaults(app, "viewer")).toEqual([]);
   expect(() => vaultFor(app, "a", "viewer")).toThrow("access denied");
 });
+
+it("renders configuration warnings for malformed registries and registries without an admin vault", async () => {
+  for (const VAULTS_JSON of ["{", JSON.stringify([{ vaultId: "only", tenantId: "other", databaseName: "other", displayName: "Other", ownerId: "someone", username: "other", passwordSecret: "OTHER_PASSWORD" }])]) {
+    const app = { VAULTS_JSON } as Env;
+    for (const admin of [false, true]) {
+      const response = statusPage(app, { origin: "https://worker", admin, configured: { livesync: true, admin: true, session: true }, username: "obsidian" });
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain("Vault configuration unavailable");
+    }
+  }
+});

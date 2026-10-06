@@ -84,7 +84,7 @@ export interface FullTextIndexWriter {
  */
 export interface FullTextIndex {
   readonly sourceHashes?: boolean;
-  beginRebuild?(ref: VaultRef): Promise<void>;
+  beginRebuild?(ref: VaultRef): Promise<void | boolean>;
   completeRebuild?(ref: VaultRef): Promise<void>;
   /** Called lazily once per indexing pass that has something to write. */
   openWriter(ref: VaultRef): Promise<FullTextIndexWriter>;
@@ -129,6 +129,9 @@ export interface VaultBindings {
   vaultDb: AnyDurableObjectNamespace;
   /** Authoritative content and recovery journal; separate from derived search. */
   contentBucket?: R2Bucket;
+  /** Soft used-byte ceiling; leave headroom below the platform SQLite limit. */
+  sqliteMaxBytes?: number;
+  sqliteHeadroomBytes?: number;
   /**
    * Vector index for semantic search. Leave `vectorize` and `embedder` both
    * unset to run without semantic search: notes are still tracked and the

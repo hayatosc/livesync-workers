@@ -12,7 +12,11 @@ const evidence = resolve('.local/e2e/evidence');
 await mkdir(evidence, { recursive: true });
 // Exclusive lock prevents equivalent local harness executions. No broad process killing.
 const lockPath = join(evidence, 'running.lock');
-const lock = await open(lockPath, 'wx');
+const lock = await open(lockPath, 'wx').catch(error => {
+  if (error.code === 'EEXIST') throw new Error(`E2E lock exists: ${lockPath}. Check for an active equivalent run; remove this file only after confirming the previous run stopped.`);
+  throw error;
+});
+await lock.writeFile(String(process.pid));
 const result = { status: 'running', actualObsidian: false, cases: [], versions: [], startedAt: new Date().toISOString() };
 let backend;
 const clients = [];

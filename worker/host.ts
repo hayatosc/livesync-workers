@@ -107,7 +107,17 @@ export function semanticSearchOn(env: Env): boolean {
 export function vaultBindings(env: Env): VaultBindings {
   if (!env.CONTENT_BUCKET || !env.FTS_BUCKET) throw new ConfigError("CONTENT_BUCKET and FTS_BUCKET are required; SQLite content fallback is disabled for this Worker");
   if (semanticSearchOn(env) && (!env.AI || !env.VECTORIZE)) throw new ConfigError("Semantic search requires optional AI and VECTORIZE bindings");
+  const capacityValue = (value: string | undefined, fallback: number, max: number) => {
+    const result = value === undefined ? fallback : Number(value);
+    if (!Number.isSafeInteger(result) || result < 0 || result > max) throw new ConfigError("Invalid SQLite capacity setting");
+    return result;
+  };
+  const sqliteMaxBytes = capacityValue(env.SQLITE_MAX_BYTES, 900_000_000, 9_500_000_000);
+  const sqliteHeadroomBytes = capacityValue(env.SQLITE_HEADROOM_BYTES, 100_000_000, sqliteMaxBytes);
+  if (sqliteHeadroomBytes >= sqliteMaxBytes) throw new ConfigError("SQLite headroom must be below its limit");
   return {
+    sqliteMaxBytes,
+    sqliteHeadroomBytes,
     vaultDb: env.VAULT_DB,
     bucket: env.FTS_BUCKET,
     contentBucket: env.CONTENT_BUCKET,

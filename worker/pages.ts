@@ -33,7 +33,9 @@ export type StatusPageData = {
 };
 
 export function statusPage(env: Env, data: StatusPageData): Response {
-  const ref = setupVaultConfig(env);
+  let configurationError = false;
+  let ref = { databaseName: "unavailable", passwordSecret: "unavailable" };
+  try { ref = setupVaultConfig(env); } catch (error) { configurationError = true; data.indexError ??= error instanceof Error ? error.message : String(error); }
   const missing = Object.entries(data.configured)
     .filter(([, ok]) => !ok)
     .map(
@@ -42,12 +44,12 @@ export function statusPage(env: Env, data: StatusPageData): Response {
           key
         ] ?? key,
     );
-  const warn =
+  const warn = (configurationError ? `<div class="card" style="border-color:#f59e0b"><h2>Vault configuration unavailable</h2><p>Check the vault registry and admin access settings.</p></div>` : "") + (
     missing.length > 0
       ? `<div class="card" style="border-color:#f59e0b"><h2>Setup incomplete</h2><p>Missing (or placeholder) secrets: <code>${missing
           .map(escapeHtml)
           .join("</code>, <code>")}</code>.</p><p class="muted">Set them with <code>wrangler secret put NAME</code> (or in the Cloudflare dashboard under Settings → Variables and Secrets), then reload.</p></div>`
-      : "";
+      : "");
   const indexHtml = data.admin
     ? data.indexError
       ? `<p class="muted">Index status unavailable: ${escapeHtml(data.indexError)}</p>`

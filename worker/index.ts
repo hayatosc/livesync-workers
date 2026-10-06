@@ -83,11 +83,11 @@ const appHandler: ExportedHandler<Env> = {
       };
       const data: Parameters<typeof statusPage>[1] = { origin: url.origin, admin, configured };
       if (admin) {
-        const config = setupVaultConfig(env);
-        data.username = config.username;
-        data.databaseName = config.databaseName;
-        data.passwordSecret = config.passwordSecret;
         try {
+          const config = setupVaultConfig(env);
+          data.username = config.username;
+          data.databaseName = config.databaseName;
+          data.passwordSecret = config.passwordSecret;
           const vault = vaultFor(env);
           data.dbExists = await vault.exists();
           data.index = data.dbExists ? await vault.indexStatus() : null;

@@ -11,9 +11,9 @@ npm test
 npm run test:workers
 ```
 
-`npm test`はライブラリNode156件、Worker Node7件、公式Vitest Workers25件の計188件です。`vitest.workers.config.ts`から`test/workers/wrangler.jsonc`のローカルWorkers／SQLite DO／R2 bindingを使用します。[Cloudflare公式Vitest統合](https://developers.cloudflare.com/workers/testing/vitest-integration/)で、独自Miniflare起動は使いません。
+`npm test`はライブラリNode156件、Worker Node7件、公式Vitest Workers44件の計207件です。`vitest.workers.config.ts`から`test/workers/wrangler.jsonc`のローカルWorkers／SQLite DO／R2 bindingを使用します。[Cloudflare公式Vitest統合](https://developers.cloudflare.com/workers/testing/vitest-integration/)で、独自Miniflare起動は使いません。
 
-統合テストは、同期API・リビジョン競合・チャンク／バイナリ、保存境界の注入障害と再試行、R2 head CAS、DO行／スキーマ消失後の再生、削除・checkpoint、GC、明示移行、Segmenter解析・索引更新／世代切替、Vault越境・MCP scope／更新競合を検証します。実CPU強制終了・本番R2障害を再現したという意味ではありません。
+統合テストは、同期API・リビジョン競合・チャンク／バイナリ、保存境界の注入障害と再試行、R2 head CAS、DO行／スキーマ消失後の再生、削除・checkpoint、GC、明示移行、管理DB圧縮／容量拒否／ページ化復元と保存失敗、Segmenter解析・索引更新／世代切替、Vault越境・MCP scope／更新競合を検証します。実CPU強制終了・本番R2障害を再現したという意味ではありません。
 
 ## 公式LiveSync CLI E2E
 
@@ -58,13 +58,13 @@ GUI／CLIはそれぞれ次の7段階を検証します。
 
 ## GitHub Actionsと確認済み結果
 
-[CI](../.github/workflows/ci.yml)はbuild、型検査、全188テスト、`.mjs`構文、mainとの差分空白検査を実行します。lint／formatterは未設定で、空白検査をそれらの合格とは扱いません。
+[CI](../.github/workflows/ci.yml)はbuild、型検査、全207テスト、`.mjs`構文、mainとの差分空白検査を実行します。lint／formatterは未設定で、空白検査をそれらの合格とは扱いません。
 
 [LiveSync E2E](../.github/workflows/e2e.yml)はdraftを含むPRでCLIとGUIを別ジョブ実行します。CLIはUbuntu 24.04、GUIはUbuntu 22.04 hosted VMです。通常のnamespace sandboxとauthenticated Xvfbを使い、sysctl・AppArmor・seccomp・setuid変更は行いません。前提検査が失敗した場合はジョブも失敗します。workflow権限は`contents: read`、checkoutは認証情報を残しません。
 
-2026-10-05、head `023423aa0b15a125d8950a8b5bf05dcc405d7305`で[CI](https://github.com/hayatosc/livesync-workers/actions/runs/37292072250)と[E2E](https://github.com/hayatosc/livesync-workers/actions/runs/37292072359)が成功しました。188テスト、GUI7ケース、CLI7ケースを確認し、GUI結果JSONにも実アプリ／プラグイン版と2チャンクを記録しています。最新の変更については[PR checks](https://github.com/hayatosc/livesync-workers/pull/1/checks)を確認してください。
+検証結果と対象headは[PR checks](https://github.com/hayatosc/livesync-workers/pull/1/checks)で確認してください。GUIの結果JSONは実アプリ／プラグイン版と実チャンク数を記録します。
 
-失敗時も結果JSONをActions artifactに保存し、保持期間は14日です。GUIの失敗スクリーンショットも対象ですが、一時Vault／profile／資格情報は対象外です。既存v4 ActionsのNode 20非推奨警告（runnerはNode 24で実行）と、Ubuntu 22.04の2027年4月退役予定があるため、後継runnerは標準sandboxで実測して移行してください。CodeRabbitはdraftのためレビューをskipします。release専用Publish workflowはPRで実行しません。
+失敗時も結果JSONをActions artifactに保存し、保持期間は14日です。GUIの失敗スクリーンショットも対象ですが、一時Vault／profile／資格情報は対象外です。既存v4 ActionsのNode 20非推奨警告（runnerはNode 24で実行）と、Ubuntu 22.04の2027年4月退役予定があるため、後継runnerは標準sandboxで実測して移行してください。release専用Publish workflowはPRで実行しません。
 
 ## 検証外
 

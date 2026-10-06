@@ -36,6 +36,6 @@ LiveSyncのリビジョン、本文・バイナリチャンクを保存し、元
 
 ## 状態と制約
 
-[draft PR #1](https://github.com/hayatosc/livesync-workers/pull/1)で開発中です。実Obsidian＋公式プラグイン7ケース、公式CLI7ケース、Node／公式Workersテスト188件が成功しています。詳細・対象commitは[検証記録](docs/testing.md)を参照してください。
+[PR #1](https://github.com/hayatosc/livesync-workers/pull/1)で開発中です。実Obsidian＋公式プラグイン7ケース、公式CLI7ケース、Node／公式Workersテスト207件が成功しています。詳細・対象commitは[検証記録](docs/testing.md)を参照してください。
 
 実Cloudflare本番deploy・実Vault移行は未実施です。1Vaultの管理メタデータはSQLite DOに収まる必要があり、WorkersのCPU・メモリ・リクエスト制約も残ります。大Vaultの検索費用・速度と巨大履歴の復元は未ベンチマークです。既存SQLiteからの移行は自動ではありません。

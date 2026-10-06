@@ -13,7 +13,11 @@ const exec = promisify(execFile);
 const evidence = resolve('.local/e2e/cli-evidence');
 await mkdir(evidence, { recursive: true });
 const lockPath = join(evidence, 'running.lock');
-const lock = await open(lockPath, 'wx');
+const lock = await open(lockPath, 'wx').catch(error => {
+  if (error.code === 'EEXIST') throw new Error(`E2E lock exists: ${lockPath}. Check for an active equivalent run; remove this file only after confirming the previous run stopped.`);
+  throw error;
+});
+await lock.writeFile(String(process.pid));
 const result = { status: 'running', actualObsidian: false, realOfficialLiveSyncCli: true, overallObsidianE2EComplete: false, unfinishedAcceptance: ['Actual Obsidian 1.13.7 with official LiveSync plugin E2E remains blocked by standard sandbox requirements'], cases: [], commands: [], startedAt: new Date().toISOString() };
 let backend, directory, cli;
 const redacted = text => backend ? String(text).replaceAll(backend.password, '[redacted]').replaceAll(backend.secret, '[redacted]') : String(text);

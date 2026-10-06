@@ -35,6 +35,7 @@ export type VaultNoteStat = {
 };
 
 export type VaultIndexStatus = {
+  capacity?: { databaseSize: number; usedBytes: number; limitBytes: number; headroomBytes: number; writable: boolean };
   indexedSeq: number;
   currentSeq: number;
   indexed: number;

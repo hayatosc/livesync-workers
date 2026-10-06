@@ -537,6 +537,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   private maintenance = Promise.resolve();
   private writes = Promise.resolve();
   private statements: JournalStatement[] | null = null;
+  private checkpointRequested = false;
   private resolvedVaultRef: VaultRef | null = null;
   private journalHead: string | null | undefined;
 
@@ -597,23 +598,79 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     if (this.journalHead === undefined && !head && this.dbExists()) {
       throw new Error("Legacy vault requires explicit R2 migration before writes");
     }
-    const commits = await journal.history(head);
+    const applied = force ? null : this.getMeta("r2_applied_head");
     this.statements = null;
-    this.ctx.storage.transactionSync(() => {
-      for (const table of ["docs", "revs", "rev_metadata", "local_docs", "changes", "rev_body_chunks", "meta", "index_state"]) {
-        this.sqlExec(`DELETE FROM ${table}`);
-      }
-      for (const commit of commits) {
-        for (const statement of commit.statements) this.sqlExec(statement.sql, ...statement.args);
-      }
-    });
+    const clear = () => {
+      for (const table of ["docs", "revs", "rev_metadata", "local_docs", "changes", "rev_body_chunks", "meta", "index_state"]) this.sqlExec(`DELETE FROM ${table}`);
+    };
+    let fullReset = !applied;
+    if (!applied) this.ctx.storage.transactionSync(clear);
+    for await (const batch of journal.replay(head, applied)) {
+      this.ctx.storage.transactionSync(() => {
+        if (batch.reset) { clear(); fullReset = true; }
+        for (const statement of batch.statements) this.sqlExec(statement.sql, ...statement.args);
+        if (batch.commit) this.setMeta("r2_applied_head", batch.commit);
+      });
+    }
     this.journalHead = head;
     if (head) this.setMeta("r2_applied_head", head);
     // Search is derived and is rebuilt from recovered content.
-    if (this.dbExists()) {
+    if (fullReset && this.dbExists()) {
       this.requestFullTextRebuild();
       this.setMeta(INDEX_VERSION_META_KEY, "");
     }
+  }
+
+  private async *snapshotPages(): AsyncGenerator<JournalStatement[]> {
+    for (const table of ["meta", "revs", "rev_metadata", "docs", "local_docs", "changes", "index_state"]) {
+      let cursor = 0;
+      while (true) {
+        const rows = this.rows<Record<string, string | number | null>>(`SELECT rowid AS snapshot_rowid, * FROM ${table} WHERE rowid > ? ORDER BY rowid LIMIT 128`, cursor);
+        if (!rows.length) break;
+        const statements: JournalStatement[] = [];
+        for (const source of rows) {
+          cursor = Number(source.snapshot_rowid);
+          const { snapshot_rowid: _, ...row } = source;
+          if (table === "meta" && row.key === "r2_applied_head") continue;
+          const columns = Object.keys(row);
+          statements.push({ sql: `INSERT INTO ${table} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`, args: Object.values(row) });
+        }
+        if (statements.length) yield statements;
+      }
+    }
+  }
+
+  private async archiveRows(id: string, records: RevRow[]): Promise<void> {
+    const journal = this.journal()!;
+    const previous = this.getMeta(`archive:${id}`);
+    const r2 = await journal.putBody(JSON.stringify({ records, previous: previous ? JSON.parse(previous) : null }));
+    this.setMeta(`archive:${id}`, JSON.stringify({ r2 }));
+  }
+
+  private async archivedRevRow(id: string, rev: string): Promise<RevRow | null> {
+    const journal = this.journal();
+    let pointer = this.getMeta(`archive:${id}`);
+    if (!journal) return null;
+    const seen = new Set<string>();
+    while (pointer) {
+      const key = JSON.parse(pointer).r2 as string;
+      if (seen.has(key)) throw new Error("Revision archive cycle");
+      seen.add(key);
+      const page = JSON.parse(await journal.body(key)) as { records: RevRow[]; previous: { r2: string } | null };
+      const row = page.records.find(row => row.rev === rev);
+      if (row) return row;
+      pointer = page.previous ? JSON.stringify(page.previous) : null;
+    }
+    return null;
+  }
+
+  private capacity() {
+    const sql = this.ctx.storage.sql;
+    const bytes = sql.databaseSize ?? 0;
+    const usedBytes = bytes;
+    const limitBytes = this.bindings().sqliteMaxBytes ?? 900_000_000;
+    const headroomBytes = this.bindings().sqliteHeadroomBytes ?? 100_000_000;
+    return { databaseSize: bytes, usedBytes, limitBytes, headroomBytes, writable: usedBytes < limitBytes - headroomBytes };
   }
 
   private async migrateLegacy(request: Request): Promise<Response> {
@@ -658,12 +715,26 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     }
     await this.restoreJournal();
     if (journal) this.statements = [];
+    this.checkpointRequested = false;
     try {
-      const response = await this.route(request);
+      const path = new URL(request.url).pathname;
+      let growth = ["PUT", "DELETE"].includes(request.method) || (request.method === "POST" && path === "/_bulk_docs");
+      if (request.method === "POST" && path === "/internal/op") {
+        const body = await request.clone().json() as { op?: string };
+        growth = ["writeNote", "writeAttachment"].includes(body.op ?? "");
+      }
+      let blocked = false;
+      if (journal && growth && !this.capacity().writable) {
+        await this.handleCompact();
+        blocked = !this.capacity().writable;
+      }
+      const response = blocked ? json({ error: "SQLITE_CAPACITY", capacity: this.capacity() }, { status: 507 }) : await this.route(request);
+      if (journal && !blocked && growth && this.currentSeq() - Number(this.getMeta("checkpoint_seq") ?? 0) >= 4096) await this.handleCompact();
       const statements = this.statements;
       this.statements = null;
-      if (journal && statements?.length) {
-        this.journalHead = await journal.commit(statements, this.journalHead);
+      if (journal && (statements?.length || this.checkpointRequested)) {
+        const checkpoint = this.checkpointRequested ? await journal.snapshot(this.snapshotPages()) : undefined;
+        this.journalHead = await journal.commit(checkpoint ? [] : statements ?? [], this.journalHead, checkpoint);
         this.setMeta("r2_applied_head", this.journalHead);
         this.notifyWatchers();
       }
@@ -1165,8 +1236,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         await this.scheduleIndexing(0);
         return json({ ok: true });
       case "ftsRebuild":
-        if (this.vaultRef()) await this.bindings().fullText?.beginRebuild?.(this.vaultRef()!);
-        this.requestFullTextRebuild();
+        if (!this.vaultRef() || await this.bindings().fullText?.beginRebuild?.(this.vaultRef()!) !== false) this.requestFullTextRebuild();
         await this.scheduleIndexing(0);
         return json({ ok: true });
       case "indexStatus":
@@ -1183,6 +1253,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
                 },
               }
             : {}),
+          capacity: this.capacity(),
           indexedSeq: this.indexedSeq(),
           currentSeq: this.currentSeq(),
           indexed: this.first<{ count: number }>(
@@ -1209,9 +1280,10 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const expectedBaseHash =
       typeof body.expectedBaseHash === "string" ? body.expectedBaseHash : "";
     const binary = body.op === "writeAttachment";
-    if ((!binary && !path.endsWith(".md")) || !isSafeVaultPath(path) || content == null || (this.journal() != null && !expectedBaseHash)) {
+    if ((!binary && !path.endsWith(".md")) || !isSafeVaultPath(path) || content == null) {
       return json({ error: "Invalid Markdown note path" }, { status: 400 });
     }
+    if (this.journal() && !expectedBaseHash) return json({ error: "EXPECTED_HASH_REQUIRED" }, { status: 400 });
     let byteSize = content ? enc.encode(content).byteLength : 0;
     if (binary && content != null) {
       if (content.length > 14_000_000 || (content.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(content) || /=/.test(content.slice(0, -2)) || !/^(?:[A-Za-z0-9+/]{2}|[A-Za-z0-9+/]=|==)$/.test(content.slice(-2)) && content.length !== 0)) return json({ error: "INVALID_BASE64" }, { status: 400 });
@@ -2276,7 +2348,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   }
 
   private currentSeq(): number {
-    return this.first<{ seq: number }>(`SELECT COALESCE(MAX(seq), 0) AS seq FROM changes`)?.seq ?? 0;
+    return Math.max(Number(this.getMeta("monotonic_seq") ?? 0), this.first<{ seq: number }>(`SELECT COALESCE(MAX(seq), 0) AS seq FROM changes`)?.seq ?? 0);
   }
 
   private nextSeq(): number {
@@ -2363,14 +2435,30 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       const key = (JSON.parse(row.body) as { r2: string }).r2;
       const journal = this.journal();
       if (!journal) throw new Error("Missing content bucket binding");
-      return { ...row, body: await journal.body(key), body_chunked: 0 };
+      const history = row.rev_history ? JSON.parse(row.rev_history) as { r2?: string } : null;
+      return { ...row, body: await journal.body(key), body_chunked: 0, rev_history: history?.r2 ? await journal.body(history.r2) : row.rev_history };
     }
     return row.body_chunked ? { ...row, body: this.revisionBody(row), body_chunked: 0 } : row;
   }
 
   private async descendantLeafRevs(id: string, rev: string): Promise<RevRow[]> {
     const start = this.rawRevRow(id, rev);
-    if (!start) return [];
+    if (!start) {
+      if (!(await this.archivedRevRow(id, rev))) return [];
+      const leaves = await this.leafRevs(id);
+      const result: RevRow[] = [];
+      for (const leaf of leaves) {
+        let ancestor: RevRow | null = leaf;
+        const seen = new Set<string>();
+        while (ancestor) {
+          if (ancestor.rev === rev) { result.push(leaf); break; }
+          if (seen.has(ancestor.rev)) throw new Error("Revision ancestry cycle");
+          seen.add(ancestor.rev);
+          ancestor = ancestor.parent_rev ? this.rawRevRow(id, ancestor.parent_rev) ?? await this.archivedRevRow(id, ancestor.parent_rev) : null;
+        }
+      }
+      return result;
+    }
     const leaves: RevRow[] = [];
     const pending = [start];
     while (pending.length > 0) {
@@ -2430,7 +2518,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   }
 
   private async revRow(id: string, rev: string): Promise<RevRow | null> {
-    const row = this.rawRevRow(id, rev);
+    const row = this.rawRevRow(id, rev) ?? await this.archivedRevRow(id, rev);
     return row?.body_available ? (await this.hydrateRevision(row)) : null;
   }
 
@@ -2491,6 +2579,16 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   }): Promise<void> {
     const journal = this.journal();
     const key = journal ? await journal.putBody(row.body) : null;
+    const historyKey = journal ? await journal.putBody(row.revHistory) : null;
+    // Stop hot ancestry at the archived tree; the full lineage stays in R2.
+    if (journal && row.ancestors) {
+      const hot: string[] = [];
+      for (const rev of row.ancestors) {
+        if (await this.archivedRevRow(row.id, rev)) break;
+        hot.push(rev);
+      }
+      row.ancestors = hot;
+    }
     const chunks = key ? null : splitRevisionBody(row.body);
     this.ctx.storage.transactionSync(() => {
       if (row.ancestors) this.linkAncestors(row.id, row.ancestors, row.seq);
@@ -2511,7 +2609,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         key ? 2 : chunks ? 1 : 0,
         row.deleted,
         row.seq,
-        row.revHistory,
+        historyKey ? JSON.stringify({ r2: historyKey }) : row.revHistory,
       );
       if (chunks) {
         for (const [chunkIndex, chunk] of chunks.entries()) {
@@ -2545,6 +2643,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         row.rev,
         row.deleted,
       );
+      this.setMeta("monotonic_seq", String(row.seq));
       this.recalculateWinner(row.id);
     });
     if (!this.journal()) this.notifyWatchers();
@@ -2605,7 +2704,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         metadata: revisionMetadata(stored),
         deleted,
         seq,
-        revHistory: revisionHistory(stored, rev, parent?.rev_history),
+        revHistory: revisionHistory(stored, rev, parent ? (await this.hydrateRevision(parent)).rev_history : null),
       });
       return { ok: true, id, rev };
     }
@@ -2613,13 +2712,45 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     if (typeof doc._rev !== "string" || !parseRev(doc._rev)) {
       return { ok: false, id, error: "bad_request", reason: "Invalid rev format." };
     }
-    const existing = this.rawRevRow(id, doc._rev);
+    const hotExisting = this.rawRevRow(id, doc._rev);
+    const existing = hotExisting ?? await this.archivedRevRow(id, doc._rev);
     if (existing?.body_available) return { ok: true, id, rev: doc._rev };
 
     const parsed = parseRev(doc._rev)!;
     const seq = this.nextSeq();
     const deleted = doc._deleted === true ? 1 : 0;
     const ancestors = ancestorsFromRevisions(doc);
+    if (existing && !hotExisting && this.journal()) {
+      // A late body may also extend incomplete ancestry. These old ancestors
+      // belong in the archive, and newly connected hot ancestors cease to be leaves.
+      for (let offset = 0; offset < ancestors.length; offset += 128) {
+        const records: RevRow[] = [];
+        const hotRows: RevRow[] = [];
+        for (let i = offset; i < Math.min(offset + 128, ancestors.length); i++) {
+          const rev = ancestors[i]!;
+          const hot = this.rawRevRow(id, rev);
+          const known = hot ?? await this.archivedRevRow(id, rev);
+          records.push(known ? { ...known, parent_rev: known.parent_rev ?? ancestors[i + 1] ?? null } : {
+            id, rev, gen: parseRev(rev)!.gen, parent_rev: ancestors[i + 1] ?? null,
+            body: "{}", body_chunked: 0, body_available: 0, deleted: 0, seq, rev_history: null,
+          });
+          if (hot) hotRows.push(hot);
+        }
+        await this.archiveRows(id, records);
+        for (const hot of hotRows) {
+          this.sqlExec("DELETE FROM rev_metadata WHERE id = ? AND rev = ?", id, hot.rev);
+          this.sqlExec("DELETE FROM revs WHERE id = ? AND rev = ?", id, hot.rev);
+        }
+      }
+      const body = JSON.stringify({ ...withoutMeta(doc), _id: id, _rev: doc._rev });
+      const r2 = await this.journal()!.putBody(body);
+      const history = await this.journal()!.putBody(revisionHistory(doc, doc._rev));
+      await this.archiveRows(id, [{ ...existing, parent_rev: existing.parent_rev ?? ancestors[0] ?? null, body: JSON.stringify({ r2 }), body_chunked: 2, body_available: 1, deleted, rev_history: JSON.stringify({ r2: history }) }]);
+      this.sqlExec("INSERT INTO changes (seq,id,rev,deleted) VALUES (?,?,?,?)", seq, id, doc._rev, deleted);
+      this.setMeta("monotonic_seq", String(seq));
+      this.recalculateWinner(id);
+      return { ok: true, id, rev: doc._rev };
+    }
     const stored: DocBody = { ...withoutMeta(doc), _id: id, _rev: doc._rev };
     await this.writeRevision({
       id,
@@ -2789,9 +2920,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const result: Record<string, { missing: string[] }> = {};
     for (const [id, revs] of Object.entries(body)) {
       if (!Array.isArray(revs)) continue;
-      const missingRevs = revs.filter(
-        (rev): rev is string => typeof rev === "string" && !this.rawRevRow(id, rev),
-      );
+      const missingRevs: string[] = [];
+      for (const rev of revs) if (typeof rev === "string" && !this.rawRevRow(id, rev) && !(await this.archivedRevRow(id, rev))) missingRevs.push(rev);
       if (missingRevs.length > 0) result[id] = { missing: missingRevs };
     }
     return json(result);
@@ -2912,8 +3042,45 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     return json({ docs, warning: "no matching index found, create an index to optimize query time" });
   }
 
-  private handleCompact(): Response {
-    if (this.journal()) return json({ ok: true }, { status: 202 });
+  private async handleCompact(): Promise<Response> {
+    if (this.journal()) {
+      const captured = this.statements;
+      this.statements = null; // The paged checkpoint replaces a potentially huge SQL mutation list.
+      try {
+        const missing = this.requireDb();
+        if (missing) return missing;
+        this.setMeta("monotonic_seq", String(this.currentSeq()));
+        this.setMeta("checkpoint_seq", String(this.currentSeq()));
+        // Normalize legacy histories before paging records; older commits remain valid and readable.
+        while (true) {
+          const rows = this.rows<RevRow>(`SELECT id, rev, rev_history FROM revs WHERE rev_history IS NOT NULL AND rev_history NOT LIKE '{"r2":%' LIMIT 1`);
+          if (!rows.length) break;
+          for (const row of rows) {
+            const r2 = await this.journal()!.putBody(row.rev_history!);
+            this.sqlExec("UPDATE revs SET rev_history = ? WHERE id = ? AND rev = ?", JSON.stringify({ r2 }), row.id, row.rev);
+          }
+        }
+        // Parents have lower generations. Delete them first so removing a child
+        // cannot turn a still-present old ancestor into a false leaf.
+        // Archive in bounded pages. Parent links and historical bodies remain retrievable.
+        while (true) {
+          const rows = this.rows<RevRow>(`SELECT r.* FROM revs r WHERE EXISTS (SELECT 1 FROM revs child WHERE child.id = r.id AND child.parent_rev = r.rev) ORDER BY r.gen, r.id, r.rev LIMIT 128`);
+          if (!rows.length) break;
+          const groups = new Map<string, RevRow[]>();
+          for (const row of rows) (groups.get(row.id) ?? (groups.set(row.id, []), groups.get(row.id)!)).push(row);
+          for (const [id, records] of groups) await this.archiveRows(id, records);
+          for (const row of rows) {
+            this.sqlExec(`DELETE FROM rev_metadata WHERE id = ? AND rev = ?`, row.id, row.rev);
+            this.sqlExec(`DELETE FROM revs WHERE id = ? AND rev = ?`, row.id, row.rev);
+          }
+        }
+        // Indexing reads the current winner for each changed ID, so coalescing also
+        // preserves unprocessed work without retaining every intermediate update.
+        this.sqlExec(`DELETE FROM changes WHERE seq NOT IN (SELECT MAX(seq) FROM changes GROUP BY id)`);
+        this.checkpointRequested = true;
+        return json({ ok: true, capacity: this.capacity(), checkpoint: true }, { status: 202 });
+      } finally { this.statements = captured; }
+    }
     const missing = this.requireDb();
     if (missing) return missing;
     const sql = { exec: this.sqlExec.bind(this) };

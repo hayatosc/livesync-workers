@@ -29,6 +29,7 @@ npm run deploy
 | `FTS_BUCKET` | 検索用R2。必須。正本と分離 |
 | `VAULT_DB`／`MCP_OBJECT` | `VaultDO`／`VaultMCP`のSQLite DO |
 | `OAUTH_KV` | OAuth情報 |
+| `SQLITE_MAX_BYTES`／`SQLITE_HEADROOM_BYTES` | DO容量の書込停止設定。既定900MB／100MB、[運用説明](r2-operations.md)参照 |
 | `LIVESYNC_PASSWORD` | 既定VaultのBasic認証パスワード |
 | `ADMIN_PASSWORD` | 管理者ログイン・OAuth承認用 |
 | `SESSION_SECRET` | 管理セッション署名・DO内部API用。32文字以上のランダム値を推奨 |

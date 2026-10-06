@@ -53,3 +53,16 @@ it("uses real MCP tool transport, per-call authorization, attachments and optimi
     expect((await vault.writeNote("日本語.md", "changed", await hashText("stale"))).ok).toBe(false);
   } finally { await client.close(); await server.close(); }
 });
+
+it("rejects explicit vault selection when a legacy resolver ignores its argument", async () => {
+  const ref = { tenantId: "legacy-mcp", vaultId: "default", databaseName: "display" };
+  const vault = createVault({ vaultDb: bindings.VAULT_DB, contentBucket: bindings.CONTENT }, { ref, policy: DEFAULT_VAULT_POLICY, internalSecret: "integration-secret" });
+  const server = new McpServer({ name: "legacy", version: "1" });
+  registerVaultTools(server, { vault: async () => vault, hasScope: () => true });
+  const client = new Client({ name: "legacy-client", version: "1" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await server.connect(b); await client.connect(a);
+  try {
+    for (const name of ["listFiles", "vaultStatus"]) expect((await client.callTool({ name, arguments: { vaultId: "other" } })).isError).toBe(true);
+  } finally { await client.close(); await server.close(); }
+});

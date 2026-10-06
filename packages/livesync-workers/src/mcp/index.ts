@@ -92,6 +92,7 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
     if (scope !== "vault:read") requireScope(scope);
     const vault = await ctx.vault(vaultId, scope);
     if (!vault) throw new Error(`${label} vault is not connected`);
+    if (vaultId && (vault.ref.vaultId ?? vault.ref.databaseName) !== vaultId) throw new Error("Vault selection mismatch");
     return vault;
   };
 
@@ -376,6 +377,7 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
     async ({ vaultId }) => {
       requireScope("vault:read");
       const vault = await ctx.vault(vaultId);
+      if (vaultId && vault && (vault.ref.vaultId ?? vault.ref.databaseName) !== vaultId) throw new Error("Vault selection mismatch");
       if (!vault || !(await vault.exists())) {
         return textResult({ connected: false, index: null });
       }

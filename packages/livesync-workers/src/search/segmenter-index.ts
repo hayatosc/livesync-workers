@@ -127,9 +127,10 @@ export class SegmenterFullTextIndex implements FullTextIndex {
   }
   async beginRebuild(ref: VaultRef) {
     const state = await this.state(ref);
-    if (state.building) return; // retrying a DO recovery resumes the existing generation
+    if (state.building) return false; // resume without resetting completed notes
     state.building = crypto.randomUUID();
     await this.bucket.put(`${this.prefix(ref)}state.json`, JSON.stringify(state));
+    return true;
   }
   async completeRebuild(ref: VaultRef) {
     const state = await this.state(ref);

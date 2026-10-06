@@ -13,6 +13,8 @@ export interface Env {
   AI: Ai;
 
   // Variables (wrangler.jsonc `vars`, or added in the dashboard).
+  SQLITE_MAX_BYTES?: string;
+  SQLITE_HEADROOM_BYTES?: string;
   LIVESYNC_DATABASE?: string;
   LIVESYNC_USERNAME?: string;
   VAULT_EXCLUDED_FOLDERS?: string;

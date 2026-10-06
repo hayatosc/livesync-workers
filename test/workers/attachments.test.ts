@@ -49,3 +49,11 @@ it("enforces decoded attachment limits on documents received through LiveSync", 
   expect((await stub.fetch("https://db/_bulk_docs", { method: "POST", body: JSON.stringify({ docs, new_edits: false }) })).status).toBe(200);
   expect((await stub.fetch("https://db/internal/op", { method: "POST", headers: { "X-LiveSync-Internal": "integration-secret" }, body: JSON.stringify({ op: "readAttachment", path: "large.pdf" }) })).status).toBe(413);
 });
+
+it("reports the required optimistic lock separately from an invalid Markdown path", async () => {
+  const stub = bindings.VAULT_DB.get(bindings.VAULT_DB.idFromName("missing-note-hash:vault"));
+  await stub.fetch("https://db/", { method: "PUT" });
+  const response = await stub.fetch("https://db/internal/op", { method: "POST", headers: { "X-LiveSync-Internal": "integration-secret" }, body: JSON.stringify({ op: "writeNote", path: "Valid.md", content: "valid" }) });
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({ error: "EXPECTED_HASH_REQUIRED" });
+});
