@@ -113,4 +113,3 @@ export async function searchWordIndex(notes: AsyncIterable<IndexedNote>, query: 
   hits.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
   return { hits: hits.slice(0, limit), docCount, builtAt };
 }
-
