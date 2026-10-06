@@ -88,3 +88,5 @@ MCPには操作IDによるexactly-once保証はありません。応答を失っ
 MCP書込はVault相対パスを検査し、先頭`/`、`.`／`..`、空セグメント、バックスラッシュ、制御文字を拒否します。ライブラリのreservedPathsも適用します。現WorkerのreservedPathsは空です。添付10 MiBはMCPの上限であり、LiveSync同期の一般ファイル上限ではありません。LiveSync側にもWorkersの実行・リクエスト制約が残ります。
 
 `searchNotes`は任意のベクトル検索用です。既定では無効で`grepNotes`を案内します。`SEMANTIC_SEARCH=on`にする場合のみ`AI`と`VECTORIZE`を追加し、現在のembeddinggemma-300mに合う768次元・cosineの索引を設定します。全文検索だけなら不要です。
+
+同期のHTTP本文・文書JSON・バルク件数には[明示上限](request-limits.md)があります。設定APIの値を確認し、413時はバッチ／チャンク設定を調整してください。

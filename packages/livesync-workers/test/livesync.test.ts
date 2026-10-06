@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
-import { handleLiveSyncRequest, splitRevisionBody } from "../src/index.js";
+import { handleLiveSyncRequest, splitRevisionBody, REQUEST_LIMITS } from "../src/index.js";
 import { TestVaultDO, testBindings, testEnv, testHost } from "./helpers.js";
 
 type SqliteRow = Record<string, string | number | null>;
@@ -162,7 +162,7 @@ describe("LiveSync worker routing", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
       chttpd: { require_valid_user: "true" },
-      couchdb: { max_document_size: "50000000" },
+      couchdb: { max_document_size: String(REQUEST_LIMITS.maxDocumentBytes) },
       cors: {
         credentials: "true",
         origins:

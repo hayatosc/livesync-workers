@@ -1,3 +1,4 @@
+import { REQUEST_LIMITS, RequestLimitError, readBoundedJson, assertDocumentSize, assertBulkLimits } from "../livesync/limits.js";
 import { R2Journal, contentPrefix, type JournalStatement } from "../storage/r2-journal.js";
 import { hashText } from "../search/chunk-md.js";
 import { removeNoteVectors, upsertNoteVectors } from "../search/vector-index.js";
@@ -234,8 +235,7 @@ function isIndexableMarkdownPath(path: string, policy: VaultPolicy): boolean {
 
 
 async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
-  if (!request.body) return {};
-  return (await request.json().catch(() => ({}))) as Record<string, unknown>;
+  return readBoundedJson(request);
 }
 
 function isSafeVaultPath(path: string): boolean {
@@ -863,8 +863,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       const path = new URL(request.url).pathname;
       let growth = ["PUT", "DELETE"].includes(request.method) || (request.method === "POST" && path === "/_bulk_docs");
       if (request.method === "POST" && path === "/internal/op") {
-        const body = await request.clone().json() as { op?: string };
-        growth = ["writeNote", "writeAttachment"].includes(body.op ?? "");
+        const body = await readJsonBody(request);
+        growth = ["writeNote", "writeAttachment"].includes(typeof body.op === "string" ? body.op : "");
       }
       let blocked = false;
       if (journal && growth && !this.capacity().writable) {
@@ -1151,8 +1151,12 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     // `return await`: a handler's rejected promise must reach this catch,
     // which a bare `return handler()` inside try would skip.
     try {
+      // Read and validate before entering the mutation/commit path, including direct internal calls.
+      const body = await readJsonBody(request);
+      if (["/_bulk_docs", "/_bulk_get"].includes(new URL(request.url).pathname) && request.method === "POST") assertBulkLimits(body);
       return await this.exclusive(() => this.persistentRequest(request));
     } catch (error) {
+      if (error instanceof RequestLimitError) return couchError(413, "request_entity_too_large", error.message);
       console.warn("LiveSync DB request failed", error);
       return couchError(500, "internal_server_error", "Internal server error");
     }
@@ -1378,10 +1382,10 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         if (doc.type !== "newnote") return json({ error: "NOT_BINARY" }, { status: 400 });
         const base64 = await this.fileContentForRow(row);
         if (base64 == null) return json({ error: "NOT_SYNCED" }, { status: 409 });
-        if (base64.length > 14_000_000) return json({ error: "TOO_LARGE" }, { status: 413 });
+        if (base64.length > Math.ceil(REQUEST_LIMITS.maxAttachmentBytes / 3) * 4) return json({ error: "TOO_LARGE" }, { status: 413 });
         let size: number;
         try { size = atob(base64).length; } catch { return json({ error: "INVALID_BASE64" }, { status: 400 }); }
-        if (size > 10 * 1024 * 1024) return json({ error: "TOO_LARGE" }, { status: 413 });
+        if (size > REQUEST_LIMITS.maxAttachmentBytes) return json({ error: "TOO_LARGE" }, { status: 413 });
         return json({ path, base64, contentHash: await hashText(base64), contentType: doc.contentType ?? "application/octet-stream", size });
       }
       case "listFiles":
@@ -1446,9 +1450,10 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     if (this.journal() && !expectedBaseHash) return json({ error: "EXPECTED_HASH_REQUIRED" }, { status: 400 });
     let byteSize = content ? enc.encode(content).byteLength : 0;
     if (binary && content != null) {
-      if (content.length > 14_000_000 || (content.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(content) || /=/.test(content.slice(0, -2)) || !/^(?:[A-Za-z0-9+/]{2}|[A-Za-z0-9+/]=|==)$/.test(content.slice(-2)) && content.length !== 0)) return json({ error: "INVALID_BASE64" }, { status: 400 });
+      if (content.length > Math.ceil(REQUEST_LIMITS.maxAttachmentBytes / 3) * 4) return json({ error: "TOO_LARGE" }, { status: 413 });
+      if ((content.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(content) || /=/.test(content.slice(0, -2)) || !/^(?:[A-Za-z0-9+/]{2}|[A-Za-z0-9+/]=|==)$/.test(content.slice(-2)) && content.length !== 0)) return json({ error: "INVALID_BASE64" }, { status: 400 });
       byteSize = atob(content).length;
-      if (byteSize > 10 * 1024 * 1024) return json({ error: "TOO_LARGE" }, { status: 413 });
+      if (byteSize > REQUEST_LIMITS.maxAttachmentBytes) return json({ error: "TOO_LARGE" }, { status: 413 });
     }
     if (!this.dbExists()) {
       return json({ error: "LiveSync database does not exist" }, { status: 409 });
@@ -2837,6 +2842,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     error?: string;
     reason?: string;
   }> {
+    assertDocumentSize(doc);
     const id = docIdFromBody(doc);
     if (!id) return { ok: false, id: "", error: "bad_request", reason: "Document id is required." };
 
@@ -3022,6 +3028,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
 
     if (request.method === "PUT") {
       const body = await readJsonBody(request);
+      assertDocumentSize(body);
       const existing = this.first<LocalDocRow>(`SELECT * FROM local_docs WHERE id = ?`, id);
       const expectedRev = typeof body._rev === "string" ? body._rev : url.searchParams.get("rev");
       if (existing && existing.rev !== expectedRev) {

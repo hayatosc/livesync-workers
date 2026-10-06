@@ -1,3 +1,4 @@
+import { REQUEST_LIMITS } from "../livesync/limits.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { inferDailyNotePath, listVaultDirectory } from "../vault/paths.js";
@@ -404,7 +405,7 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
     return textResult(await vault.readAttachment(path) ?? { error: "NOT_FOUND", path });
   });
   server.tool("uploadAttachment", "Create or replace a binary attachment without changing its vault path. Requires vault:write and the previous contentHash when overwriting. Maximum 10 MiB decoded.", {
-    vaultId: z.string().optional(), path: z.string().min(1), base64: z.string().max(14_000_000),
+    vaultId: z.string().optional(), path: z.string().min(1), base64: z.string().max(Math.ceil(REQUEST_LIMITS.maxAttachmentBytes / 3) * 4),
     contentType: z.string().max(200).optional(), expectedContentHash: z.string().optional(),
   }, async ({ vaultId, path, base64, contentType, expectedContentHash }) => {
     const vault = await readyVault("vault:write", vaultId);

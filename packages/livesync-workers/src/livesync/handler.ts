@@ -1,3 +1,4 @@
+import { REQUEST_LIMITS, RequestLimitError, readBoundedText } from "./limits.js";
 import {
   CHANGES_IDLE_HEADER,
   DB_NAME_HEADER,
@@ -117,8 +118,9 @@ async function checkBasicAuth(request: Request, host: VaultHost): Promise<AuthRe
 function configValue(section: string, key: string): string {
   const values: Record<string, string> = {
     "chttpd/require_valid_user": "true",
-    "chttpd/max_http_request_size": "4294967296",
-    "couchdb/max_document_size": "50000000",
+    "chttpd/max_http_request_size": String(REQUEST_LIMITS.maxRequestBytes),
+    "couchdb/max_document_size": String(REQUEST_LIMITS.maxDocumentBytes),
+    "livesync/max_bulk_docs": String(REQUEST_LIMITS.maxBulkDocuments),
     "chttpd_auth/require_valid_user": "true",
     "couchdb/single_node": "true",
   };
@@ -128,10 +130,11 @@ function configValue(section: string, key: string): string {
 function configObject(host: VaultHost, request: Request) {
   return {
     admins: {},
+    livesync: { max_bulk_docs: String(REQUEST_LIMITS.maxBulkDocuments) },
     chttpd: {
       require_valid_user: "true",
       enable_cors: "true",
-      max_http_request_size: "4294967296",
+      max_http_request_size: String(REQUEST_LIMITS.maxRequestBytes),
     },
     chttpd_auth: {
       require_valid_user: "true",
@@ -149,7 +152,7 @@ function configObject(host: VaultHost, request: Request) {
     },
     couchdb: {
       single_node: "true",
-      max_document_size: "50000000",
+      max_document_size: String(REQUEST_LIMITS.maxDocumentBytes),
     },
   };
 }
@@ -261,7 +264,7 @@ async function proxyChanges(
   stub: DurableObjectStub,
   internalSecret: string,
 ): Promise<Response> {
-  const bodyText = request.method === "POST" ? await request.text() : null;
+  const bodyText = request.method === "POST" ? await readBoundedText(request) : null;
   let body: Record<string, unknown> = {};
   if (bodyText) {
     try {
@@ -406,6 +409,7 @@ export async function handleLiveSyncRequest(
     // An escaping exception becomes the platform's error page without CORS
     // headers, which the plugin reports as a CORS problem. Answer with a
     // CouchDB-style 500 the client can show and retry instead.
+    if (error instanceof RequestLimitError) return withCors(request, options.host, couchError(413, "request_entity_too_large", error.message));
     console.warn("LiveSync request failed", error);
     return withCors(
       request,
