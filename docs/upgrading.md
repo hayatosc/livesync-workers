@@ -6,7 +6,7 @@ upstream の変更とこのフォークの差分を確認し、検証した comm
 
 ## 更新の前に
 
-1. 現在の Worker の commit と、`wrangler.jsonc` の資源名、ID、変数、DO の migration 履歴を記録する。
+1. 現在の Worker の commit と、`cloudflare.config.ts` の資源名、ID、変数、DO の export 宣言を記録する。旧 Wrangler 環境では `wrangler.jsonc` の migration 履歴も記録する。
 2. コンテンツの正本、旧 DO、旧索引を保全し、[保存、復元、移行](r2-operations.md)で復元と切り戻しの条件を確認する。
 3. 更新候補で、`pnpm install --frozen-lockfile`、build、型検査、全テスト、[CLI と GUI の E2E](testing.md) を実行する。
 4. binding、secret、migration、解析器の版に変更がないかを確認する。既存の DO の migration は削除も並べ替えもしない。
@@ -14,6 +14,34 @@ upstream の変更とこのフォークの差分を確認し、検証した comm
 SQLite 方式から R2 方式への切り替えは、通常の Worker の更新とは別の、明示的な移行です。
 新しい ID を設定しただけでは、旧データはコピーされません。
 R2 への参照を持つ DO を、旧 SQLite 方式の Worker で直接開くこともできません。
+
+## 初回 exports デプロイ前の切り戻し準備
+
+Wrangler の `migrations` から `worker.exports` に移行する最初のデプロイは、切り戻しの境界になります。
+そのライフサイクル変更より前にデプロイされたバージョンへは、Cloudflare の rollback 機能で戻せません。
+以降のデプロイで旧 `migrations` 配列に戻すこともできません。
+[Cloudflare の制約](https://developers.cloudflare.com/durable-objects/reference/durable-objects-migrations/#constraints-and-limitations)を確認し、初回デプロイの前に、既知の正常な R2 方式のコードに現在の `worker.exports` を組み合わせた切り戻しビルドを用意してください。
+
+```sh
+# この PR の直前の R2 方式の実装。別の commit を使う場合も保存形式の互換性を確認する
+pnpm run rollback:prepare 059f58d0525b61e3cda4ff545588ea7f0a5c1d13
+# 表示された .local/rollback-... ディレクトリへ移動する
+cd <表示されたディレクトリ>
+pnpm install --frozen-lockfile
+pnpm build
+pnpm exec cf deploy --dry-run
+```
+
+`scripts/prepare-rollback.mjs` は指定 commit の追跡済みファイルを新しいディレクトリに展開し、
+現在の cf 設定・依存ロック・ツール設定・AGENTS.md を重ねます。認証情報はコピーせず、デプロイもしません。
+`ROLLBACK_BUILD.json` に元の commit と、重ねたファイルの SHA-256 を記録します（現在の未コミット変更も含みます）。
+作成前に `cloudflare.config.ts` が対象環境の設定であることを確認してください。
+dry run で `VaultDO` と `VaultMCP` の SQLite exports、Worker 名、Vault ID、KV と R2 の binding が現在の稼働環境と一致することを確認します。
+動作と保存形式の互換性も検証してから、このビルドを保管してください。dry run は実際の rollback 成功やデータ互換性を保証しません。
+
+切り戻す場合は、そのディレクトリから `pnpm exec cf deploy` で既知のコードを新しいバージョンとして再デプロイします。
+旧バージョンを直接選ぶ rollback、旧 `wrangler.jsonc` の `migrations` による再デプロイ、DO namespace の削除・再作成は行いません。
+この手順が戻すのはアプリケーションコードであり、Vault のデータは現在の R2 正本を使います。
 
 ## 反映
 

@@ -1,22 +1,27 @@
 /** Immutable copy-on-write ordered pages. Only a manifest CAS makes a new root visible. */
+import { mapBatches, limitConcurrency } from "../storage/concurrency.js";
 export type TreeRef = { r2: string; first: string; last: string };
 export type Entry<T> = { key: string; value: T };
 type Node<T> = { entries: Entry<T>[] } | { children: TreeRef[] };
-const LEAF_ROWS = 64;
+// Keep ordinary postings in fewer pages without exceeding the byte/memory bound.
+export const POSTING_PAGE_ROWS = 256;
 const PAGE_BYTES = 512 * 1024;
 const FANOUT = 32;
 const encoder = new TextEncoder();
 export class PostingTree<T> {
   private cache = new Map<string, Node<T>>();
+  private io = limitConcurrency(4);
   constructor(private readonly bucket: R2Bucket, readonly prefix: string) {}
   private async load(ref: TreeRef): Promise<Node<T>> {
     if (!ref.r2.startsWith(this.prefix)) throw new Error("Cross-vault posting reference");
     const cached = this.cache.get(ref.r2); if (cached) return cached;
-    const object = await this.bucket.get(ref.r2);
-    if (!object) throw new Error("Missing shared posting page");
-    const node = await object.json<Node<T>>();
+    const { node, size } = await this.io(async () => {
+      const object = await this.bucket.get(ref.r2);
+      if (!object) throw new Error("Missing shared posting page");
+      return { node: await object.json<Node<T>>(), size: object.size };
+    });
     // Oversized single-note postings are streamed, not retained across passes.
-    if (object.size <= PAGE_BYTES) {
+    if (size <= PAGE_BYTES) {
       if (this.cache.size >= 16) this.cache.delete(this.cache.keys().next().value!);
       this.cache.set(ref.r2, node);
     }
@@ -24,7 +29,7 @@ export class PostingTree<T> {
   }
   private async save(node: Node<T>): Promise<TreeRef> {
     const r2 = `${this.prefix}${crypto.randomUUID()}.json`;
-    await this.bucket.put(r2, JSON.stringify(node), { onlyIf: { etagDoesNotMatch: "*" } });
+    await this.io(() => this.bucket.put(r2, JSON.stringify(node), { onlyIf: { etagDoesNotMatch: "*" } }));
     const first = "entries" in node ? node.entries[0]!.key : node.children[0]!.first;
     const last = "entries" in node ? node.entries.at(-1)!.key : node.children.at(-1)!.last;
     return { r2, first, last };
@@ -54,7 +59,7 @@ export class PostingTree<T> {
     const pages: Entry<T>[][] = []; let page: Entry<T>[] = []; let bytes = 0;
     for (const entry of entries) {
       const size = encoder.encode(JSON.stringify(entry)).byteLength;
-      if (page.length && (page.length >= LEAF_ROWS || bytes + size > PAGE_BYTES)) { pages.push(page); page = []; bytes = 0; }
+      if (page.length && (page.length >= POSTING_PAGE_ROWS || bytes + size > PAGE_BYTES)) { pages.push(page); page = []; bytes = 0; }
       page.push(entry); bytes += size;
     }
     if (page.length) pages.push(page);
@@ -88,9 +93,9 @@ export class PostingTree<T> {
       while (index + 1 < node.children.length && node.children[index + 1]!.first <= change.key) index++;
       groups[index]!.push(change);
     }
-    const children: TreeRef[] = [];
-    for (let i = 0; i < node.children.length; i++) children.push(...await this.update(node.children[i]!, groups[i]!));
-    return this.branches(children);
+    const children = await mapBatches(node.children.map((child, index) => ({ child, changes: groups[index]! })), 4,
+      ({ child, changes }) => this.update(child, changes));
+    return this.branches(children.flat());
   }
   async apply(root: TreeRef | null, changes: Map<string, T | null>): Promise<TreeRef | null> {
     let refs = await this.update(root, [...changes].map(([key,value]) => ({key,value})).sort((a,b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0));

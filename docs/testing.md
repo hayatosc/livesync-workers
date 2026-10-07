@@ -18,6 +18,8 @@ pnpm test
 Workers 統合テストは、[Cloudflare 公式の Vitest 統合](https://developers.cloudflare.com/workers/testing/vitest-integration/)を使います。
 `vitest.workers.config.ts` から `test/workers/wrangler.jsonc` を読み、ローカルの workerd で本物の Workers、SQLite DO、R2 の binding を使います。
 独自に Miniflare を起動することはしません。
+`pnpm test:workers` は同時実行を 1 worker に制限し、各テストの timeout を 60 秒に設定します。
+ローカル SQLite/R2 の競合による短い timeout を避けるためです。
 
 統合テストが検証する主な内容は次のとおりです。
 

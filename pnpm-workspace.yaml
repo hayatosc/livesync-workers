@@ -1,4 +1,5 @@
 packages:
+  - .
   - packages/*
 
 # Only the native toolchain needs install scripts; sharp ships prebuilt binaries

@@ -13,5 +13,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["worker", "worker-configuration.d.ts"]
+  "include": ["worker", "worker-configuration.d.ts", "cloudflare.config.ts", "wrangler.config.ts", ".cloudflare/types"]
 }

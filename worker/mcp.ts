@@ -11,7 +11,8 @@ export type McpProps = {
   scope: string[];
 };
 
-export class VaultMCP extends McpAgent<Env, unknown, McpProps> {
+// cf's generated bindings narrow the portable Env to this deployment's schema.
+export class VaultMCP extends McpAgent<Env & Cloudflare.Env, unknown, McpProps> {
   server = new McpServer(
     { name: "livesync-workers", version: VERSION },
     { instructions: vaultInstructions() },

@@ -150,7 +150,9 @@ describe("external full-text index (VaultBindings.fullText)", () => {
       contentHash: await hashText("alpha"),
       mtime: 1700000000000,
     });
-    expect(writer.close).toHaveBeenCalledTimes(1);
+    // The time budget may split the changes across passes on a busy runner.
+    expect(writer.close).toHaveBeenCalled();
+    expect(writer.close).toHaveBeenCalledTimes(index.openWriter.mock.calls.length);
     expect(vi.mocked(env.FTS_BUCKET.put)).not.toHaveBeenCalled();
     await expect(indexStatus(durableObject)).resolves.toMatchObject({
       indexed: 2,
