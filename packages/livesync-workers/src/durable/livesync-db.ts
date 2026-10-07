@@ -451,9 +451,54 @@ function compareValues(a: unknown, b: unknown): number {
 }
 
 const MAX_SELECTOR_REGEX_LENGTH = 256;
-// The common catastrophic-backtracking shape: a quantified group whose body
-// has a quantifier or an alternation, e.g. (a+)+ or (a|aa)*. A heuristic, not a proof.
-const NESTED_QUANTIFIER = /\((?:\?(?::|=|!|<=|<!|<[A-Za-z_$][\w$]*>)|(?!\?))(?:[^()\\]|\\.)*[*+?}|](?:[^()\\]|\\.)*\)\s*[*+?{]/;
+
+/**
+ * Whether a pattern has the shapes that make backtracking blow up: a
+ * quantified group whose contents, at any depth, repeat or alternate
+ * ((a+)+, ((a+))+, (a|aa)*), and backreferences. A conservative check, not
+ * a proof: chains of plain quantifiers such as a*a*a* still cost polynomial time.
+ */
+function hasNestedRepetition(pattern: string): boolean {
+  // One entry per open group: whether its contents repeat or alternate.
+  const groups: boolean[] = [];
+  const isQuantifier = (index: number) => {
+    const c = pattern[index];
+    return c === "*" || c === "+" || c === "?" || (c === "{" && /\d/.test(pattern[index + 1] ?? ""));
+  };
+  let inClass = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]!;
+    if (c === "\\") {
+      const next = pattern[i + 1] ?? "";
+      if (!inClass && (/[1-9]/.test(next) || next === "k")) return true;
+      i++;
+    } else if (inClass) {
+      if (c === "]") inClass = false;
+    } else if (c === "[") {
+      inClass = true;
+    } else if (c === "(") {
+      groups.push(false);
+      // Skip the ?: ?= ?! ?<= ?<! ?<name> prefix, whose "?" is not a quantifier.
+      if (pattern[i + 1] === "?") {
+        if (pattern[i + 2] === "<" && pattern[i + 3] !== "=" && pattern[i + 3] !== "!") {
+          const end = pattern.indexOf(">", i);
+          i = end < 0 ? pattern.length : end;
+        } else {
+          i += pattern[i + 2] === "<" ? 3 : 2;
+        }
+      }
+    } else if (c === ")") {
+      const inner = groups.pop() ?? false;
+      const quantified = isQuantifier(i + 1);
+      if (inner && quantified) return true;
+      if (groups.length && (inner || quantified)) groups[groups.length - 1] = true;
+    } else if ((c === "|" || isQuantifier(i)) && groups.length) {
+      groups[groups.length - 1] = true;
+    }
+  }
+  return false;
+}
+
 const selectorRegexCache = new Map<string, RegExp | null>();
 
 /**
@@ -464,7 +509,7 @@ const selectorRegexCache = new Map<string, RegExp | null>();
 function selectorRegex(pattern: string): RegExp | null {
   if (selectorRegexCache.has(pattern)) return selectorRegexCache.get(pattern)!;
   let compiled: RegExp | null = null;
-  if (pattern.length <= MAX_SELECTOR_REGEX_LENGTH && !NESTED_QUANTIFIER.test(pattern)) {
+  if (pattern.length <= MAX_SELECTOR_REGEX_LENGTH && !hasNestedRepetition(pattern)) {
     try {
       compiled = new RegExp(pattern);
     } catch {

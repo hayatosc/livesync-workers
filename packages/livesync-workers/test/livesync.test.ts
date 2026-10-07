@@ -1227,6 +1227,12 @@ describe("LiveSync request validation", () => {
     expect(await find("^(?:aa)+$")).toBe(1);
     expect(await find("^(a+)+$")).toBe(0);
     expect(await find("^(a|aa)*$")).toBe(0);
+    expect(await find("^((a+))+$")).toBe(0);
+    expect(await find("^(?:(?:a|b)c)+$")).toBe(0);
+    expect(await find("^(a)\\1+")).toBe(0);
+    expect(await find("^(?:aa)+$")).toBe(1);
+    expect(await find("^[(]?a+[)]?$")).toBe(1);
+    expect(await find("^(?<x>a)(?:aaa)$")).toBe(1);
     expect(await find(`^a${"?".repeat(300)}`)).toBe(0);
   });
 });

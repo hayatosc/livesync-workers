@@ -125,8 +125,9 @@ async function csrfValid(secret: string, nonce: string | undefined, token: strin
 function redirectTarget(redirectUri: string): string {
   try {
     const url = new URL(redirectUri);
-    // App schemes (cursor://…) have no origin; show them without query or fragment.
-    return url.origin !== "null" ? url.origin : redirectUri.split(/[?#]/)[0]!;
+    // Path included: one host can serve several clients' callbacks. App schemes
+    // (cursor://…) have no origin, so show them as given. Query and fragment omitted.
+    return url.origin !== "null" ? `${url.origin}${url.pathname}` : redirectUri.split(/[?#]/)[0]!;
   } catch {
     return redirectUri;
   }

@@ -204,7 +204,7 @@ describe("OAuth consent per-principal scopes", () => {
 describe("OAuth consent page hardening", () => {
   it("shows where the authorization will be sent", async () => {
     const html = await (await authorize(pkce)).text();
-    expect(html).toContain("<code>http://localhost:1234</code>");
+    expect(html).toContain("<code>http://localhost:1234/callback</code>");
   });
 
   it("shows the full target for app-scheme redirect URIs", async () => {
