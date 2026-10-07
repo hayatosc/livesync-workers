@@ -1,16 +1,17 @@
 #!/usr/bin/env node
-// Creates the Cloudflare resources wrangler.jsonc expects, for people deploying
-// with wrangler instead of the Deploy to Cloudflare button. Idempotent.
+// Creates the resources cloudflare.config.ts declares. Idempotent.
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import config from "../cloudflare.config.ts";
 
-const config = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
-const indexName = /"index_name":\s*"([^"]+)"/.exec(config)?.[1];
-const bucketNames = [...config.matchAll(/"bucket_name":\s*"([^"]+)"/g)].map((match) => match[1]);
+const resources = Object.values(config.worker.env);
+const indexNames = resources.filter((binding) => binding.type === "vectorize").map((binding) => binding.name);
+const bucketNames = resources.filter((binding) => binding.type === "r2").map((binding) => binding.name);
+const dryRun = process.argv.includes("--dry-run");
 
-function wrangler(args, { allowExisting = true } = {}) {
-  console.log(`\n$ wrangler ${args.join(" ")}`);
-  const result = spawnSync("pnpm", ["exec", "wrangler", ...args], { encoding: "utf8", shell: process.platform === "win32" });
+function cf(args, { allowExisting = true } = {}) {
+  if (dryRun) args = [...args, "--dry-run"];
+  console.log(`\n$ cf ${args.join(" ")}`);
+  const result = spawnSync("pnpm", ["exec", "cf", ...args], { encoding: "utf8", shell: process.platform === "win32" });
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
   process.stdout.write(output);
   if (result.status !== 0) {
@@ -18,23 +19,22 @@ function wrangler(args, { allowExisting = true } = {}) {
       console.log("(already exists, continuing)");
       return;
     }
-    console.error(`wrangler exited with ${result.status}`);
+    console.error(`cf exited with ${result.status}`);
     process.exit(result.status ?? 1);
   }
 }
 
 // Dimensions must match the embedding model (embeddinggemma-300m → 768).
-if (indexName) wrangler(["vectorize", "create", indexName, "--dimensions=768", "--metric=cosine"]);
-for (const bucketName of bucketNames) wrangler(["r2", "bucket", "create", bucketName]);
+for (const indexName of indexNames) cf(["vectorize", "create", "--name", indexName, "--config-dimensions", "768", "--config-metric", "cosine"]);
+for (const bucketName of bucketNames) cf(["r2", "buckets", "create", "--name", bucketName]);
 
 console.log(`
-Done. The KV namespace for OAuth (OAUTH_KV) is provisioned automatically on first deploy.
+${dryRun ? "Dry run complete. No resources were created." : "Done."}
+The OAuth KV binding is declared in cloudflare.config.ts.
 
 Next:
-  1. Set secrets (see .dev.vars.example):
-       pnpm exec wrangler secret put LIVESYNC_PASSWORD
-       pnpm exec wrangler secret put ADMIN_PASSWORD
-       pnpm exec wrangler secret put SESSION_SECRET
-  2. Deploy:
-       pnpm build && pnpm run deploy
+  1. Sign in: pnpm exec cf auth login
+  2. For a first deployment, fill .dev.vars using .dev.vars.example and upload
+     its secrets: pnpm exec cf deploy --secrets-file .dev.vars
+  3. For subsequent deployments: pnpm run deploy
 `);

@@ -1,11 +1,11 @@
 import type { FullTextIndex, FullTextNote, FullTextSearchHit, FullTextSearchOptions, VaultRef } from "../types.js";
 import { SEGMENTER_ANALYZER,indexNote,queryPhrases,occurrences,weights,type Field,type FieldName,type IndexedNote } from "./segmenter-analysis.js";
-import { PostingTree,type TreeRef,type Entry } from "./posting-tree.js";
+import { PostingTree,POSTING_PAGE_ROWS,type TreeRef,type Entry } from "./posting-tree.js";
 type Positions=Field["postings"][string];
 type DocumentState={hash:string;r2:string;lengths:number[];terms:string[];updatedAt:number};
 type Posting=Omit<DocumentState,"terms">&{path:string;positions:Partial<Record<FieldName,Positions>>};
 type Manifest={format:2;documents:TreeRef|null;postings:TreeRef|null;docCount:number;totalLengths:number[];builtAt:number;delta?:{documents:Entry<DocumentState|null>[];postings:Entry<Posting|null>[]}};
-type State={active:string|null;building:string|null;activeFormat?:2;buildingFormat?:2};
+type State={active:string|null;building:string|null;activeFormat?:2;buildingFormat?:2;activeVersion?:string;buildingVersion?:string};
 type Candidate={path:string;hash:string;r2:string;score:number;matchCount:number;matches:Array<Array<Array<{start:number;end:number}>>>};
 const fields=Object.keys(weights) as FieldName[];
 const encode=new TextEncoder();
@@ -14,6 +14,7 @@ const empty=():Manifest=>({format:2,documents:null,postings:null,docCount:0,tota
 /** Shared term/path pages and bounded ranking. SQLite remains the content coordinator. */
 export class SharedSegmenterIndex implements FullTextIndex {
  readonly sourceHashes=true;
+ readonly indexVersion=`shared-postings-${POSTING_PAGE_ROWS}-v1`;
  constructor(private readonly bucket:R2Bucket,private readonly legacy:(prefix:string,query:string,limit:number)=>ReturnType<FullTextIndex["search"]>){}
  private prefix(ref:VaultRef){return `search/${SEGMENTER_ANALYZER}/${encodeURIComponent(ref.tenantId)}/${encodeURIComponent(ref.vaultId??ref.databaseName)}/`;}
  private async state(ref:VaultRef){const key=`${this.prefix(ref)}state.json`;const object=await this.bucket.get(key);return {key,etag:object?.etag,state:object?await object.json<State>():{active:null,building:null} as State};}
@@ -32,8 +33,8 @@ export class SharedSegmenterIndex implements FullTextIndex {
    }
   }
  }
- async beginRebuild(ref:VaultRef){const saved=await this.state(ref);if(saved.state.building&&saved.state.buildingFormat===2)return false;await this.publish(saved.key,{...saved.state,building:crypto.randomUUID(),buildingFormat:2},saved.etag);return true;}
- async completeRebuild(ref:VaultRef){const saved=await this.state(ref);const state=saved.state;if(!state.building||state.buildingFormat!==2)return;const manifest=await this.bucket.get(`${this.prefix(ref)}${state.building}/manifest.json`);if(!manifest)await this.publish(`${this.prefix(ref)}${state.building}/manifest.json`,empty());await this.publish(saved.key,{active:state.building,activeFormat:2,building:null},saved.etag);}
+ async beginRebuild(ref:VaultRef){const saved=await this.state(ref);if(saved.state.building&&saved.state.buildingFormat===2&&saved.state.buildingVersion===this.indexVersion)return false;await this.publish(saved.key,{...saved.state,building:crypto.randomUUID(),buildingFormat:2,buildingVersion:this.indexVersion},saved.etag);return true;}
+ async completeRebuild(ref:VaultRef){const saved=await this.state(ref);const state=saved.state;if(!state.building||state.buildingFormat!==2)return;const manifest=await this.bucket.get(`${this.prefix(ref)}${state.building}/manifest.json`);if(!manifest)await this.publish(`${this.prefix(ref)}${state.building}/manifest.json`,empty());await this.publish(saved.key,{active:state.building,activeFormat:2,activeVersion:state.buildingVersion,building:null},saved.etag);}
  async openWriter(ref:VaultRef){
   let saved=await this.state(ref);
   if(!(saved.state.building&&saved.state.buildingFormat===2)&&saved.state.activeFormat!==2){await this.beginRebuild(ref);saved=await this.state(ref);}

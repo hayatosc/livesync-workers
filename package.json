@@ -11,13 +11,13 @@
   "scripts": {
     "build": "pnpm --filter livesync-workers build",
     "prepare": "pnpm --filter livesync-workers build",
-    "deploy": "wrangler deploy",
-    "dev": "pnpm build && wrangler dev",
+    "deploy": "pnpm build && cf deploy",
+    "dev": "pnpm build && cf dev",
     "setup": "node scripts/setup.mjs",
-    "typecheck": "pnpm --filter livesync-workers typecheck && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.workers.json --noEmit",
+    "typecheck": "cf workers types && pnpm --filter livesync-workers typecheck && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.workers.json --noEmit",
     "test": "pnpm --filter livesync-workers test && vitest run && pnpm test:workers",
-    "cf-typegen": "wrangler types",
-    "test:workers": "vitest run -c vitest.workers.config.ts",
+    "cf-typegen": "cf workers types",
+    "test:workers": "vitest run -c vitest.workers.config.ts --maxWorkers=1 --testTimeout=60000",
     "test:e2e:obsidian": "pnpm build && node --use-env-proxy test/e2e/obsidian.mjs",
     "test:e2e:backend": "pnpm build && node test/e2e/backend-check.mjs",
     "test:e2e:plugin": "node --use-env-proxy test/e2e/plugin.mjs",
@@ -40,9 +40,10 @@
     "@types/node": "24.12.2",
     "@vrtmrz/livesync-commonlib": "0.1.35",
     "@vrtmrz/obsidian-test-session": "0.3.0",
+    "cf": "1.0.0-beta.12",
     "typescript": "6.0.3",
     "vitest": "4.1.5",
-    "wrangler": "4.87.0"
+    "wrangler": "4.136.0"
   },
   "cloudflare": {
     "bindings": {

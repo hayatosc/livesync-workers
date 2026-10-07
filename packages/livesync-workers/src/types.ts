@@ -94,6 +94,8 @@ export type FullTextSearchOptions = {
  */
 export interface FullTextIndex {
   readonly sourceHashes?: boolean;
+  /** A layout change requests a fresh derived index without re-embedding vectors. */
+  readonly indexVersion?: string;
   beginRebuild?(ref: VaultRef): Promise<void | boolean>;
   completeRebuild?(ref: VaultRef): Promise<void>;
   /** Called lazily once per indexing pass that has something to write. */

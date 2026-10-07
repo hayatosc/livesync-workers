@@ -7,12 +7,14 @@ Obsidian の Self-hosted LiveSync 互換 API と MCP サーバーを、Cloudflar
 ## 文書
 
 - [セットアップと設定](docs/setup.md)：必要な binding と secret、LiveSync の接続、複数 Vault、MCP、サインインの保護
+- [Cloudflare CLI](docs/cloudflare-cli.md)：cf CLI での開発、デプロイ、ログ調査
 - [保存、復元、移行](docs/r2-operations.md)：保存の確定点、障害時の再生、GC、旧 SQLite からの移行と切り戻し
 - [リクエスト上限](docs/request-limits.md)：同期リクエストの上限と、413 が返ったときの対処
 - [テストと CI](docs/testing.md)：Workers 統合テスト、公式 CLI と実 Obsidian の E2E
 - [独自 Worker への組み込み](docs/embedding.md)：独自の認証や Vault 管理を持つホストからの利用
 - [更新手順](docs/upgrading.md)：このフォークの変更を保ったまま更新する方法
 - [性能測定の記録](docs/benchmarks/)：ローカル環境での変更前後の比較
+- [実環境の同期性能と検証結果](docs/sync-performance-2026-10-07.md)：差分取得の高速化、索引更新、データ整合性の確認
 
 ## 構成
 
@@ -76,7 +78,9 @@ Vault 単位と、`grepNotes` の `folder` によるフォルダ配下への絞�
 実 Obsidian と公式 LiveSync プラグイン、および公式 LiveSync CLI での E2E は、CI で継続的に実行しています。
 結果は [GitHub Actions](https://github.com/hayatosc/livesync-workers/actions) で確認できます。
 
-一方で、実 Cloudflare 環境への本番 deploy と、実 Vault の移行はまだ行っていません。
+2026 年 10 月 7 日に実 Cloudflare 環境へ初回 deploy し、公開 URL でヘルスチェック、認証、文書の作成・読取・削除、管理者ログインを確認しました。
+実 Obsidian から 237 ノートの同期を確認し、本文の一致、チャンクの欠落がないこと、全文検索索引の完了を検証しました。
+旧 SQLite 方式からの実 Vault の移行は未検証です。
 1 Vault の管理メタデータは 1 つの SQLite DO に収まる必要があり、Workers の CPU、メモリ、リクエストの制約も残ります。
 大きな Vault での検索の費用と速度、巨大な履歴の復元時間は測定していません。
 既存の SQLite 方式からの移行は自動では行われないので、[明示的な移行手順](docs/r2-operations.md#既存sqliteデータの移行)に従ってください。

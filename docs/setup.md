@@ -5,7 +5,8 @@
 
 ## 新規導入
 
-Node.js 24、pnpm 12、Cloudflare アカウント、Wrangler の認証が必要です。
+Node.js 24、pnpm 12、Cloudflare アカウント、cf CLI の認証が必要です。
+CLI の使い方とログ調査は [Cloudflare CLI](cloudflare-cli.md) を参照してください。
 
 ```sh
 pnpm install --frozen-lockfile
@@ -19,21 +20,25 @@ pnpm test
 
 以下のコマンドは、Cloudflare の実際の資源を作成して使います。
 
+この checkout の `cloudflare.config.ts` は既存の稼働環境を参照しています。
+別のアカウントへ新規導入する場合は、`pnpm exec cf auth login` で認証し、`accountId` と Worker・バケットの名前を変更して、
+`pnpm exec cf kv namespaces create --title livesync-oauth` で作った namespace の ID を
+`OAUTH_KV` に設定してください。既存環境を更新する場合は、これらの ID を維持します。
+Worker 名を変更するときは、DO binding の `worker` も同じ名前に揃えてください。
+
 ```sh
-pnpm exec wrangler login
+pnpm exec cf auth login
 pnpm run setup
-pnpm exec wrangler secret put LIVESYNC_PASSWORD
-pnpm exec wrangler secret put ADMIN_PASSWORD
-pnpm exec wrangler secret put SESSION_SECRET
-pnpm run deploy
+# .dev.vars.example を参考に .dev.vars に必要な secret を用意する
+pnpm exec cf deploy --secrets-file .dev.vars
 ```
 
 `pnpm deploy` と `pnpm setup` は pnpm 自体のコマンドなので、`pnpm run` をつけて実行します。
 
-`pnpm run setup`（`scripts/setup.mjs`）は、`wrangler.jsonc` に書かれた R2 バケットを作成します。
+`pnpm run setup`（`scripts/setup.mjs`）は、`cloudflare.config.ts` に書かれた R2 バケットを作成します。
 Vectorize の索引は、現在の設定では作成しません。
-OAuth 用の KV namespace は、初回 deploy 時に Wrangler が自動で作成します。
-SQLite DO のクラスは、`wrangler.jsonc` の `migrations` で作成されます。
+SQLite DO のクラスは、`worker.exports` の宣言で作成されます。
+以降の更新には `pnpm run deploy` を使います。既存の secret は維持されます。
 
 既存の環境を更新するときは、バケット名、binding の ID、DO の migration 履歴を書き換えずに維持してください。
 
@@ -95,7 +100,9 @@ Worker の変数 `VAULTS_JSON` を指定すると、既定の単一 Vault の設
 ```
 
 `passwordSecret` には secret の名前を書き、パスワード本体は JSON に入れません。
-この例では `wrangler secret put WORK_PASSWORD` でパスワードを設定します。
+この例では `cloudflare.config.ts` の `worker.env` に `WORK_PASSWORD: bindings.secret()` を宣言し、
+`.dev.vars` に用意した値を `pnpm exec cf deploy --secrets-file .dev.vars` で設定します。
+`VAULTS_JSON` などの任意の変数も `worker.env` に宣言してください。
 `vaultId` と `username` は、レジストリの中で一意にします。
 
 `vaultId` と `tenantId` を変えなければ、表示名や接続 DB 名を変更しても、DO、R2、索引の ID は変わりません。
@@ -123,7 +130,7 @@ Setup URI と状態画面は、admin がアクセスできる最初の Vault を
 ロックは `OAUTH_KV` に保存するので、Worker のインスタンスをまたいで有効です。
 同じ NAT の内側にいる利用者は同じ IP として数えられます。
 保存したパスワードが古い LiveSync クライアントが失敗を繰り返すと、同じネットワークの正しいクライアントもロックされます。
-回数と期間は、`wrangler.jsonc` の `ratelimits` と `worker/throttle.ts` で変更できます。
+回数と期間は、`cloudflare.config.ts` の `AUTH_FAILURE_LIMITER` と `worker/throttle.ts` で変更できます。
 
 ## MCP
 

@@ -6,6 +6,42 @@ import { indexNote,searchWordIndex } from "../../packages/livesync-workers/src/s
 import type { FullTextNote } from "../../packages/livesync-workers/src/types.js";
 import type { TestEnv } from "./entry.js";
 const bucket=(env as unknown as TestEnv).SEARCH;
+it("replaces an interrupted old-layout build while keeping the active index readable", async () => {
+ const ref={tenantId:"posting-layout-upgrade",databaseName:"vault"};
+ const index=new SegmenterFullTextIndex(bucket);
+ await index.beginRebuild(ref);let writer=await index.openWriter(ref);
+ await writer.upsert({path:"active.md",content:"東京 API",contentHash:"active",mtime:null});
+ await writer.close();await index.completeRebuild(ref);
+ const key="search/ja-segmenter-nfkc-v1/posting-layout-upgrade/vault/state.json";
+ const saved=await (await bucket.get(key))!.json<{active:string}>();
+ await bucket.put(key,JSON.stringify({...saved,building:"interrupted",buildingFormat:2,buildingVersion:"shared-postings-64-v1"}));
+ expect(await index.beginRebuild(ref)).toBe(true);
+ expect(await index.beginRebuild(ref)).toBe(false);
+ const state=await (await bucket.get(key))!.json<{active:string;building:string;buildingVersion:string}>();
+ expect(state.active).toBe(saved.active);expect(state.building).not.toBe("interrupted");expect(state.buildingVersion).toBe(index.indexVersion);
+ expect((await index.search(ref,"東京",5)).hits.map(hit=>hit.path)).toEqual(["active.md"]);
+ writer=await index.openWriter(ref);await writer.upsert({path:"active.md",content:"東京 API",contentHash:"active",mtime:null});await writer.close();await index.completeRebuild(ref);
+ expect((await index.search(ref,"東京",5)).hits.map(hit=>hit.path)).toEqual(["active.md"]);
+});
+it("updates independent posting branches concurrently with a shared I/O bound and settles failures", async () => {
+ const prefix="tree-test/concurrency/";
+ const seed=new PostingTree<number>(bucket,prefix);
+ const root=await seed.apply(null,new Map(Array.from({length:2048},(_,i)=>[`k${String(i).padStart(4,"0")}`,i])));
+ let active=0,peak=0,fail=false,puts=0;
+ const proxy=new Proxy(bucket,{get(target,key){
+  const value=Reflect.get(target,key);if(key!=="get"&&key!=="put")return typeof value==="function"?value.bind(target):value;
+  return async(...args:unknown[])=>{active++;peak=Math.max(peak,active);try{
+   if(key==="put"&&fail&&puts++===0)throw new Error("Injected posting upload failure");
+   await new Promise(resolve=>setTimeout(resolve,5));return await value.apply(target,args);
+  }finally{active--;}};
+ }});
+ const changes=new Map<string,number|null>(Array.from({length:8},(_,i)=>[`k${String(i*256).padStart(4,"0")}`,-i-1]));
+ const next=await new PostingTree<number>(proxy,prefix).apply(root,changes);
+ expect(peak).toBe(4);expect(active).toBe(0);
+ for(const [key,value] of changes){expect(await seed.get(next,key)).toBe(value);expect(await seed.get(root,key)).toBe(Number(key.slice(1)));}
+ fail=true;puts=0;await expect(new PostingTree<number>(proxy,prefix).apply(root,changes)).rejects.toThrow("Injected posting upload failure");
+ expect(active).toBe(0);expect(await seed.get(root,"k0000")).toBe(0);
+});
 it("keeps immutable ordered roots correct through splits, overwrites and deletions",async()=>{
  const tree=new PostingTree<number>(bucket,"tree-test/one/");let root:TreeRef|null=null;const expected=new Map<string,number>();
  for(let step=0;step<6;step++){

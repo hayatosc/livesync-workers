@@ -6,7 +6,7 @@ upstream の変更とこのフォークの差分を確認し、検証した comm
 
 ## 更新の前に
 
-1. 現在の Worker の commit と、`wrangler.jsonc` の資源名、ID、変数、DO の migration 履歴を記録する。
+1. 現在の Worker の commit と、`cloudflare.config.ts` の資源名、ID、変数、DO の export 宣言を記録する。旧 Wrangler 環境では `wrangler.jsonc` の migration 履歴も記録する。
 2. コンテンツの正本、旧 DO、旧索引を保全し、[保存、復元、移行](r2-operations.md)で復元と切り戻しの条件を確認する。
 3. 更新候補で、`pnpm install --frozen-lockfile`、build、型検査、全テスト、[CLI と GUI の E2E](testing.md) を実行する。
 4. binding、secret、migration、解析器の版に変更がないかを確認する。既存の DO の migration は削除も並べ替えもしない。
