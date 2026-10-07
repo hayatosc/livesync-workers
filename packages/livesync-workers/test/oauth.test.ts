@@ -200,3 +200,21 @@ describe("OAuth consent per-principal scopes", () => {
     expect(html).not.toContain('value="memory:read"');
   });
 });
+
+describe("OAuth consent page hardening", () => {
+  it("shows where the authorization will be sent", async () => {
+    const html = await (await authorize(pkce)).text();
+    expect(html).toContain("<code>http://localhost:1234</code>");
+  });
+
+  it("shows the full target for app-scheme redirect URIs", async () => {
+    const html = await (await authorize({ ...pkce, redirect_uri: "cursor://anysphere.cursor-mcp/oauth/callback" })).text();
+    expect(html).toContain("<code>cursor://anysphere.cursor-mcp/oauth/callback</code>");
+  });
+
+  it("refuses to be framed", async () => {
+    const response = await authorize(pkce);
+    expect(response.headers.get("Content-Security-Policy")).toBe("frame-ancestors 'none'");
+    expect(response.headers.get("X-Frame-Options")).toBe("DENY");
+  });
+});

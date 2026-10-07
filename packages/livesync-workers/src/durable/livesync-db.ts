@@ -1,4 +1,4 @@
-import { REQUEST_LIMITS, RequestLimitError, readBoundedJson, assertDocumentSize, assertBulkLimits } from "../livesync/limits.js";
+import { REQUEST_LIMITS, BadRequestError, RequestLimitError, readBoundedJson, assertDocumentSize, assertBulkLimits, decodePathSegment } from "../livesync/limits.js";
 import { R2Journal, contentPrefix, type JournalStatement } from "../storage/r2-journal.js";
 import { hashText } from "../search/chunk-md.js";
 import { removeNoteVectors, upsertNoteVectors } from "../search/vector-index.js";
@@ -450,6 +450,32 @@ function compareValues(a: unknown, b: unknown): number {
   return compareCodePoints(String(a), String(b));
 }
 
+const MAX_SELECTOR_REGEX_LENGTH = 256;
+// The common catastrophic-backtracking shape: a quantified group whose body
+// has a quantifier or an alternation, e.g. (a+)+ or (a|aa)*. A heuristic, not a proof.
+const NESTED_QUANTIFIER = /\((?:\?(?::|=|!|<=|<!|<[A-Za-z_$][\w$]*>)|(?!\?))(?:[^()\\]|\\.)*[*+?}|](?:[^()\\]|\\.)*\)\s*[*+?{]/;
+const selectorRegexCache = new Map<string, RegExp | null>();
+
+/**
+ * Compile a Mango $regex once per pattern. Over-long patterns and nested
+ * quantifiers never match, so one selector cannot easily pin the vault
+ * object's CPU. LiveSync itself does not use $regex.
+ */
+function selectorRegex(pattern: string): RegExp | null {
+  if (selectorRegexCache.has(pattern)) return selectorRegexCache.get(pattern)!;
+  let compiled: RegExp | null = null;
+  if (pattern.length <= MAX_SELECTOR_REGEX_LENGTH && !NESTED_QUANTIFIER.test(pattern)) {
+    try {
+      compiled = new RegExp(pattern);
+    } catch {
+      compiled = null;
+    }
+  }
+  if (selectorRegexCache.size >= 64) selectorRegexCache.clear();
+  selectorRegexCache.set(pattern, compiled);
+  return compiled;
+}
+
 function matchesCondition(value: unknown, condition: unknown): boolean {
   if (condition == null || typeof condition !== "object" || Array.isArray(condition)) {
     return value === condition;
@@ -485,11 +511,7 @@ function matchesCondition(value: unknown, condition: unknown): boolean {
         break;
       case "$regex":
         if (typeof value !== "string" || typeof expected !== "string") return false;
-        try {
-          if (!new RegExp(expected).test(value)) return false;
-        } catch {
-          return false;
-        }
+        if (!selectorRegex(expected)?.test(value)) return false;
         break;
       default:
         return false;
@@ -1158,6 +1180,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       return await this.exclusive(() => this.persistentRequest(request));
     } catch (error) {
       if (error instanceof RequestLimitError) return couchError(413, "request_entity_too_large", error.message);
+      if (error instanceof BadRequestError) return couchError(400, "bad_request", error.message);
       console.warn("LiveSync DB request failed", error);
       return couchError(500, "internal_server_error", "Internal server error");
     }
@@ -1226,11 +1249,11 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     if (first === "_compact" && request.method === "POST") return this.handleCompact();
 
     if (first === "_local") {
-      const id = decodeURIComponent(parts.slice(1).join("/"));
+      const id = parts.slice(1).map(decodePathSegment).join("/");
       return this.handleLocalDoc(request, id);
     }
 
-    const id = decodeURIComponent(parts.join("/"));
+    const id = parts.map(decodePathSegment).join("/");
     return this.handleDoc(request, id);
   }
 

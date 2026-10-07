@@ -32,4 +32,4 @@ export * from "./credentials.js";
 
 export { SegmenterFullTextIndex, analyzeWords, SEGMENTER_ANALYZER } from "./search/segmenter-index.js";
 
-export { REQUEST_LIMITS } from "./livesync/limits.js";
+export { REQUEST_LIMITS, AuthThrottledError } from "./livesync/limits.js";

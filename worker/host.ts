@@ -1,4 +1,5 @@
 import {
+  AuthThrottledError,
   SegmenterFullTextIndex,
   constantTimeEquals,
   createVault,
@@ -12,6 +13,7 @@ import {
   type VaultRef,
 } from "livesync-workers";
 import { TENANT_ID, type Env } from "./env.js";
+import { AUTH_LOCK_SECONDS, isLockedOut, recordAuthFailure } from "./throttle.js";
 
 export class ConfigError extends Error {}
 
@@ -76,9 +78,11 @@ export function vaultPolicy(env: Env): VaultPolicy {
   };
 }
 
-export function vaultHost(env: Env): VaultHost {
+/** With `request`, failed credentials count towards the per-IP lockout. */
+export function vaultHost(env: Env, request?: Request): VaultHost {
   return {
     async verifyCredential(username, password) {
+      if (request && (await isLockedOut(env, request))) throw new AuthThrottledError(AUTH_LOCK_SECONDS);
       for (const config of vaultConfigs(env)) {
         const expected = env[config.passwordSecret];
         if (typeof expected !== "string" || !expected.trim() || /^change[-_ ]?me/i.test(expected.trim())) continue;
@@ -86,6 +90,7 @@ export function vaultHost(env: Env): VaultHost {
         const passOk = constantTimeEquals(password, expected.trim());
         if (userOk && passOk) return { tenantId: config.tenantId, vaultId: config.vaultId, databaseName: config.databaseName };
       }
+      if (request && (await recordAuthFailure(env, request))) throw new AuthThrottledError(AUTH_LOCK_SECONDS);
       return null;
     },
     async loadVaultPolicy(ref) {

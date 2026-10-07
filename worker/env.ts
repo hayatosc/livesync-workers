@@ -2,6 +2,8 @@ export interface Env {
   VAULT_DB: DurableObjectNamespace;
   MCP_OBJECT: DurableObjectNamespace;
   OAUTH_KV: KVNamespace;
+  /** Optional. Counts failed sign-ins per IP; see worker/throttle.ts. */
+  AUTH_FAILURE_LIMITER?: RateLimit;
   FTS_BUCKET: R2Bucket;
   CONTENT_BUCKET: R2Bucket;
   /** Immutable default vault ID. Never derive it from the display/database name. */

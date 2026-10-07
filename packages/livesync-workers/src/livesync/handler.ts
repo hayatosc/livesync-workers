@@ -1,4 +1,12 @@
-import { REQUEST_LIMITS, RequestLimitError, readBoundedText } from "./limits.js";
+import {
+  AuthThrottledError,
+  BadRequestError,
+  REQUEST_LIMITS,
+  RequestLimitError,
+  decodePathSegment,
+  parseJsonObject,
+  readBoundedText,
+} from "./limits.js";
 import {
   CHANGES_IDLE_HEADER,
   DB_NAME_HEADER,
@@ -79,10 +87,19 @@ function withCors(request: Request, host: VaultHost, response: Response): Respon
   });
 }
 
+const strictUtf8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
+
 function decodeBasicAuth(header: string | null): { user: string; pass: string } | null {
   if (!header?.startsWith("Basic ")) return null;
   try {
-    const decoded = atob(header.slice("Basic ".length));
+    const binary = atob(header.slice("Basic ".length));
+    // RFC 7617 clients send UTF-8; keep the byte string for anything that is not.
+    let decoded = binary;
+    try {
+      decoded = strictUtf8.decode(Uint8Array.from(binary, (c) => c.charCodeAt(0)));
+    } catch {
+      // not UTF-8
+    }
     const index = decoded.indexOf(":");
     if (index < 0) return null;
     return { user: decoded.slice(0, index), pass: decoded.slice(index + 1) };
@@ -265,14 +282,7 @@ async function proxyChanges(
   internalSecret: string,
 ): Promise<Response> {
   const bodyText = request.method === "POST" ? await readBoundedText(request) : null;
-  let body: Record<string, unknown> = {};
-  if (bodyText) {
-    try {
-      body = JSON.parse(bodyText) as Record<string, unknown>;
-    } catch {
-      body = {};
-    }
-  }
+  const body = parseJsonObject(bodyText ?? "");
   const options: Record<string, unknown> = {
     ...Object.fromEntries(rewritten.searchParams.entries()),
     ...body,
@@ -410,6 +420,12 @@ export async function handleLiveSyncRequest(
     // headers, which the plugin reports as a CORS problem. Answer with a
     // CouchDB-style 500 the client can show and retry instead.
     if (error instanceof RequestLimitError) return withCors(request, options.host, couchError(413, "request_entity_too_large", error.message));
+    if (error instanceof BadRequestError) return withCors(request, options.host, couchError(400, "bad_request", error.message));
+    if (error instanceof AuthThrottledError) {
+      const response = couchError(429, "too_many_requests", "Too many failed sign-in attempts. Try again later.");
+      response.headers.set("Retry-After", String(error.retryAfterSeconds));
+      return withCors(request, options.host, response);
+    }
     console.warn("LiveSync request failed", error);
     return withCors(
       request,
@@ -497,7 +513,7 @@ async function routeLiveSyncRequest(
   if (!dbName || dbName.startsWith("_")) {
     return withCors(request, host, couchError(404, "not_found", "missing"));
   }
-  const decodedDbName = decodeURIComponent(dbName);
+  const decodedDbName = decodePathSegment(dbName);
   if (auth!.ref.databaseName !== decodedDbName) {
     return withCors(
       request,

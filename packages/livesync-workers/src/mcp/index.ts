@@ -11,6 +11,25 @@ export { withMcpSessionIsolation } from "./sessions.js";
 export const VAULT_SCOPES = ["vault:read", "vault:append", "vault:write"] as const;
 export type VaultScope = (typeof VAULT_SCOPES)[number];
 
+/** Every tool registerVaultTools adds, for status pages and docs. */
+export const VAULT_TOOL_NAMES = [
+  "listVaults",
+  "listDirectory",
+  "listNotes",
+  "listRecentNotes",
+  "listFiles",
+  "readNote",
+  "readDailyNote",
+  "readAttachment",
+  "searchNotes",
+  "grepNotes",
+  "vaultStatus",
+  "appendToDailyNote",
+  "appendToNote",
+  "writeNote",
+  "uploadAttachment",
+] as const;
+
 export const VAULT_SCOPE_DESCRIPTIONS: Record<VaultScope, string> = {
   "vault:read": "Read and search vault notes (required)",
   "vault:append": "Append to the end of vault notes",
@@ -77,10 +96,9 @@ function suggestSimilarPaths(paths: string[], requested: string): string[] {
 }
 
 /**
- * Register the vault tools on an MCP server:
- * listDirectory, listNotes, listRecentNotes, readNote, readDailyNote,
- * searchNotes, grepNotes, vaultStatus (vault:read);
- * appendToDailyNote, appendToNote (vault:append); writeNote (vault:write).
+ * Register the vault tools (`VAULT_TOOL_NAMES`) on an MCP server. Writing tools
+ * need vault:append (appendToDailyNote, appendToNote) or vault:write (writeNote,
+ * uploadAttachment); everything else needs vault:read.
  */
 export function registerVaultTools(server: McpServer, ctx: VaultToolContext): void {
   const label = ctx.vaultLabel ?? "Obsidian";
