@@ -1,0 +1,10 @@
+packages:
+  - packages/*
+
+# Only the native toolchain needs install scripts; sharp ships prebuilt binaries
+# and core-js-pure's postinstall is a donation banner.
+allowBuilds:
+  esbuild: true
+  workerd: true
+  sharp: false
+  core-js-pure: false

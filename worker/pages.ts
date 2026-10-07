@@ -1,4 +1,5 @@
 import { escapeHtml, htmlPage } from "livesync-workers/oauth";
+import { VAULT_TOOL_NAMES } from "livesync-workers/mcp";
 import type { VaultIndexStatus } from "livesync-workers";
 import { type Env } from "./env.js";
 import { setupVaultConfig } from "./host.js";
@@ -6,9 +7,9 @@ import { SETUP_URI_CLIENT_SCRIPT, SETUP_URI_IDS } from "./setup-uri.js";
 import { VERSION } from "./version.js";
 
 const TITLE = "livesync-workers";
-const REPO_URL = "https://github.com/odiak/livesync-workers";
+const REPO_URL = "https://github.com/hayatosc/livesync-workers";
 
-export function loginPage(next: string, error?: string): Response {
+export function loginPage(next: string, error?: string, status = error ? 401 : 200): Response {
   return htmlPage(
     `${TITLE} — Sign in`,
     `<div class="card"><h1>Sign in</h1><p class="muted">Enter the admin password (the <code>ADMIN_PASSWORD</code> secret).</p>${
@@ -16,7 +17,7 @@ export function loginPage(next: string, error?: string): Response {
     }<form method="post" action="/login"><input type="hidden" name="next" value="${escapeHtml(
       next,
     )}"><label for="password">Password</label><input id="password" type="password" name="password" autofocus required><p><button type="submit">Sign in</button></p></form></div>`,
-    error ? 401 : 200,
+    status,
   );
 }
 
@@ -83,7 +84,7 @@ ${setupUriCard}
 <div class="card"><h2>MCP</h2><table>
 <tr><th>Endpoint</th><td><code>${escapeHtml(data.origin)}/mcp</code></td></tr>
 <tr><th>Auth</th><td>OAuth (sign in with the admin password when the client asks)${env.MCP_STATIC_TOKEN ? ", or <code>Authorization: Bearer &lt;MCP_STATIC_TOKEN&gt;</code> (read-only unless <code>MCP_STATIC_TOKEN_SCOPES</code> adds more)" : ""}</td></tr>
-<tr><th>Tools</th><td>listDirectory, listNotes, listRecentNotes, readNote, readDailyNote, searchNotes, grepNotes, vaultStatus, appendToDailyNote, appendToNote, writeNote</td></tr>
+<tr><th>Tools</th><td>${VAULT_TOOL_NAMES.join(", ")}</td></tr>
 </table></div>
 <div class="card"><h2>Status</h2>${adminBlock}${indexHtml}</div>
 <p class="muted">${data.admin ? `${TITLE} v${escapeHtml(VERSION)} · ` : ""}<a href="${REPO_URL}/releases">Releases</a> · <a href="${REPO_URL}/blob/main/docs/upgrading.md">How to upgrade</a></p>`,

@@ -1,30 +1,40 @@
 # 更新手順
 
-このフォークはR2正本・不変Vault ID・Segmenter索引を追加しています。upstreamの最新版をそのまま取り込むと、この構成を失う可能性があります。upstreamの変更とこのフォークの差分をレビューし、検証したcommitを選んで更新してください。現在のPRを既存公開npm版と同一仕様とは扱いません。
+このフォークは、upstream に対して R2 の正本、不変の Vault ID、Segmenter 索引を追加しています。
+upstream の最新版をそのまま取り込むと、これらの構成が失われる可能性があります。
+upstream の変更とこのフォークの差分を確認し、検証した commit を選んで更新してください。
 
-## 更新前
+## 更新の前に
 
-1. 現Worker commit、`wrangler.jsonc`の資源名／ID／変数／DO migration履歴を記録する。
-2. コンテンツ正本・旧DO・旧索引を保全し、復元と切戻し条件を[運用文書](r2-operations.md)で確認する。
-3. `npm ci`、build、型検査、全テストと[CLI／GUI E2E](testing.md)を更新候補で実行する。
-4. binding・secret・migration・解析版に変更がないか確認する。既存DO migrationを削除／並べ替えしない。
+1. 現在の Worker の commit と、`wrangler.jsonc` の資源名、ID、変数、DO の migration 履歴を記録する。
+2. コンテンツの正本、旧 DO、旧索引を保全し、[保存、復元、移行](r2-operations.md)で復元と切り戻しの条件を確認する。
+3. 更新候補で、`pnpm install --frozen-lockfile`、build、型検査、全テスト、[CLI と GUI の E2E](testing.md) を実行する。
+4. binding、secret、migration、解析器の版に変更がないかを確認する。既存の DO の migration は削除も並べ替えもしない。
 
-SQLiteからR2への切替は通常のWorker更新とは別の明示移行です。新IDの設定だけでは旧データをコピーしません。R2参照を持つDOを旧SQLite方式Workerで直接開くこともできません。
+SQLite 方式から R2 方式への切り替えは、通常の Worker の更新とは別の、明示的な移行です。
+新しい ID を設定しただけでは、旧データはコピーされません。
+R2 への参照を持つ DO を、旧 SQLite 方式の Worker で直接開くこともできません。
 
 ## 反映
 
-deployを承認・計画した場合にのみ、検証したcheckoutから実行します。
+deploy は、検証した checkout から実行します。
 
 ```sh
-npm ci
-npm run build
-npm run deploy
+pnpm install --frozen-lockfile
+pnpm build
+pnpm run deploy
 ```
 
-Cloudflare Workers Builds等の自動deployを利用している環境では、production branchへのpushがdeployを引き起こす設定かを確認してください。このリポジトリのGitHub ActionsはPR検査とrelease時のnpm公開であり、Workerの本番deploy workflowはありません。必要なsecretは環境側で設定し、Gitへ保存しません。
+Cloudflare Workers Builds などの自動 deploy を使っている場合は、production branch への push が deploy を起こす設定かどうかを確認してください。
+このリポジトリの GitHub Actions は PR の検査と release 時の npm 公開だけで、Worker を本番に deploy する workflow はありません。
+必要な secret は Cloudflare 側で設定し、Git には保存しません。
 
-検索解析版が変わるときは索引を再構築し、切替後の検索を確認します。旧索引は切戻し判断が終わるまで保持します。新Vaultへの書込後のロールバックでは、新しい更新を引き継ぐ復元／レプリケーションと差分確認を先に行ってください。
+検索の解析器の版が変わるときは索引を再構築し、切り替えた後に検索を確認します。
+旧索引は、切り戻すかどうかの判断が終わるまで残しておきます。
+新しい Vault に書き込んだ後に切り戻す場合は、先に新しい更新を復元またはレプリケーションで引き継ぎ、差分を確認してください。
 
-## 独自ホスト
+## 独自ホストの場合
 
-[組込み契約](embedding.md)の`VaultHost`・`VaultBindings`・MCP操作を更新候補と照合します。root workspaceで検証しているソース版と、既存公開npm版には差があります。パッケージversionだけでR2方式への対応を判断しないでください。
+[組み込みの契約](embedding.md)にある `VaultHost`、`VaultBindings`、MCP の操作を、更新候補と照合してください。
+このリポジトリで検証しているのは workspace のソース版で、npm で公開されている既存の版とは差があります。
+パッケージの version だけで、R2 方式に対応しているかを判断しないでください。

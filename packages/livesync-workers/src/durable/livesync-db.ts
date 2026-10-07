@@ -1,4 +1,4 @@
-import { REQUEST_LIMITS, RequestLimitError, readBoundedJson, assertDocumentSize, assertBulkLimits } from "../livesync/limits.js";
+import { REQUEST_LIMITS, BadRequestError, RequestLimitError, readBoundedJson, assertDocumentSize, assertBulkLimits, decodePathSegment } from "../livesync/limits.js";
 import { R2Journal, contentPrefix, type JournalStatement } from "../storage/r2-journal.js";
 import { hashText } from "../search/chunk-md.js";
 import { removeNoteVectors, upsertNoteVectors } from "../search/vector-index.js";
@@ -450,6 +450,77 @@ function compareValues(a: unknown, b: unknown): number {
   return compareCodePoints(String(a), String(b));
 }
 
+const MAX_SELECTOR_REGEX_LENGTH = 256;
+
+/**
+ * Whether a pattern has the shapes that make backtracking blow up: a
+ * quantified group whose contents, at any depth, repeat or alternate
+ * ((a+)+, ((a+))+, (a|aa)*), and backreferences. A conservative check, not
+ * a proof: chains of plain quantifiers such as a*a*a* still cost polynomial time.
+ */
+function hasNestedRepetition(pattern: string): boolean {
+  // One entry per open group: whether its contents repeat or alternate.
+  const groups: boolean[] = [];
+  const isQuantifier = (index: number) => {
+    const c = pattern[index];
+    return c === "*" || c === "+" || c === "?" || (c === "{" && /\d/.test(pattern[index + 1] ?? ""));
+  };
+  let inClass = false;
+  for (let i = 0; i < pattern.length; i++) {
+    const c = pattern[i]!;
+    if (c === "\\") {
+      const next = pattern[i + 1] ?? "";
+      if (!inClass && (/[1-9]/.test(next) || next === "k")) return true;
+      i++;
+    } else if (inClass) {
+      if (c === "]") inClass = false;
+    } else if (c === "[") {
+      inClass = true;
+    } else if (c === "(") {
+      groups.push(false);
+      // Skip the ?: ?= ?! ?<= ?<! ?<name> prefix, whose "?" is not a quantifier.
+      if (pattern[i + 1] === "?") {
+        if (pattern[i + 2] === "<" && pattern[i + 3] !== "=" && pattern[i + 3] !== "!") {
+          const end = pattern.indexOf(">", i);
+          i = end < 0 ? pattern.length : end;
+        } else {
+          i += pattern[i + 2] === "<" ? 3 : 2;
+        }
+      }
+    } else if (c === ")") {
+      const inner = groups.pop() ?? false;
+      const quantified = isQuantifier(i + 1);
+      if (inner && quantified) return true;
+      if (groups.length && (inner || quantified)) groups[groups.length - 1] = true;
+    } else if ((c === "|" || isQuantifier(i)) && groups.length) {
+      groups[groups.length - 1] = true;
+    }
+  }
+  return false;
+}
+
+const selectorRegexCache = new Map<string, RegExp | null>();
+
+/**
+ * Compile a Mango $regex once per pattern. Over-long patterns and nested
+ * quantifiers never match, so one selector cannot easily pin the vault
+ * object's CPU. LiveSync itself does not use $regex.
+ */
+function selectorRegex(pattern: string): RegExp | null {
+  if (selectorRegexCache.has(pattern)) return selectorRegexCache.get(pattern)!;
+  let compiled: RegExp | null = null;
+  if (pattern.length <= MAX_SELECTOR_REGEX_LENGTH && !hasNestedRepetition(pattern)) {
+    try {
+      compiled = new RegExp(pattern);
+    } catch {
+      compiled = null;
+    }
+  }
+  if (selectorRegexCache.size >= 64) selectorRegexCache.clear();
+  selectorRegexCache.set(pattern, compiled);
+  return compiled;
+}
+
 function matchesCondition(value: unknown, condition: unknown): boolean {
   if (condition == null || typeof condition !== "object" || Array.isArray(condition)) {
     return value === condition;
@@ -485,11 +556,7 @@ function matchesCondition(value: unknown, condition: unknown): boolean {
         break;
       case "$regex":
         if (typeof value !== "string" || typeof expected !== "string") return false;
-        try {
-          if (!new RegExp(expected).test(value)) return false;
-        } catch {
-          return false;
-        }
+        if (!selectorRegex(expected)?.test(value)) return false;
         break;
       default:
         return false;
@@ -1158,6 +1225,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       return await this.exclusive(() => this.persistentRequest(request));
     } catch (error) {
       if (error instanceof RequestLimitError) return couchError(413, "request_entity_too_large", error.message);
+      if (error instanceof BadRequestError) return couchError(400, "bad_request", error.message);
       console.warn("LiveSync DB request failed", error);
       return couchError(500, "internal_server_error", "Internal server error");
     }
@@ -1226,11 +1294,11 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     if (first === "_compact" && request.method === "POST") return this.handleCompact();
 
     if (first === "_local") {
-      const id = decodeURIComponent(parts.slice(1).join("/"));
+      const id = parts.slice(1).map(decodePathSegment).join("/");
       return this.handleLocalDoc(request, id);
     }
 
-    const id = decodeURIComponent(parts.join("/"));
+    const id = parts.map(decodePathSegment).join("/");
     return this.handleDoc(request, id);
   }
 

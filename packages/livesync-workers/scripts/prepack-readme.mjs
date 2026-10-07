@@ -5,7 +5,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const pkgDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const repo = "https://github.com/odiak/livesync-workers/blob/main/";
+const repo = "https://github.com/hayatosc/livesync-workers/blob/main/";
 const readme = readFileSync(resolve(pkgDir, "../../README.md"), "utf8").replace(
   /\]\((?!https?:|#)([^)]+)\)/g,
   (_, target) => `](${repo}${target.replace(/^\.\//, "")})`,

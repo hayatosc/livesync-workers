@@ -23,6 +23,7 @@ import {
   safeRedirectTarget,
 } from "./auth.js";
 import { loginPage, statusPage } from "./pages.js";
+import { isLockedOut, recordAuthFailure } from "./throttle.js";
 import { VaultMCP } from "./mcp.js";
 
 export { VaultMCP };
@@ -41,12 +42,14 @@ const mcpHandler = withMcpSessionIsolation<Env>(
   "MCP_OBJECT",
 );
 
+const TOO_MANY_ATTEMPTS = "Too many failed attempts from your network. Try again in 15 minutes.";
+
 const appHandler: ExportedHandler<Env> = {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
 
     if (url.pathname === "/livesync" || url.pathname.startsWith("/livesync/")) {
-      return handleLiveSyncRequest(request, { host: vaultHost(env), bindings: vaultBindings(env) });
+      return handleLiveSyncRequest(request, { host: vaultHost(env, request), bindings: vaultBindings(env) });
     }
 
     if (url.pathname === "/login") {
@@ -56,8 +59,10 @@ const appHandler: ExportedHandler<Env> = {
         const form = await request.formData().catch(() => null);
         const password = String(form?.get("password") ?? "");
         const target = safeRedirectTarget(String(form?.get("next") ?? next), url.origin);
+        if (await isLockedOut(env, request)) return loginPage(target, TOO_MANY_ATTEMPTS, 429);
         if (!checkAdminPassword(env, password)) {
-          return loginPage(target, "Wrong password.");
+          const locked = await recordAuthFailure(env, request);
+          return locked ? loginPage(target, TOO_MANY_ATTEMPTS, 429) : loginPage(target, "Wrong password.");
         }
         return new Response(null, {
           status: 303,

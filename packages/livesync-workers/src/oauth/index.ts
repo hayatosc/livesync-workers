@@ -87,7 +87,15 @@ export function htmlPage(title: string, body: string, status = 200, lang = "en")
     `<!doctype html><html lang="${escapeHtml(lang)}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(
       title,
     )}</title><style>body{font-family:ui-sans-serif,system-ui,sans-serif;max-width:680px;margin:48px auto;padding:0 20px;line-height:1.6;color:#1f2937}button,.button{display:inline-block;border:0;border-radius:999px;background:#111827;color:white;padding:10px 18px;text-decoration:none;font-weight:600;cursor:pointer}code{background:#f3f4f6;border-radius:6px;padding:2px 5px}.card{border:1px solid #e5e7eb;border-radius:20px;padding:24px;box-shadow:0 10px 24px rgba(15,23,42,.06)}.muted{color:#6b7280}.scope{display:block;margin:8px 0}input[type=password],input[type=text]{font:inherit;padding:8px 10px;border:1px solid #d1d5db;border-radius:8px;width:100%;box-sizing:border-box}label{display:block;margin:12px 0 4px}table{border-collapse:collapse}td,th{text-align:left;padding:4px 12px 4px 0;vertical-align:top}</style></head><body>${body}</body></html>`,
-    { status, headers: { "Content-Type": "text/html; charset=utf-8" } },
+    {
+      status,
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        // Sign-in and consent buttons must not be clickable from inside another site's frame.
+        "Content-Security-Policy": "frame-ancestors 'none'",
+        "X-Frame-Options": "DENY",
+      },
+    },
   );
 }
 
@@ -108,6 +116,21 @@ async function csrfPair(secret: string): Promise<{ nonce: string; token: string 
 async function csrfValid(secret: string, nonce: string | undefined, token: string | undefined) {
   if (!nonce || !token) return false;
   return constantTimeEquals(await sha256Hex(`${secret}:${nonce}`), token);
+}
+
+/**
+ * Where the client will receive the code. Anyone can register a client under
+ * any name, so the consent page shows this instead of trusting the name alone.
+ */
+function redirectTarget(redirectUri: string): string {
+  try {
+    const url = new URL(redirectUri);
+    // Path included: one host can serve several clients' callbacks. App schemes
+    // (cursor://…) have no origin, so show them as given. Query and fragment omitted.
+    return url.origin !== "null" ? `${url.origin}${url.pathname}` : redirectUri.split(/[?#]/)[0]!;
+  } catch {
+    return redirectUri;
+  }
 }
 
 /** Scopes a principal may be offered: `principal.scopes` when set, every scope otherwise. */
@@ -214,12 +237,15 @@ function consentHandler<Env>(options: VaultOAuthOptions<Env>): ExportedHandler<E
           options.consent?.intro ??
             `{client} is asking for access to ${options.resourceName}. Choose what to allow.`,
         ).replace("{client}", `<strong>${escapeHtml(clientName)}</strong>`);
+        const destination = `<p>After you allow, the authorization is sent to <code>${escapeHtml(
+          redirectTarget(authRequest.redirectUri),
+        )}</code>. Allow only if you started this from that app.</p>`;
         const who = principal.label
           ? `<p class="muted">Signed in as ${escapeHtml(principal.label)}</p>`
           : "";
         const response = htmlPage(
           title,
-          `<div class="card"><h1>${escapeHtml(title)}</h1><p>${intro}</p>${who}<form method="post" action="${escapeHtml(
+          `<div class="card"><h1>${escapeHtml(title)}</h1><p>${intro}</p>${destination}${who}<form method="post" action="${escapeHtml(
             url.pathname + url.search,
           )}"><input type="hidden" name="csrf" value="${escapeHtml(
             token,

@@ -24,12 +24,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # Version comes from packageManager in package.json.
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
-      - run: npm run test:e2e:cli
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:e2e:cli
       - name: Upload CLI evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -56,15 +58,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # Version comes from packageManager in package.json.
+      - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
-          cache: npm
-      - run: npm ci
+          node-version-file: .node-version
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Install checksum-pinned official application and plugin
         run: |
-          npm run test:e2e:install
-          npm run test:e2e:plugin
+          pnpm test:e2e:install
+          pnpm test:e2e:plugin
       - name: Record standard sandbox runtime prerequisites
         run: |
           id
@@ -76,7 +80,7 @@ jobs:
         env:
           OBSIDIAN_BINARY: ${{ github.workspace }}/.local/e2e/obsidian/squashfs-root/obsidian
           OBSIDIAN_CLI: ${{ github.workspace }}/.local/e2e/obsidian/squashfs-root/obsidian-cli
-        run: xvfb-run -a -s '-screen 0 1280x900x24 -nolisten tcp' npm run test:e2e:obsidian
+        run: xvfb-run -a -s '-screen 0 1280x900x24 -nolisten tcp' pnpm test:e2e:obsidian
       - name: Assert actual GUI acceptance
         run: |
           node --input-type=module -e "import {readFileSync} from 'node:fs'; import assert from 'node:assert/strict'; const r=JSON.parse(readFileSync('.local/e2e/evidence/result.json')); assert.equal(r.status,'passed'); assert.equal(r.actualObsidian,true); assert.equal(r.cases.length,7);"

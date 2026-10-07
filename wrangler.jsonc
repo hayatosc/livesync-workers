@@ -22,6 +22,13 @@
     //   MCP_STATIC_TOKEN_SCOPES: extra scopes for MCP_STATIC_TOKEN (vault:append,vault:write).
   },
   "kv_namespaces": [{ "binding": "OAUTH_KV" }],
+  // Failed LiveSync / admin sign-ins per client IP. The failure that goes past the
+  // limit (the 11th within a minute) locks that IP out for 15 minutes
+  // (worker/throttle.ts). Remove to disable.
+  // namespace_id only has to be unique among this account's rate limiters.
+  "ratelimits": [
+    { "name": "AUTH_FAILURE_LIMITER", "namespace_id": "4801", "simple": { "limit": 10, "period": 60 } }
+  ],
   "r2_buckets": [
     { "binding": "FTS_BUCKET", "bucket_name": "livesync-fts" },
     { "binding": "CONTENT_BUCKET", "bucket_name": "livesync-content" }

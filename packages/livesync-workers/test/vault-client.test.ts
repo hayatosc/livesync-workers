@@ -135,6 +135,31 @@ describe("Vault.appendToNote", () => {
     expect(write.content).toBe("hello\n\nworld\n");
   });
 
+  it("re-reads and appends again when a concurrent write wins the race", async () => {
+    const conflict = () => Response.json({ error: "CONFLICT" }, { status: 409 });
+    const { vault, fetch } = vaultWith([
+      Response.json({ content: "hello\n" }),
+      conflict(),
+      Response.json({ content: "hello\nsynced\n" }),
+      Response.json({ ok: true, path: "a.md" }),
+    ]);
+    await expect(vault.appendToNote("a.md", "world")).resolves.toEqual({ ok: true, path: "a.md", created: false });
+    const write = (await fetch.mock.calls[3]![0].json()) as Record<string, unknown>;
+    expect(write.content).toBe("hello\nsynced\n\nworld\n");
+    expect(write.expectedBaseHash).toBe(await hashText("hello\nsynced\n"));
+  });
+
+  it("gives up with CONFLICT after three attempts", async () => {
+    const conflict = () => Response.json({ error: "CONFLICT" }, { status: 409 });
+    const { vault, fetch } = vaultWith([
+      Response.json({ content: "a" }), conflict(),
+      Response.json({ content: "b" }), conflict(),
+      Response.json({ content: "c" }), conflict(),
+    ]);
+    await expect(vault.appendToNote("a.md", "world")).resolves.toEqual({ ok: false, error: "CONFLICT", path: "a.md" });
+    expect(fetch).toHaveBeenCalledTimes(6);
+  });
+
   it("reports NOT_FOUND unless createIfMissing", async () => {
     const { vault } = vaultWith(Response.json({ content: null }));
     await expect(vault.appendToNote("missing.md", "x")).resolves.toEqual({

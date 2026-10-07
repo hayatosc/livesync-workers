@@ -5,6 +5,14 @@ export const REQUEST_LIMITS = Object.freeze({
   maxBulkDocuments: 1000,
   maxAttachmentBytes: 10 * 1024 * 1024,
 });
+/** A request body or path CouchDB would answer with 400 bad_request. */
+export class BadRequestError extends Error {}
+/** Thrown by `VaultHost.verifyCredential` to refuse an attempt with 429 instead of checking it. */
+export class AuthThrottledError extends Error {
+  constructor(readonly retryAfterSeconds: number) {
+    super("Too many failed sign-in attempts");
+  }
+}
 export class RequestLimitError extends Error {
   readonly status = 413;
   constructor(readonly limit: keyof typeof REQUEST_LIMITS) {
@@ -45,12 +53,21 @@ export async function readBoundedJson(request: Request): Promise<Record<string, 
   const previous = parsed.get(request);
   if (previous) return previous;
   const text = await readBoundedText(request);
-  let body: Record<string, unknown> = {};
-  try { body = text ? JSON.parse(text) as Record<string, unknown> : {}; }
-  catch { /* Retain the existing malformed-JSON response behavior. */ }
-  if (!body || typeof body !== "object" || Array.isArray(body)) body = {};
+  const body = parseJsonObject(text);
   parsed.set(request, body);
   return body;
+}
+/** An empty body is `{}`; anything but a JSON object is a 400, as in CouchDB. */
+export function parseJsonObject(text: string): Record<string, unknown> {
+  if (!text) return {};
+  let body: unknown;
+  try { body = JSON.parse(text); } catch { throw new BadRequestError("Request body is not valid JSON"); }
+  if (!body || typeof body !== "object" || Array.isArray(body)) throw new BadRequestError("Request body must be a JSON object");
+  return body as Record<string, unknown>;
+}
+/** Percent-decode a path segment, answering 400 for malformed escapes. */
+export function decodePathSegment(segment: string): string {
+  try { return decodeURIComponent(segment); } catch { throw new BadRequestError("Malformed percent-encoding in path"); }
 }
 export function assertDocumentSize(document: unknown): void {
   if (new TextEncoder().encode(JSON.stringify(document) ?? "").byteLength > REQUEST_LIMITS.maxDocumentBytes) {

@@ -4,25 +4,26 @@
   "version": "0.1.0",
   "type": "module",
   "description": "R2-backed LiveSync backend and per-vault MCP on Cloudflare Workers",
-  "workspaces": [
-    "packages/*"
-  ],
+  "packageManager": "pnpm@12.9.1",
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
-    "build": "npm run build -w livesync-workers",
-    "prepare": "npm run build -w livesync-workers",
+    "build": "pnpm --filter livesync-workers build",
+    "prepare": "pnpm --filter livesync-workers build",
     "deploy": "wrangler deploy",
-    "dev": "npm run build && wrangler dev",
+    "dev": "pnpm build && wrangler dev",
     "setup": "node scripts/setup.mjs",
-    "typecheck": "npm run typecheck -w livesync-workers && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.workers.json --noEmit",
-    "test": "npm test -w livesync-workers && vitest run && npm run test:workers",
+    "typecheck": "pnpm --filter livesync-workers typecheck && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.workers.json --noEmit",
+    "test": "pnpm --filter livesync-workers test && vitest run && pnpm test:workers",
     "cf-typegen": "wrangler types",
     "test:workers": "vitest run -c vitest.workers.config.ts",
-    "test:e2e:obsidian": "npm run build && node --use-env-proxy test/e2e/obsidian.mjs",
-    "test:e2e:backend": "npm run build && node test/e2e/backend-check.mjs",
+    "test:e2e:obsidian": "pnpm build && node --use-env-proxy test/e2e/obsidian.mjs",
+    "test:e2e:backend": "pnpm build && node test/e2e/backend-check.mjs",
     "test:e2e:plugin": "node --use-env-proxy test/e2e/plugin.mjs",
     "test:e2e:install": "node --use-env-proxy test/e2e/install.mjs",
     "test:e2e:cli:prepare": "node test/e2e/prepare-cli.mjs",
-    "test:e2e:cli": "npm run build && node test/e2e/livesync-cli.mjs",
+    "test:e2e:cli": "pnpm build && node test/e2e/livesync-cli.mjs",
     "test:performance": "vitest run -c vitest.performance.config.ts --reporter=verbose"
   },
   "dependencies": {
@@ -30,12 +31,13 @@
     "@modelcontextprotocol/sdk": "1.29.0",
     "agents": "0.12.0",
     "ai": "6.0.172",
-    "livesync-workers": "0.1.1",
+    "livesync-workers": "workspace:*",
     "zod": "4.4.1"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.22.0",
     "@cloudflare/workers-types": "4.20260501.1",
+    "@types/node": "24.12.2",
     "@vrtmrz/livesync-commonlib": "0.1.35",
     "@vrtmrz/obsidian-test-session": "0.3.0",
     "typescript": "6.0.3",

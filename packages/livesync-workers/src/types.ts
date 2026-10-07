@@ -36,7 +36,10 @@ export const DEFAULT_VAULT_POLICY: VaultPolicy = {
 
 /** Host-provided hooks: authentication and policy. */
 export interface VaultHost {
-  /** Verify a LiveSync Basic-auth credential and return the vault it grants. */
+  /**
+   * Verify a LiveSync Basic-auth credential and return the vault it grants.
+   * Throw `AuthThrottledError` to answer 429 instead, e.g. after repeated failures.
+   */
   verifyCredential(username: string, password: string): Promise<VaultRef | null>;
   /** Policy for a vault. Called from the Worker and from the Durable Object alarm. */
   loadVaultPolicy(ref: VaultRef): Promise<VaultPolicy>;

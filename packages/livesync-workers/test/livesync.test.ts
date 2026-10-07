@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { DatabaseSync } from "node:sqlite";
-import { handleLiveSyncRequest, splitRevisionBody, REQUEST_LIMITS } from "../src/index.js";
+import { AuthThrottledError, handleLiveSyncRequest, splitRevisionBody, REQUEST_LIMITS } from "../src/index.js";
 import { TestVaultDO, testBindings, testEnv, testHost } from "./helpers.js";
 
 type SqliteRow = Record<string, string | number | null>;
@@ -1141,5 +1141,98 @@ describe("LiveSync change waiting", () => {
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toEqual({ error: "bad_request", reason: "Invalid selector." });
     expect(stub.fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("LiveSync request validation", () => {
+  it("answers 400 to a document body that is not a JSON object", async () => {
+    const { durableObject } = await liveSyncDbCreated();
+    for (const body of ['{"type":"plain", oops', "[1,2]", "null"]) {
+      const response = await durableObject.fetch(
+        new Request("https://db/broken", { method: "PUT", headers: { "content-type": "application/json" }, body }),
+      );
+      expect(response.status, body).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({ error: "bad_request" });
+    }
+    expect((await durableObject.fetch(new Request("https://db/broken"))).status).toBe(404);
+  });
+
+  it("answers 400 to malformed percent-encoding in a document id", async () => {
+    const { durableObject } = await liveSyncDbCreated();
+    const response = await durableObject.fetch(new Request("https://db/bad%ZZ"));
+    expect(response.status).toBe(400);
+  });
+
+  it("answers 400 with CORS to a malformed database name or _changes body", async () => {
+    const stub = { fetch: vi.fn() };
+    const { env } = await envWithStub(stub);
+    const headers = { Authorization: basic("sync-user", "sync-pass"), Origin: "app://obsidian.md" };
+    for (const request of [
+      new Request("https://kuro.example/livesync/my-vault%ZZ", { headers }),
+      new Request("https://kuro.example/livesync/my-vault/_changes", { method: "POST", headers, body: "{nope" }),
+    ]) {
+      const response = await handleLiveSyncRequest(request, env);
+      expect(response.status).toBe(400);
+      expect(response.headers.get("Access-Control-Allow-Origin")).toBe("app://obsidian.md");
+    }
+    expect(stub.fetch).not.toHaveBeenCalled();
+  });
+
+  it("decodes Basic credentials as UTF-8", async () => {
+    const stub = { fetch: vi.fn(async () => Response.json({ ok: true })) };
+    const { env } = await envWithStub(stub);
+    const host = {
+      ...env.host,
+      verifyCredential: async (user: string, password: string) =>
+        user === "ユーザー" && password === "パスワード✓" ? { tenantId: "user-1", databaseName: "my-vault" } : null,
+    };
+    const response = await handleLiveSyncRequest(
+      new Request("https://kuro.example/livesync/my-vault", { headers: { Authorization: basic("ユーザー", "パスワード✓") } }),
+      { ...env, host },
+    );
+    expect(response.status).toBe(200);
+  });
+
+  it("answers 429 with Retry-After and CORS when the host throttles sign-in", async () => {
+    const stub = { fetch: vi.fn() };
+    const { env } = await envWithStub(stub);
+    const host = {
+      ...env.host,
+      verifyCredential: async (): Promise<null> => {
+        throw new AuthThrottledError(900);
+      },
+    };
+    const response = await handleLiveSyncRequest(
+      new Request("https://kuro.example/livesync/my-vault", {
+        headers: { Authorization: basic("sync-user", "sync-pass"), Origin: "app://obsidian.md" },
+      }),
+      { ...env, host },
+    );
+    expect(response.status).toBe(429);
+    expect(response.headers.get("Retry-After")).toBe("900");
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe("app://obsidian.md");
+    expect(stub.fetch).not.toHaveBeenCalled();
+  });
+
+  it("never matches $regex patterns that can backtrack catastrophically", async () => {
+    const { durableObject } = await liveSyncDbCreated();
+    await replicatedDocs(durableObject, [
+      { _id: "regex-doc", _rev: "1-r", _revisions: { start: 1, ids: ["r"] }, path: "aaaa" },
+    ]);
+    const find = async (pattern: string) => {
+      const response = await durableObject.fetch(postRequest("https://db/_find", { selector: { path: { $regex: pattern } } }));
+      return ((await response.json()) as { docs: unknown[] }).docs.length;
+    };
+    expect(await find("^a+$")).toBe(1);
+    expect(await find("^(?:aa)+$")).toBe(1);
+    expect(await find("^(a+)+$")).toBe(0);
+    expect(await find("^(a|aa)*$")).toBe(0);
+    expect(await find("^((a+))+$")).toBe(0);
+    expect(await find("^(?:(?:a|b)c)+$")).toBe(0);
+    expect(await find("^(a)\\1+")).toBe(0);
+    expect(await find("^(?:aa)+$")).toBe(1);
+    expect(await find("^[(]?a+[)]?$")).toBe(1);
+    expect(await find("^(?<x>a)(?:aaa)$")).toBe(1);
+    expect(await find(`^a${"?".repeat(300)}`)).toBe(0);
   });
 });

@@ -22,15 +22,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      # Version comes from packageManager in package.json.
+      - uses: pnpm/action-setup@v6
+
       - uses: actions/setup-node@v4
         with:
-          node-version: 24
-          cache: npm
+          node-version-file: .node-version
+          cache: pnpm
 
       # prepare スクリプトで packages/livesync-workers の build も走る
-      - run: npm ci
+      - run: pnpm install --frozen-lockfile
 
-      - run: npm run build
+      - run: pnpm build
 
       - name: Check script syntax
         run: |
@@ -40,6 +43,6 @@ jobs:
       - name: Check changed whitespace (no formatter configured)
         run: git diff --check origin/main...HEAD
 
-      - run: npm run typecheck
+      - run: pnpm typecheck
 
-      - run: npm test
+      - run: pnpm test

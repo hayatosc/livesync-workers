@@ -6,10 +6,10 @@
   "type": "module",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/odiak/livesync-workers.git",
+    "url": "git+https://github.com/hayatosc/livesync-workers.git",
     "directory": "packages/livesync-workers"
   },
-  "homepage": "https://github.com/odiak/livesync-workers#readme",
+  "homepage": "https://github.com/hayatosc/livesync-workers#readme",
   "keywords": [
     "obsidian",
     "livesync",

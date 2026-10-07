@@ -65,6 +65,8 @@ const FTS_SNIPPETS_PER_DOC = 3;
 // Segments keep replaced/deleted versions until compaction, so ask the index
 // for more candidates than needed and let the vault drop the stale ones.
 const FTS_OVERFETCH = 4;
+/** appendToNote re-reads and retries this many times in total when a write races it. */
+const APPEND_ATTEMPTS = 3;
 
 /** Operations on one vault, with the policy's reserved paths enforced. */
 export interface Vault {
@@ -253,16 +255,20 @@ class VaultClient implements Vault {
     options: { createIfMissing?: boolean } = {},
   ): Promise<AppendVaultNoteResult> {
     if (this.hidden(path)) return { ok: false, error: "FORBIDDEN_PATH", path };
-    const current = await this.readNote(path);
-    if (current == null && !options.createIfMissing) {
-      return { ok: false, error: "NOT_FOUND", path };
-    }
     const block = text.trim();
-    const base = current?.replace(/\s+$/, "");
-    const next = base ? `${base}\n\n${block}\n` : `${block}\n`;
-    const result = await this.writeNote(path, next, await hashText(current ?? ""));
-    if (!result.ok) return { ok: false, error: result.error, path };
-    return { ok: true, path, created: current == null };
+    // Appending cannot lose anyone's edit, so a concurrent write (usually the
+    // Obsidian client syncing) just means re-reading and appending again.
+    for (let attempt = 1; ; attempt++) {
+      const current = await this.readNote(path);
+      if (current == null && !options.createIfMissing) {
+        return { ok: false, error: "NOT_FOUND", path };
+      }
+      const base = current?.replace(/\s+$/, "");
+      const next = base ? `${base}\n\n${block}\n` : `${block}\n`;
+      const result = await this.writeNote(path, next, await hashText(current ?? ""));
+      if (result.ok) return { ok: true, path, created: current == null };
+      if (result.error !== "CONFLICT" || attempt >= APPEND_ATTEMPTS) return { ok: false, error: result.error, path };
+    }
   }
 
   async search(query: string, topK: number): Promise<VectorSearchHit[]> {

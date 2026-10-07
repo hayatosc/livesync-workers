@@ -1,10 +1,17 @@
-# 独自Workerへの組込み
+# 独自 Worker への組み込み
 
-独自ユーザー認証や動的Vaultレジストリを持つホスト向けです。以下はこのフォークのworkspaceソース版の契約で、既存公開npm版への対応を保証するものではありません。通常の導入は[セットアップ](setup.md)を使ってください。
+独自のユーザー認証や、動的な Vault のレジストリを持つホストから、ライブラリ `livesync-workers` を使う方法です。
+ここで説明するのは、このリポジトリの workspace にあるソース版の契約です。
+npm で公開されている既存の版が同じ契約に対応しているとは限りません。
+通常の導入は[セットアップと設定](setup.md)を参照してください。
 
-## ホストとbinding
+## ホストと binding
 
-`VaultHost.verifyCredential`はBasic資格情報を認証し、所有範囲・不変ID・接続DB名を返します。`loadVaultPolicy`はそのVaultの存在／所有範囲を確認して、reservedPaths・excludedFolders・timeZone等を返します。DO alarmからも呼ばれるため、認証前の入力やキー接頭辞だけを信用しないでください。
+`VaultHost.verifyCredential` は Basic 認証の資格情報を検証し、所有範囲、不変 ID、接続 DB 名を返します。
+試行を拒否したいとき（失敗が続いた IP をロックするときなど）は、`AuthThrottledError` を投げると 429 と `Retry-After` を返します。
+
+`loadVaultPolicy` は、その Vault の存在と所有範囲を確認して、reservedPaths、excludedFolders、timeZone などを返します。
+DO の alarm からも呼ばれるので、認証前の入力やキーの接頭辞だけを信用しないでください。
 
 ```ts
 import {
@@ -12,7 +19,7 @@ import {
   createVault, type VaultHost, type VaultBindings,
 } from "livesync-workers";
 
-// Env、lookupCredential、lookupPolicyは独自ホストで定義する。
+// Env、lookupCredential、lookupPolicy はホスト側で定義する。
 function myHost(env: Env): VaultHost {
   return {
     async verifyCredential(username, password) {
@@ -42,21 +49,28 @@ export class VaultDO extends LiveSyncVaultDO<Env> {
 }
 ```
 
-DOはSQLite-backed classとしてbinding／migrationを設定します。`vaultObjectName(ref)`は`vaultId`があればtenantと不変IDをエンコードした名前を生成します。IDなしの旧`${tenantId}:${databaseName}`形式は旧ホスト互換用です。新R2ホストには不変IDを設定してください。
+DO は SQLite-backed のクラスとして binding と migration を設定します。
+`vaultObjectName(ref)` は、`vaultId` があれば tenant と不変 ID をエンコードした名前を返します。
+ID のない旧形式 `${tenantId}:${databaseName}` は、旧ホストとの互換のためだけに残しています。
+R2 を使う新しいホストでは、必ず不変 ID を設定してください。
 
-実workerdではDO内の`ctx.id.name`が使えないことがあります。`handleLiveSyncRequest`と`createVault`は認証済みのVault参照と内部secretを転送します。DOはnamespaceの実ID一致とpolicyを検証して識別情報だけをKVへ保持します。直接内部APIを呼ぶホストもこの契約が必要です。識別できない場合にSQLite本文保存へfallbackさせないでください。
+実際の workerd では、DO の中で `ctx.id.name` を使えないことがあります。
+`handleLiveSyncRequest` と `createVault` は、認証済みの Vault 参照と内部 secret を DO に転送します。
+DO は namespace の実際の ID との一致とポリシーを検証してから、識別情報だけを KV に保存します。
+内部 API を直接呼ぶホストも、この契約に従う必要があります。
+Vault を識別できない場合に、本文を SQLite に保存する経路へ fallback させないでください。
 
-## APIとVaultクライアント
+## API と Vault クライアント
 
 ```ts
-// Worker.fetch内。urlはrequestのURL。
+// Worker の fetch の中。url は request の URL。
 if (url.pathname === "/livesync" || url.pathname.startsWith("/livesync/")) {
   return handleLiveSyncRequest(request, {
     host: myHost(env), bindings: myBindings(env),
   });
 }
 
-// refは認証済みprincipalに対して認可したVault参照。
+// ref は、認証済みの principal に対して認可した Vault の参照。
 const vault = createVault(myBindings(env), {
   ref,
   policy: await myHost(env).loadVaultPolicy(ref),
@@ -66,16 +80,29 @@ await vault.readNote("Projects/Plan.md");
 await vault.grep("東京 API", 20, "Projects");
 ```
 
-`unrestricted()`はreservedPathsのフィルタを外すホスト内部用です。ユーザー向けツールへ公開する場合の認可はホストの責任です。excludedFoldersは検索対象の設定で、読取権限ではありません。
+`unrestricted()` は reservedPaths のフィルタを外す、ホスト内部用の操作です。
+これをユーザー向けのツールに公開する場合の認可は、ホストの責任です。
+excludedFolders は検索対象の設定であり、読み取りの権限ではありません。
 
-## MCP・OAuth
+## MCP と OAuth
 
-`livesync-workers/mcp`の`registerVaultTools`へ、現在のスコープとprincipalがアクセスできるVaultを返すcallbackを渡します。書込scopeはreadersではなくownerとして検証してください。実装例は[worker/mcp.ts](../worker/mcp.ts)と[worker/host.ts](../worker/host.ts)です。
+`livesync-workers/mcp` の `registerVaultTools` には、現在の scope と、principal がアクセスできる Vault を返すコールバックを渡します。
+書き込みの scope は、readers ではなく owner として検証してください。
+登録されるツールの名前は `VAULT_TOOL_NAMES` で取得できます。
+実装例は [worker/mcp.ts](../worker/mcp.ts) と [worker/host.ts](../worker/host.ts) です。
 
-`livesync-workers/oauth`の`createVaultOAuthProvider`には独自セッションの`authenticate`、`loginRedirect`、提供scopeを設定します。既存Workerはadmin principalですが、ライブラリを組み込むホストは独自principalを実装できます。MCP依存は`@modelcontextprotocol/sdk`／`zod`、OAuth依存は`@cloudflare/workers-oauth-provider`です。
+`livesync-workers/oauth` の `createVaultOAuthProvider` には、独自セッションの `authenticate`、`loginRedirect`、提供する scope を設定します。
+この Worker の principal は admin だけですが、ライブラリを組み込むホストは独自の principal を実装できます。
 
-## 検索と旧ホスト互換
+MCP には `@modelcontextprotocol/sdk` と `zod`、OAuth には `@cloudflare/workers-oauth-provider` が必要です（peer dependency）。
 
-この例はR2のSegmenter索引を明示指定し、AI／Vectorizeを要求しません。任意のベクトル検索にはVectorize・embedderとVault隔離設定を追加します。独自`FullTextIndex`を渡す場合はVault隔離、本文ハッシュ照合、世代再構築の契約を維持してください。
+## 検索と旧ホストとの互換
 
-`contentBucket`や不変IDを指定しない旧ホスト向けのSQLite保存・旧全文索引経路はライブラリに残っていますが、root WorkerのR2方式とは別です。旧データを新方式へ移すときは[明示移行](r2-operations.md)を使用します。旧索引の容量guardをSegmenter方式の保証値として流用しないでください。
+上の例は R2 の Segmenter 索引を明示的に指定しているので、Workers AI と Vectorize は不要です。
+任意のベクトル検索を使う場合は、Vectorize、embedder、Vault の隔離設定を追加します。
+独自の `FullTextIndex` を渡す場合は、Vault の隔離、本文ハッシュの照合、世代の再構築という契約を守ってください。
+
+`contentBucket` や不変 ID を指定しない旧ホスト向けに、SQLite に保存する経路と旧全文索引がライブラリに残っています。
+これはこのリポジトリの Worker が使う R2 方式とは別のものです。
+旧データを新方式に移すときは[明示的な移行](r2-operations.md#既存sqliteデータの移行)を使ってください。
+旧索引の容量ガードを、Segmenter 索引での保証値として流用しないでください。

@@ -1,85 +1,138 @@
-# テストとCI
+# テストと CI
 
-## 回帰・Cloudflare Workers統合
+## 単体テストと Workers 統合テスト
 
 ```sh
-npm ci
-npm run build
-npm run typecheck
-npm test
-# Workers統合だけ
-npm run test:workers
+pnpm install --frozen-lockfile
+pnpm build
+pnpm typecheck
+pnpm test
 ```
 
-`npm test`はライブラリNode156件、Worker Node7件、公式Vitest Workers69件の計232件です。`vitest.workers.config.ts`から`test/workers/wrangler.jsonc`のローカルWorkers／SQLite DO／R2 bindingを使用します。[Cloudflare公式Vitest統合](https://developers.cloudflare.com/workers/testing/vitest-integration/)で、独自Miniflare起動は使いません。
+`pnpm test` は、次の 3 つを順に実行します。
 
-統合テストは、同期API・リビジョン競合・チャンク／バイナリ、保存境界の注入障害と再試行、R2 head CAS、DO行／スキーマ消失後の再生、削除・checkpoint、GC、明示移行、管理DB圧縮／容量拒否／ページ化復元と保存失敗、Segmenter解析・索引更新／世代切替、Vault越境・MCP scope／更新競合を検証します。実CPU強制終了・本番R2障害を再現したという意味ではありません。
+- **ライブラリのテスト**：`packages/livesync-workers/test`。Node 上で実行する
+- **Worker のテスト**：`worker/*.test.ts`。Node 上で実行する
+- **Workers 統合テスト**：`test/workers`。`pnpm test:workers` で単独でも実行できる
 
-## 公式LiveSync CLI E2E
+Workers 統合テストは、[Cloudflare 公式の Vitest 統合](https://developers.cloudflare.com/workers/testing/vitest-integration/)を使います。
+`vitest.workers.config.ts` から `test/workers/wrangler.jsonc` を読み、ローカルの workerd で本物の Workers、SQLite DO、R2 の binding を使います。
+独自に Miniflare を起動することはしません。
+
+統合テストが検証する主な内容は次のとおりです。
+
+- 同期 API、リビジョンの競合、チャンクとバイナリ
+- 保存の各境界での障害注入と再試行、R2 head の CAS
+- DO の行やスキーマが消えた後の再生
+- 削除、チェックポイント、GC、明示的な移行
+- 管理 DB の圧縮、容量による拒否、ページ化した復元と保存失敗
+- バックグラウンドのチェックポイント（途中での更新と削除、カーソルからの再開、未完了ページの GC 保護、head の 429 と外部からの CAS）
+- Segmenter の解析、索引の更新と世代の切り替え、共有索引の木の分割と旧根の不変性
+- 旧 BM25 との順位、スコア、フレーズ、原文ハイライトの一致
+- 保守 alarm の交互実行と、欠けていたチャンクが届いた後の再開
+- Vault をまたぐアクセスの拒否、MCP の scope、更新の競合
+- [リクエスト上限](request-limits.md)の境界
+
+これは CPU 制限による実際の強制終了や、本番 R2 の障害を再現したものではありません。
+
+## 公式 LiveSync CLI の E2E
 
 ```sh
-npm run test:e2e:cli:prepare  # 任意: 公式固定ソース取得・ビルド
-npm run test:e2e:cli
+pnpm test:e2e:cli:prepare  # 任意：公式ソースの取得とビルドだけを行う
+pnpm test:e2e:cli
 ```
 
-公式LiveSync 1.0.34のcommit `27a2d9e8c9672fb8df522470712da3cc6e35af11`を取得し、上流lockで`npm ci`、公式CLI workspaceをbuildします。共有コアは0.1.35です。クリーンな同じcommitの既存checkoutは`LIVESYNC_CLI_SOURCE=/absolute/path`で指定できます。初回はGitHub／npmへの接続が必要です。
+公式 LiveSync 1.0.34（commit `27a2d9e8c9672fb8df522470712da3cc6e35af11`）を取得し、上流の lockfile で `npm ci` を実行して、公式 CLI の workspace をビルドします。
+共有コアの版は 0.1.35 です。
+同じ commit のクリーンな checkout がすでにあれば、`LIVESYNC_CLI_SOURCE=/absolute/path` で指定できます。
+初回は GitHub と npm への接続が必要です。
 
-実CLIがチャンク・rev・checkpointを生成し、実WranglerローカルWorkerへ同期します。結果は`.local/e2e/cli-evidence/result.json`です。CLIはObsidianのAPI・ファイルイベント・プラグインロードの検証を代替しません。
+実際の CLI がチャンク、rev、チェックポイントを生成し、Wrangler で起動したローカルの Worker と同期します。
+結果は `.local/e2e/cli-evidence/result.json` に書き出します。
+CLI の E2E は、Obsidian の API、ファイルイベント、プラグインの読み込みの検証を代替するものではありません。
 
-## 実Obsidian＋公式プラグインE2E
+## 実 Obsidian と公式プラグインの E2E
 
-Linux x64、Node 24、標準Electron sandboxを利用できる実行環境と表示サーバーが必要です。
+Linux x64、Node 24、標準の Electron sandbox を使える環境と、表示サーバーが必要です。
 
 ```sh
-npm run test:e2e:install
-npm run test:e2e:plugin
-npm run test:e2e:backend  # 任意: ローカルサービスの前提検査
+pnpm test:e2e:install
+pnpm test:e2e:plugin
+pnpm test:e2e:backend  # 任意：ローカルのバックエンドの前提を確認する
 
 OBSIDIAN_BINARY="$PWD/.local/e2e/obsidian/squashfs-root/obsidian" \
 OBSIDIAN_CLI="$PWD/.local/e2e/obsidian/squashfs-root/obsidian-cli" \
-xvfb-run -a -s '-screen 0 1280x900x24 -nolisten tcp' npm run test:e2e:obsidian
+xvfb-run -a -s '-screen 0 1280x900x24 -nolisten tcp' pnpm test:e2e:obsidian
 ```
 
-公式Obsidian 1.13.7と公式LiveSyncプラグイン1.0.34を`plugin-lock.json`のSHA-256で検証します。installerは配布物を`.local`へ取得・展開し、sandbox helperの所有者／setuidやOS設定を変更しません。上の実行例はホストのXvfb／xauthを使用します。既存表示サーバーを使う場合はDISPLAY／XAUTHORITYを設定してnpmコマンドを直接実行できます。
+公式の Obsidian 1.13.7 と公式 LiveSync プラグイン 1.0.34 を使い、`test/e2e/plugin-lock.json` の SHA-256 で検証します。
+インストーラは配布物を `.local` に取得して展開するだけで、sandbox helper の所有者や setuid、OS の設定は変更しません。
+上の例はホストの Xvfb と xauth を使います。
+既存の表示サーバーを使う場合は、`DISPLAY` と `XAUTHORITY` を設定して `pnpm test:e2e:obsidian` を直接実行できます。
 
-ハーネスは標準sandboxを維持し、隔離user-data-dir・一時Vault・loopbackのみのデバッグ接続を使用します。実アプリ版・プラグイン版を照合し、`actualObsidian: true`と7ケース成功を要求します。結果は`.local/e2e/evidence/result.json`です。起動に失敗した環境の結果をGUI合格として扱いません。
+ハーネスは標準の sandbox を維持したまま、隔離した user-data-dir、一時的な Vault、loopback だけで待ち受けるデバッグ接続を使います。
+起動したアプリとプラグインの版を照合し、`actualObsidian: true` と 7 ケースすべての成功を要求します。
+結果は `.local/e2e/evidence/result.json` に書き出します。
+起動に失敗した環境の結果を、GUI の合格として扱うことはありません。
 
-GUI／CLIはそれぞれ次の7段階を検証します。
+## E2E のケース
 
-1. ノート・複数チャンク添付の作成と独立クライアントへのバイト一致。
-2. 2Vaultで同一パスの分離。
-3. 本文・添付更新と元リンク／バイトの維持。
-4. バックエンド停止中のローカル更新と再接続。
-5. クライアント再起動／別プロセス間のcheckpoint維持。
-6. ノート・添付削除の伝播。
-7. DO管理DB消去＋Worker再起動後のR2復元、残存添付のSHA-256一致、削除済みファイルの非再出現。
+CLI と GUI は、それぞれ次の 7 ケースを検証します。
 
-添付fixtureは画像／PDF拡張子を持つ任意バイト列です。画像表示やPDF解析は検査しません。実行ごとにローカルBasicパスワード、内部secret、R2／DO保存域を生成し、終了時にprofile・Vault・プロセス・資格情報を破棄します。実Cloudflare資源・実ユーザーVault・永続的な資格情報は使いません。
+1. ノートと、複数チャンクに分かれる添付を作成し、別のクライアントでバイト単位で一致する
+2. 2 つの Vault で、同じパスのファイルが分離される
+3. 本文と添付を更新しても、元のリンクとバイト列が保たれる
+4. バックエンドが止まっている間のローカルの更新が、再接続後に同期される
+5. クライアントの再起動や別プロセスの間で、チェックポイントが保たれる
+6. ノートと添付の削除が伝わる
+7. DO の管理 DB を消して Worker を再起動した後、R2 から復元され、残っている添付の SHA-256 が一致し、削除したファイルが再び現れない
 
-## GitHub Actionsと確認済み結果
+添付の fixture は、画像や PDF の拡張子をつけた任意のバイト列です。
+画像の表示や PDF の解析は検査しません。
 
-[CI](../.github/workflows/ci.yml)はbuild、型検査、全232テスト、`.mjs`構文、mainとの差分空白検査を実行します。lint／formatterは未設定で、空白検査をそれらの合格とは扱いません。
+実行のたびに、ローカル用の Basic 認証のパスワード、内部 secret、R2 と DO の保存領域を生成し、終了時に profile、Vault、プロセス、資格情報を破棄します。
+実際の Cloudflare の資源、実ユーザーの Vault、永続的な資格情報は使いません。
 
-[LiveSync E2E](../.github/workflows/e2e.yml)はdraftを含むPRでCLIとGUIを別ジョブ実行します。CLIはUbuntu 24.04、GUIはUbuntu 22.04 hosted VMです。通常のnamespace sandboxとauthenticated Xvfbを使い、sysctl・AppArmor・seccomp・setuid変更は行いません。前提検査が失敗した場合はジョブも失敗します。workflow権限は`contents: read`、checkoutは認証情報を残しません。
+## GitHub Actions
 
-検証結果と対象headは[Actions一覧](https://github.com/hayatosc/livesync-workers/actions)で確認してください。GUIの結果JSONは実アプリ／プラグイン版と実チャンク数を記録します。
+[CI](../.github/workflows/ci.yml) は、build、型検査、全テスト、`.mjs` の構文、main との差分の空白を検査します。
+lint と formatter は設定していないので、空白の検査をそれらの代わりとは扱いません。
 
-失敗時も結果JSONをActions artifactに保存し、保持期間は14日です。GUIの失敗スクリーンショットも対象ですが、一時Vault／profile／資格情報は対象外です。既存v4 ActionsのNode 20非推奨警告（runnerはNode 24で実行）と、Ubuntu 22.04の2027年4月退役予定があるため、後継runnerは標準sandboxで実測して移行してください。release専用Publish workflowはPRで実行しません。
+[LiveSync E2E](../.github/workflows/e2e.yml) は、draft を含む PR で、CLI と GUI を別々のジョブとして実行します。
+CLI は Ubuntu 24.04、GUI は Ubuntu 22.04 の hosted VM で動きます。
+通常の namespace sandbox と、認証つきの Xvfb を使い、sysctl、AppArmor、seccomp、setuid は変更しません。
+前提の確認に失敗した場合は、ジョブも失敗します。
+workflow の権限は `contents: read` で、checkout は認証情報を残しません。
 
-## 検証外
+結果の JSON は、失敗したときも Actions の artifact として 14 日間保存します。
+GUI のジョブでは、失敗時のスクリーンショットも保存します。
+一時的な Vault、profile、資格情報は保存しません。
+各実行の結果と対象の commit は [Actions の一覧](https://github.com/hayatosc/livesync-workers/actions)で確認できます。
 
-本番負荷・費用、本番R2障害／実ネットワーク断、CPU上限による実強制終了、巨大履歴の復元、実ユーザー移行、E2EE／圧縮した同期、OAuthブラウザからMcpAgentまでの完全E2Eは未検証です。MCP scope／Vault認可はSDKトランスポートと実Workersの統合で検証しています。詳細な容量制約は[運用文書](r2-operations.md)を参照してください。
+Ubuntu 22.04 の runner は 2027 年 4 月に退役する予定なので、それまでに後継の runner でも標準の sandbox が動くことを確かめて移行する必要があります。
+release 専用の Publish workflow は、PR では実行しません。
 
-バックグラウンドチェックポイントは途中更新／削除、カーソル再開、未完了ページのGC保護、保存失敗再試行、同時更新、head 429／外部head CAS、順序付きカタログ境界を検証します。実CLI／GUIの復元ケースも圧縮を完了してからDOキャッシュを消去します。性能試験は別途`npm run test:performance`で実行します。[測定条件と結果](performance.md)を参照してください。
+## 性能測定
 
-## チェックポイント境界テストの期限
+性能測定は通常のテストに含めず、別に実行します。
 
-mainのActions 37404146196では、rolling snapshotのケースだけが5秒期限を約172ms超え、他214件は成功しました。同じ旧ケースはローカルで約3645msで完了し、実行中に自動索引alarmと手動alarmが混在していました。対象ケースは自動スケジューラを止めて手動進行に統一し、129文書で128行ページ境界を越える条件を維持します。途中更新・削除・競合・バイナリ・ローカル同期記録削除・復元後の変更フィード一致を省略していません。
+```sh
+pnpm test:performance
+```
 
-対象ケースだけの期限を15秒とし、フェーズ到達は50回、完了drainは1000回の有限ループで検査します。suite全体の期限は引き上げません。変更後の初回ローカル測定は約790ms、対象ケースの独立3回再実行は864／804／906msで成功しました。これはローカル観測で、本番性能ではありません。新しい[本文／文書／件数上限](request-limits.md)の境界テストも実Workers／SQLite／R2で実行します。
+測定条件と結果は[性能測定の記録](benchmarks/)にあります。
 
-## 共有索引・保存統合・公平なalarm
+## 検証していないこと
 
-追加10件は、共有木の分割／上書き／削除と旧根の不変性、旧BM25との順位／スコア／フレーズ／原文ハイライト一致、希少語・不一致語のGET件数とLIST不要、manifest CAS競合と派生GC、旧active世代の維持、本文／履歴の同一不変参照とDO全消去後の復元、チェックポイント完了前の索引進捗、writer close失敗の再試行、チェックポイント失敗時の索引進捗、欠落チャンクの上限到達後の再開を検査します。最後のケースはhydrateを55ms遅延させ、50ms境界による延期を確実に起こし、延期ノートのattemptsが20のまま全40件が完了することを要求します。
+次の項目は検証していません。
 
-[同一ハーネスの変更前後測定](shared-performance.md)は任意実行の公式Workers統合テストです。通常CIの232件には含みません。ローカル測定は操作ごとに人工遅延2msを入れ、実R2のネットワーク／課金／CPU上限は測定しません。
+- 本番の負荷と費用
+- 本番 R2 の障害と、実際のネットワークの切断
+- CPU 上限による実際の強制終了
+- 巨大な履歴の復元
+- 実ユーザーの Vault の移行
+- E2EE や圧縮を使った同期
+- OAuth のブラウザ操作から McpAgent までの通しの E2E
+
+MCP の scope と Vault の認可は、SDK のトランスポートと実 Workers での統合テストで検証しています。
+容量の制約は[保存、復元、移行](r2-operations.md#容量と性能の制約)を参照してください。
