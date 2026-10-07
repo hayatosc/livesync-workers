@@ -3,23 +3,23 @@
 ## 回帰・Cloudflare Workers統合
 
 ```sh
-npm ci
-npm run build
-npm run typecheck
-npm test
+pnpm install --frozen-lockfile
+pnpm build
+pnpm typecheck
+pnpm test
 # Workers統合だけ
-npm run test:workers
+pnpm test:workers
 ```
 
-`npm test`はライブラリNode156件、Worker Node7件、公式Vitest Workers69件の計232件です。`vitest.workers.config.ts`から`test/workers/wrangler.jsonc`のローカルWorkers／SQLite DO／R2 bindingを使用します。[Cloudflare公式Vitest統合](https://developers.cloudflare.com/workers/testing/vitest-integration/)で、独自Miniflare起動は使いません。
+`pnpm test`はライブラリNode156件、Worker Node7件、公式Vitest Workers69件の計232件です。`vitest.workers.config.ts`から`test/workers/wrangler.jsonc`のローカルWorkers／SQLite DO／R2 bindingを使用します。[Cloudflare公式Vitest統合](https://developers.cloudflare.com/workers/testing/vitest-integration/)で、独自Miniflare起動は使いません。
 
 統合テストは、同期API・リビジョン競合・チャンク／バイナリ、保存境界の注入障害と再試行、R2 head CAS、DO行／スキーマ消失後の再生、削除・checkpoint、GC、明示移行、管理DB圧縮／容量拒否／ページ化復元と保存失敗、Segmenter解析・索引更新／世代切替、Vault越境・MCP scope／更新競合を検証します。実CPU強制終了・本番R2障害を再現したという意味ではありません。
 
 ## 公式LiveSync CLI E2E
 
 ```sh
-npm run test:e2e:cli:prepare  # 任意: 公式固定ソース取得・ビルド
-npm run test:e2e:cli
+pnpm test:e2e:cli:prepare  # 任意: 公式固定ソース取得・ビルド
+pnpm test:e2e:cli
 ```
 
 公式LiveSync 1.0.34のcommit `27a2d9e8c9672fb8df522470712da3cc6e35af11`を取得し、上流lockで`npm ci`、公式CLI workspaceをbuildします。共有コアは0.1.35です。クリーンな同じcommitの既存checkoutは`LIVESYNC_CLI_SOURCE=/absolute/path`で指定できます。初回はGitHub／npmへの接続が必要です。
@@ -31,13 +31,13 @@ npm run test:e2e:cli
 Linux x64、Node 24、標準Electron sandboxを利用できる実行環境と表示サーバーが必要です。
 
 ```sh
-npm run test:e2e:install
-npm run test:e2e:plugin
-npm run test:e2e:backend  # 任意: ローカルサービスの前提検査
+pnpm test:e2e:install
+pnpm test:e2e:plugin
+pnpm test:e2e:backend  # 任意: ローカルサービスの前提検査
 
 OBSIDIAN_BINARY="$PWD/.local/e2e/obsidian/squashfs-root/obsidian" \
 OBSIDIAN_CLI="$PWD/.local/e2e/obsidian/squashfs-root/obsidian-cli" \
-xvfb-run -a -s '-screen 0 1280x900x24 -nolisten tcp' npm run test:e2e:obsidian
+xvfb-run -a -s '-screen 0 1280x900x24 -nolisten tcp' pnpm test:e2e:obsidian
 ```
 
 公式Obsidian 1.13.7と公式LiveSyncプラグイン1.0.34を`plugin-lock.json`のSHA-256で検証します。installerは配布物を`.local`へ取得・展開し、sandbox helperの所有者／setuidやOS設定を変更しません。上の実行例はホストのXvfb／xauthを使用します。既存表示サーバーを使う場合はDISPLAY／XAUTHORITYを設定してnpmコマンドを直接実行できます。
@@ -70,7 +70,7 @@ GUI／CLIはそれぞれ次の7段階を検証します。
 
 本番負荷・費用、本番R2障害／実ネットワーク断、CPU上限による実強制終了、巨大履歴の復元、実ユーザー移行、E2EE／圧縮した同期、OAuthブラウザからMcpAgentまでの完全E2Eは未検証です。MCP scope／Vault認可はSDKトランスポートと実Workersの統合で検証しています。詳細な容量制約は[運用文書](r2-operations.md)を参照してください。
 
-バックグラウンドチェックポイントは途中更新／削除、カーソル再開、未完了ページのGC保護、保存失敗再試行、同時更新、head 429／外部head CAS、順序付きカタログ境界を検証します。実CLI／GUIの復元ケースも圧縮を完了してからDOキャッシュを消去します。性能試験は別途`npm run test:performance`で実行します。[測定条件と結果](performance.md)を参照してください。
+バックグラウンドチェックポイントは途中更新／削除、カーソル再開、未完了ページのGC保護、保存失敗再試行、同時更新、head 429／外部head CAS、順序付きカタログ境界を検証します。実CLI／GUIの復元ケースも圧縮を完了してからDOキャッシュを消去します。性能試験は別途`pnpm test:performance`で実行します。[測定条件と結果](performance.md)を参照してください。
 
 ## チェックポイント境界テストの期限
 

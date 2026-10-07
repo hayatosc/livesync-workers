@@ -7,9 +7,9 @@
 操作ごとに人工遅延2msを加えています。遠隔R2の遅延・同一キー書込レート・課金・WorkersのCPU上限の測定ではありません。GET数はコードが発行するbinding操作で、R2内部課金の見積りではありません。5試行のp95は最大値であり、統計的な本番SLOではありません。
 
 ```sh
-PERF_LABEL=after npm run test:performance -- test/performance/shared.test.ts
+PERF_LABEL=after pnpm test:performance -- test/performance/shared.test.ts
 # 別checkoutの旧ソースへ同じハーネスと既存performance設定をコピーして実行
-PERF_LABEL=before npm run test:performance -- test/performance/shared.test.ts
+PERF_LABEL=before pnpm test:performance -- test/performance/shared.test.ts
 ```
 
 全サンプル・全alarmの進捗・SQLiteサイズは[変更前JSON](shared-performance-before.json)と[変更後JSON](shared-performance-after.json)に保存しています。通常テスト232件とは別の任意性能試験です。

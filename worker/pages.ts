@@ -6,7 +6,7 @@ import { SETUP_URI_CLIENT_SCRIPT, SETUP_URI_IDS } from "./setup-uri.js";
 import { VERSION } from "./version.js";
 
 const TITLE = "livesync-workers";
-const REPO_URL = "https://github.com/odiak/livesync-workers";
+const REPO_URL = "https://github.com/hayatosc/livesync-workers";
 
 export function loginPage(next: string, error?: string): Response {
   return htmlPage(

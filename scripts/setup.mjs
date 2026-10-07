@@ -10,7 +10,7 @@ const bucketNames = [...config.matchAll(/"bucket_name":\s*"([^"]+)"/g)].map((mat
 
 function wrangler(args, { allowExisting = true } = {}) {
   console.log(`\n$ wrangler ${args.join(" ")}`);
-  const result = spawnSync("npx", ["wrangler", ...args], { encoding: "utf8", shell: process.platform === "win32" });
+  const result = spawnSync("pnpm", ["exec", "wrangler", ...args], { encoding: "utf8", shell: process.platform === "win32" });
   const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
   process.stdout.write(output);
   if (result.status !== 0) {
@@ -32,9 +32,9 @@ Done. The KV namespace for OAuth (OAUTH_KV) is provisioned automatically on firs
 
 Next:
   1. Set secrets (see .dev.vars.example):
-       npx wrangler secret put LIVESYNC_PASSWORD
-       npx wrangler secret put ADMIN_PASSWORD
-       npx wrangler secret put SESSION_SECRET
+       pnpm exec wrangler secret put LIVESYNC_PASSWORD
+       pnpm exec wrangler secret put ADMIN_PASSWORD
+       pnpm exec wrangler secret put SESSION_SECRET
   2. Deploy:
-       npm run build && npm run deploy
+       pnpm build && pnpm run deploy
 `);

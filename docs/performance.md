@@ -37,11 +37,11 @@
 ## 再実行
 
 ```sh
-npm ci
-PERF_LABEL=after npm run test:performance
+pnpm install --frozen-lockfile
+PERF_LABEL=after pnpm test:performance
 ```
 
-変更前は7ffc94eの別worktreeへ、現在の`vitest.performance.config.ts`と`test/performance/sync.test.ts`だけをコピーし、同一lockfileの依存で実行します。変更前のライブラリソースは変更しません。比較時に別テスト／E2Eを並列実行しないでください。生ログは`.local/e2e/performance-evidence/*-latest.log`に保存しました。通常の`npm test`に性能試験は含めません。
+変更前は7ffc94eの別worktreeへ、現在の`vitest.performance.config.ts`と`test/performance/sync.test.ts`だけをコピーし、同一lockfileの依存で実行します。変更前のライブラリソースは変更しません。比較時に別テスト／E2Eを並列実行しないでください。生ログは`.local/e2e/performance-evidence/*-latest.log`に保存しました。通常の`pnpm test`に性能試験は含めません。
 
 ## 未検証と本番測定
 

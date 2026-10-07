@@ -6,7 +6,7 @@
 
 1. 現Worker commit、`wrangler.jsonc`の資源名／ID／変数／DO migration履歴を記録する。
 2. コンテンツ正本・旧DO・旧索引を保全し、復元と切戻し条件を[運用文書](r2-operations.md)で確認する。
-3. `npm ci`、build、型検査、全テストと[CLI／GUI E2E](testing.md)を更新候補で実行する。
+3. `pnpm install --frozen-lockfile`、build、型検査、全テストと[CLI／GUI E2E](testing.md)を更新候補で実行する。
 4. binding・secret・migration・解析版に変更がないか確認する。既存DO migrationを削除／並べ替えしない。
 
 SQLiteからR2への切替は通常のWorker更新とは別の明示移行です。新IDの設定だけでは旧データをコピーしません。R2参照を持つDOを旧SQLite方式Workerで直接開くこともできません。
@@ -16,9 +16,9 @@ SQLiteからR2への切替は通常のWorker更新とは別の明示移行です
 deployを承認・計画した場合にのみ、検証したcheckoutから実行します。
 
 ```sh
-npm ci
-npm run build
-npm run deploy
+pnpm install --frozen-lockfile
+pnpm build
+pnpm run deploy
 ```
 
 Cloudflare Workers Builds等の自動deployを利用している環境では、production branchへのpushがdeployを引き起こす設定かを確認してください。このリポジトリのGitHub ActionsはPR検査とrelease時のnpm公開であり、Workerの本番deploy workflowはありません。必要なsecretは環境側で設定し、Gitへ保存しません。

@@ -4,21 +4,21 @@
 
 ## 新規導入
 
-Node.js 24、npm、CloudflareアカウントとWranglerの認証が必要です。
+Node.js 24、pnpm 12、CloudflareアカウントとWranglerの認証が必要です。
 
 ```sh
-npm ci
-npm run build
-npm run typecheck
-npm test
+pnpm install --frozen-lockfile
+pnpm build
+pnpm typecheck
+pnpm test
 
 # 本番資源を作成する場合だけ実行
-npx wrangler login
-npm run setup
-npx wrangler secret put LIVESYNC_PASSWORD
-npx wrangler secret put ADMIN_PASSWORD
-npx wrangler secret put SESSION_SECRET
-npm run deploy
+pnpm exec wrangler login
+pnpm run setup
+pnpm exec wrangler secret put LIVESYNC_PASSWORD
+pnpm exec wrangler secret put ADMIN_PASSWORD
+pnpm exec wrangler secret put SESSION_SECRET
+pnpm run deploy
 ```
 
 `scripts/setup.mjs`は`wrangler.jsonc`のR2 bucketを作成します。現設定ではVectorizeを作成しません。OAuth KVは初回deploy時の自動provisioningを利用する設定です。SQLite DOクラスの作成はWranglerの`migrations`にあります。既存環境のbucket名・binding ID・DO migration履歴は上書きせず維持してください。
