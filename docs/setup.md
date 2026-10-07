@@ -26,6 +26,8 @@ pnpm test
 `OAUTH_KV` に設定してください。既存環境を更新する場合は、これらの ID を維持します。
 Worker 名を変更するときは、DO binding の `worker` も同じ名前に揃えてください。
 
+既存の Wrangler 環境から初めて `worker.exports` に移行する場合は、デプロイ前に[切り戻し用ビルドを準備](upgrading.md#初回-exports-デプロイ前の切り戻し準備)してください。
+
 ```sh
 pnpm exec cf auth login
 pnpm run setup

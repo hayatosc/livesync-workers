@@ -38,6 +38,7 @@ jobs:
       - name: Check script syntax
         run: |
           node --check scripts/setup.mjs
+          node --check scripts/prepare-rollback.mjs
           for script in test/e2e/*.mjs; do node --check "$script"; done
 
       - name: Check changed whitespace (no formatter configured)

@@ -51,7 +51,7 @@ it("does not let repeated checkpoint page failures starve indexing",async()=>{
  });
 });
 it("serves reads and replication writes while publication is blocked, then reindexes concurrent changes", async () => {
- const stub = await fixture("concurrent-publication");
+ const stub = await fixture("concurrent-publication", 2);
  await runInDurableObject(stub, async (instance: PersistentVaultDO, state) => {
   const mutable = instance as unknown as { bindings(): VaultBindings };
   const original = mutable.bindings.bind(instance);
@@ -87,13 +87,95 @@ it("serves reads and replication writes while publication is blocked, then reind
    release(); await alarm;
    expect(state.storage.sql.exec("SELECT pending,fts_hash FROM index_state WHERE path='n-0.md'").one())
     .toMatchObject({ pending: 1, fts_hash: null });
+   expect(state.storage.sql.exec("SELECT pending,fts_hash FROM index_state WHERE path='n-1.md'").one())
+    .toMatchObject({ pending: 0, fts_hash: expect.any(String) });
    await instance.alarm();
    expect(state.storage.sql.exec("SELECT pending FROM index_state WHERE path='n-0.md'").one()).toMatchObject({ pending: 0 });
   } finally { release(); await alarm; mutable.bindings = original; }
  });
  const index = new SegmenterFullTextIndex(bindings.SEARCH), ref = { tenantId: "concurrent-publication", databaseName: "vault" };
  expect((await index.search(ref, "大阪", 5)).hits).toHaveLength(1);
- expect((await index.search(ref, "東京", 5)).hits).toHaveLength(0);
+ expect((await index.search(ref, "東京", 5)).hits).toMatchObject([{ path: "n-1.md" }]);
+});
+function blockPublication(instance: PersistentVaultDO) {
+ const mutable = instance as unknown as { bindings(): VaultBindings };
+ const original = mutable.bindings.bind(instance);
+ let entered!: () => void, release!: () => void, hold = true;
+ const publishing = new Promise<void>(resolve => { entered = resolve; });
+ const blocked = new Promise<void>(resolve => { release = resolve; });
+ const fullText = new Proxy(original().fullText!, { get(target, key) {
+  if (key === "openWriter") return async (...args: Parameters<typeof target.openWriter>) => {
+   const writer = await target.openWriter(...args);
+   return { ...writer, close: async () => {
+    if (hold) { hold = false; entered(); await blocked; }
+    await writer.close();
+   } };
+  };
+  const value = Reflect.get(target, key);
+  return typeof value === "function" ? value.bind(target) : value;
+ } });
+ mutable.bindings = () => ({ ...original(), fullText });
+ return { publishing, release: () => release(), restore: () => { mutable.bindings = original; } };
+}
+it("acknowledges prepared notes when an unrelated chunk arrives during publication", async () => {
+ const stub = await fixture("unrelated-publication", 2);
+ await runInDurableObject(stub, async (instance: PersistentVaultDO, state) => {
+  const gate = blockPublication(instance), alarm = instance.alarm();
+  try {
+   await gate.publishing;
+   expect((await instance.fetch(new Request("https://db/_bulk_docs", { method: "POST", body: JSON.stringify({
+    new_edits: false, docs: [{ _id: "h:unrelated", _rev: "1-fixed", type: "leaf", data: "別のノート" }],
+   }) }))).status).toBe(200);
+   gate.release(); await alarm;
+   expect(state.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM index_state WHERE pending=0 AND fts_hash IS NOT NULL").one().n).toBe(2);
+  } finally { gate.release(); await alarm; gate.restore(); }
+ });
+});
+it("keeps only notes consuming a changed chunk pending during publication", async () => {
+ const stub = await fixture("changed-chunk-publication", 2);
+ await stub.fetch("https://db/_bulk_docs", { method: "POST", body: JSON.stringify({ new_edits: false, docs: [
+  { _id: "n-0", _rev: "2-chunked", _revisions: { start: 2, ids: ["chunked", "fixed"] }, path: "n-0.md", type: "plain", children: ["h:shared"] },
+  { _id: "h:shared", _rev: "1-fixed", type: "leaf", data: "京都" },
+ ] }) });
+ await runInDurableObject(stub, async (instance: PersistentVaultDO, state) => {
+  const gate = blockPublication(instance), alarm = instance.alarm();
+  try {
+   await gate.publishing;
+   expect((await instance.fetch(new Request("https://db/_bulk_docs", { method: "POST", body: JSON.stringify({ new_edits: false, docs: [
+    { _id: "h:shared", _rev: "2-new", _revisions: { start: 2, ids: ["new", "fixed"] }, type: "leaf", data: "大阪" },
+   ] }) }))).status).toBe(200);
+   gate.release(); await alarm;
+   expect(state.storage.sql.exec("SELECT pending,fts_hash FROM index_state WHERE path='n-0.md'").one()).toMatchObject({ pending: 1, fts_hash: null });
+   expect(state.storage.sql.exec("SELECT pending,fts_hash FROM index_state WHERE path='n-1.md'").one()).toMatchObject({ pending: 0, fts_hash: expect.any(String) });
+   await instance.alarm();
+   expect(state.storage.sql.exec("SELECT pending FROM index_state WHERE path='n-0.md'").one()).toMatchObject({ pending: 0 });
+  } finally { gate.release(); await alarm; gate.restore(); }
+ });
+ const index = new SegmenterFullTextIndex(bindings.SEARCH), ref = { tenantId: "changed-chunk-publication", databaseName: "vault" };
+ expect((await index.search(ref, "大阪", 5)).hits).toMatchObject([{ path: "n-0.md" }]);
+ expect((await index.search(ref, "京都", 5)).hits).toHaveLength(0);
+});
+it("does not acknowledge a deletion when another document recreates the path during publication", async () => {
+ const stub = await fixture("recreated-path-publication");
+ await runInDurableObject(stub, async (instance: PersistentVaultDO, state) => {
+  await instance.alarm();
+  await instance.fetch(new Request("https://db/_bulk_docs", { method: "POST", body: JSON.stringify({ new_edits: false, docs: [
+   { _id: "n-0", _rev: "2-gone", _revisions: { start: 2, ids: ["gone", "fixed"] }, _deleted: true, path: "n-0.md", type: "plain" },
+  ] }) }));
+  const gate = blockPublication(instance), alarm = instance.alarm();
+  try {
+   await gate.publishing;
+   expect((await instance.fetch(new Request("https://db/_bulk_docs", { method: "POST", body: JSON.stringify({ new_edits: false, docs: [
+    { _id: "replacement", _rev: "1-fixed", path: "n-0.md", type: "plain", data: "大阪" },
+   ] }) }))).status).toBe(200);
+   gate.release(); await alarm;
+   expect(state.storage.sql.exec("SELECT pending FROM index_state WHERE path='n-0.md'").one()).toMatchObject({ pending: 1 });
+   await instance.alarm();
+   expect(state.storage.sql.exec("SELECT doc_id,pending FROM index_state WHERE path='n-0.md'").one()).toMatchObject({ doc_id: "replacement", pending: 0 });
+  } finally { gate.release(); await alarm; gate.restore(); }
+ });
+ const ref = { tenantId: "recreated-path-publication", databaseName: "vault" };
+ expect((await new SegmenterFullTextIndex(bindings.SEARCH).search(ref, "大阪", 5)).hits).toMatchObject([{ path: "n-0.md" }]);
 });
 it("orders database deletion after a blocked publisher without blocking ordinary reads", async () => {
  const stub = await fixture("delete-during-publication");

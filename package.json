@@ -14,6 +14,7 @@
     "deploy": "pnpm build && cf deploy",
     "dev": "pnpm build && cf dev",
     "setup": "node scripts/setup.mjs",
+    "rollback:prepare": "node scripts/prepare-rollback.mjs",
     "typecheck": "cf workers types && pnpm --filter livesync-workers typecheck && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.workers.json --noEmit",
     "test": "pnpm --filter livesync-workers test && vitest run && pnpm test:workers",
     "cf-typegen": "cf workers types",

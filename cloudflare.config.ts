@@ -8,7 +8,8 @@ export default defineConfig({
     compatibilityFlags: ["nodejs_compat"],
     entrypoint: "./worker/index.ts",
     observability: { enabled: true },
-    // These declarations preserve the existing SQLite namespaces.
+    // Preserve namespaces. First exports deployment crosses a rollback boundary:
+    // retain exports in rollback builds; see docs/upgrading.md before deploying.
     exports: {
       VaultDO: exports.durableObject({ storage: "sqlite" }),
       VaultMCP: exports.durableObject({ storage: "sqlite" }),

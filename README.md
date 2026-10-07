@@ -14,7 +14,6 @@ Obsidian の Self-hosted LiveSync 互換 API と MCP サーバーを、Cloudflar
 - [独自 Worker への組み込み](docs/embedding.md)：独自の認証や Vault 管理を持つホストからの利用
 - [更新手順](docs/upgrading.md)：このフォークの変更を保ったまま更新する方法
 - [性能測定の記録](docs/benchmarks/)：ローカル環境での変更前後の比較
-- [実環境の同期性能と検証結果](docs/sync-performance-2026-10-07.md)：差分取得の高速化、索引更新、データ整合性の確認
 
 ## 構成
 

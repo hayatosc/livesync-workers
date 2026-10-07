@@ -1959,8 +1959,9 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
 
     let retry: boolean;
     const prepared = new Map<string, IndexStateRow | null>();
+    const preparedRevisions = new Map<string, Map<string, string>>();
     try {
-      retry = await this.indexTouchedPaths(touchedPaths, { ref, policy, fullText, writeFullText });
+      retry = await this.indexTouchedPaths(touchedPaths, { ref, policy, fullText, writeFullText, preparedRevisions });
     } finally {
       // Even a later hydration/vector failure must not acknowledge staged work.
       for (const path of attemptedPaths) {
@@ -1969,7 +1970,6 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
           ON CONFLICT(path) DO UPDATE SET fts_hash=NULL,pending=1`, path);
       }
     }
-    const preparedSeq = this.currentSeq();
     const preparedEpoch = this.indexPublicationEpoch;
 
     if (sweep != null) {
@@ -2011,8 +2011,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
           console.warn("Full-text publication failed", { message: String(error), stack: error instanceof Error ? error.stack : undefined });
         }
         return this.exclusive(async () => {
-          // Recovery/rebuild or a concurrent content write invalidates this
-          // snapshot. Leave paths pending rather than acknowledging stale data.
+          // Recovery/rebuild invalidates the entire snapshot. Normal writes
+          // invalidate only the paths whose source revisions actually changed.
           if (this.indexPublicationEpoch !== preparedEpoch || !this.dbExists()) return true;
           if (failed) {
             // Dense notes can touch most posting pages. Reduce the next slice
@@ -2022,13 +2022,20 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
             for (const path of attemptedPaths) this.sqlExec("UPDATE index_state SET attempts=attempts+1 WHERE path=?", path);
             return true;
           }
-          if (this.currentSeq() !== preparedSeq) return true;
+          let stale = false;
           for (const [path, row] of prepared) {
+            const source = touchedPaths.get(path);
+            const current = await this.findNoteRow(path, false, false);
+            const samePath = source ? current?.id === source.id && current.rev === source.rev : current == null;
+            const sameRevisions = [...preparedRevisions.get(path)!].every(([id, rev]) => this.rawWinningRow(id)?.rev === rev);
+            // Check absence as well as revisions: a replacement document may
+            // recreate a path while its old index entry is being deleted.
+            if (!samePath || !sameRevisions) { stale = true; continue; }
             if (!row) this.sqlExec("DELETE FROM index_state WHERE path=?", path);
             else this.sqlExec(`UPDATE index_state SET doc_id=?,hash=?,fts_hash=?,chunks=?,pending=?,attempts=? WHERE path=?`,
               row.doc_id, row.hash, row.fts_hash, row.chunks, row.pending, row.attempts, path);
           }
-          return false;
+          return stale;
         });
       } } : {}),
     };
@@ -2063,6 +2070,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       policy: VaultPolicy;
       fullText: FullTextIndex | undefined;
       writeFullText: (path: string, work: (writer: FullTextIndexWriter) => Promise<void>) => Promise<boolean>;
+      preparedRevisions: Map<string, Map<string, string>>;
     },
   ): Promise<boolean> {
     const { ref, policy, fullText, writeFullText } = options;
@@ -2081,9 +2089,12 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       return pending;
     };
     const inputs = new Map(await mapBatches([...touchedPaths].slice(0, batchSize), 4, async ([path, source]) => {
-      const row = source ? await hydrate(source) : null;
+      const revisions = new Map<string, string>();
+      const readRevision = (row: RevRow) => { revisions.set(row.id, row.rev); return hydrate(row); };
+      const row = source ? await readRevision(source) : null;
       const indexable = row != null && cloneBody(row).type !== "newnote" && isIndexableMarkdownPath(path, policy);
-      const content = indexable ? await this.fileContentForRow(row!, hydrate) : null;
+      const content = indexable ? await this.fileContentForRow(row!, readRevision) : null;
+      options.preparedRevisions.set(path, revisions);
       return [path, { row, content }] as const;
     }));
     const started = Date.now(); let processed = 0;
