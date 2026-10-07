@@ -1,45 +1,82 @@
 # livesync-workers（R2永続化フォーク）
 
-Obsidian Self-hosted LiveSync互換APIとMCPをCloudflare Workersで提供します。永続データの正本はR2、更新の調整はVaultごとのSQLite-backed Durable Object、検索索引は再生成可能なR2データです。
+Obsidian の Self-hosted LiveSync 互換 API と MCP サーバーを、Cloudflare Workers 上で提供します。
+永続データの正本は R2 に置き、更新の調整は Vault ごとの SQLite-backed Durable Object（DO）が行います。
+検索索引は R2 上の再生成可能なデータです。
 
-## 導入と文書
+## 文書
 
-- [セットアップ・設定・認可](docs/setup.md)：必須binding／secret、LiveSync接続、複数Vault、MCP。
-- [保存・復元・移行](docs/r2-operations.md)：確定点、障害時の再生、GC、旧SQLiteからの移行と切戻し。
-- [テストとCI](docs/testing.md)：公式Workers統合、実Obsidian／公式CLIのE2E、検証済み範囲。
-- [Workerへの組込み](docs/embedding.md)：独自認証・Vault管理を持つホストでの利用。
-- [更新手順](docs/upgrading.md)：このフォークの変更を保った更新。
+- [セットアップと設定](docs/setup.md)：必要な binding と secret、LiveSync の接続、複数 Vault、MCP、サインインの保護
+- [保存、復元、移行](docs/r2-operations.md)：保存の確定点、障害時の再生、GC、旧 SQLite からの移行と切り戻し
+- [リクエスト上限](docs/request-limits.md)：同期リクエストの上限と、413 が返ったときの対処
+- [テストと CI](docs/testing.md)：Workers 統合テスト、公式 CLI と実 Obsidian の E2E
+- [独自 Worker への組み込み](docs/embedding.md)：独自の認証や Vault 管理を持つホストからの利用
+- [更新手順](docs/upgrading.md)：このフォークの変更を保ったまま更新する方法
+- [性能測定の記録](docs/benchmarks/)：ローカル環境での変更前後の比較
 
-## 構成と対応範囲
+## 構成
 
 | 構成要素 | 役割 |
 | --- | --- |
-| Worker | `/livesync`互換API、`/mcp`、OAuth、管理者向け状態・接続設定画面 |
-| `CONTENT_BUCKET` | 不変リビジョン本文、チャンク、MCP添付原本、履歴・削除・チェックポイントを復元するコミット列とhead |
-| `VAULT_DB` | 原則1Vault＝1SQLite DO。本文はR2参照のみ。競合、勝者、変更seq、同期・索引進捗を管理 |
-| `FTS_BUCKET` | 文書ごとの単語位置索引とactive／building世代 |
-| `OAUTH_KV`／`MCP_OBJECT` | 既存OAuth情報とMCPセッション |
+| Worker | `/livesync` の互換 API、`/mcp`、OAuth、管理者向けの状態画面と接続設定 |
+| `CONTENT_BUCKET` | 不変のリビジョン本文、チャンク、MCP 添付の原本、履歴と削除とチェックポイントを復元するためのコミット列と head |
+| `VAULT_DB` | 原則として 1 Vault につき 1 つの SQLite DO。本文は R2 への参照だけを持ち、競合、勝者、変更 seq、同期と索引の進捗を管理する |
+| `FTS_BUCKET` | 文書ごとの単語位置索引と、active および building の索引世代 |
+| `OAUTH_KV` | OAuth のクライアントとトークン、サインイン失敗によるロック |
+| `MCP_OBJECT` | MCP セッション |
 
-コンテンツ用D1・Queues・追加KVはありません。AI／Vectorizeは任意のセマンティック検索を有効にする場合だけ必要です。既定の`SEMANTIC_SEARCH=off`では利用しません。
+コンテンツ用の D1、Queues、追加の KV はありません。
+Workers AI と Vectorize は、任意のセマンティック検索を有効にする場合にだけ必要です。
+既定の `SEMANTIC_SEARCH=off` では使いません。
 
-LiveSyncのリビジョン、本文・バイナリチャンクを保存し、元のVault内パス・添付リンクを維持します。文書CRUD、`_bulk_docs`、`_bulk_get`、`_revs_diff`、`_all_docs`、`_changes`、`_local`等を提供しますが、CouchDB全機能の代替ではありません。通常編集は古い基底revを409で拒否し、`new_edits=false`の同一rev再送は冪等です。`_deleted`とLiveSyncの`deleted: true`を扱います。
+## LiveSync との互換範囲
+
+LiveSync のリビジョン、本文チャンク、バイナリチャンクを保存し、Vault 内の元のパスと添付リンクを維持します。
+文書の CRUD、`_bulk_docs`、`_bulk_get`、`_revs_diff`、`_all_docs`、`_changes`、`_local` などを提供します。
+ただし CouchDB のすべての機能を代替するものではありません。
+
+通常の編集で古い基底 rev を指定すると 409 で拒否します。
+`new_edits=false` で同じ rev を再送しても結果は変わりません（冪等）。
+削除は `_deleted` と、LiveSync 独自の `deleted: true` の両方を扱います。
+
+E2EE、パスの難読化、圧縮を使った内容を、サーバー側で復号したり展開したりする機能はありません。
+Worker が生成する接続設定と E2E テストは、これらを無効にした構成です。
 
 ## 全文検索
 
-検索対象は復元できる`.md`の本文・最初のMarkdown見出し（なければファイル名）・見出し・パスです。`Intl.Segmenter('ja', { granularity: 'word' })`とNFKC＋小文字化を索引・クエリで共通に使用します。単語位置付き転置索引をBM25で順位付けし、重みはタイトル3、見出し2、パス1.5、本文1です。
+検索対象は、復元できる `.md` ノートの本文、タイトル、見出し、パスです。
+タイトルは最初の Markdown 見出しで、見出しがなければファイル名を使います。
 
-通常語はAND、二重引用符内は連続単語のフレーズです。区切り記号そのものの一致は要求しません。原文のUTF-16範囲へ対応付けたハイライト、Vault／`grepNotes.folder`の配下絞込みを提供します。原形化・任意部分一致は保証しません。Linderaや新しい2-gram索引は導入していません。旧索引はライブラリの旧ホスト互換用として残りますが、このWorkerはSegmenter索引を使用します。
+索引とクエリの両方で、`Intl.Segmenter('ja', { granularity: 'word' })` による単語分割と、NFKC 正規化と小文字化を行います。
+単語位置つきの転置索引を BM25 で順位付けし、重みはタイトル 3、見出し 2、パス 1.5、本文 1 です。
 
-索引はDO alarmで非同期更新します。古い本文ハッシュと削除済み候補を除外するため、更新直後に新しい検索結果が出ないことがあります。解析版`ja-segmenter-nfkc-v1`をキーに含め、再構築完了後にactive世代を切り替えます。初回はbuilding状態です。共有転置索引の形式v2へは索引版4で再構築し、旧active世代を完成まで維持します。検索時の全ノートGETを避けますが、共通語の費用は該当文書数に依存します。現Workerでは100万UTF-16コード単位を超えるノートを索引から除外します。
+クエリの通常の語は AND で結合し、二重引用符で囲んだ部分は連続する単語のフレーズとして扱います。
+区切り記号そのものの一致は要求しません。
+結果には、原文の UTF-16 範囲に対応づけたハイライトがつきます。
+Vault 単位と、`grepNotes` の `folder` によるフォルダ配下への絞り込みができます。
+語形変化の吸収と任意の部分一致は保証しません。
 
-画像・PDF・音声の原本保存はできますが、OCR・PDFテキスト抽出・音声認識はありません。検索できるMarkdownとは別に扱います。E2EE・パス難読化・圧縮した内容のサーバー復号／展開は実装していません。生成する接続設定とE2Eはこれらを無効にしています。
+索引は DO の alarm で非同期に更新します。
+このため、更新の直後は新しい内容が検索結果に出ないことがあります。
+古い本文ハッシュの候補と削除済みの候補は、検索時に除外します。
 
-## 状態と制約
+解析器の版（`ja-segmenter-nfkc-v1`）を索引のキーに含めています。
+解析器や索引形式が変わると新しい世代を building として構築し、完成してから active を切り替えます。
+構築中も旧 active 世代で検索できます。
+初回の構築が終わるまでは、検索は building 状態を返します。
 
-[PR #1](https://github.com/hayatosc/livesync-workers/pull/1)で開発中です。実Obsidian＋公式プラグイン7ケース、公式CLI7ケース、Node／公式Workersテスト222件が成功しています。詳細・対象commitは[検証記録](docs/testing.md)を参照してください。
+検索時に全ノートを GET することはありません。
+ただし、多くのノートに現れる語の検索費用は、該当する文書数に比例します。
+100 万 UTF-16 コード単位を超えるノートは索引に含めません。
 
-実Cloudflare本番deploy・実Vault移行は未実施です。1Vaultの管理メタデータはSQLite DOに収まる必要があり、WorkersのCPU・メモリ・リクエスト制約も残ります。大Vaultの検索費用・速度と巨大履歴の復元は未ベンチマークです。既存SQLiteからの移行は自動ではありません。
+画像、PDF、音声の原本は保存できますが、OCR、PDF のテキスト抽出、音声認識はありません。
 
-同期リクエストの上限と413時の手順は[リクエスト上限](docs/request-limits.md)を参照してください。
+## 現状と制約
 
-検索・保存・保守の変更、ローカル操作数と遅延の比較は[共有索引の性能測定](docs/shared-performance.md)を参照してください。実リモートR2の測定ではありません。
+実 Obsidian と公式 LiveSync プラグイン、および公式 LiveSync CLI での E2E は、CI で継続的に実行しています。
+結果は [GitHub Actions](https://github.com/hayatosc/livesync-workers/actions) で確認できます。
+
+一方で、実 Cloudflare 環境への本番 deploy と、実 Vault の移行はまだ行っていません。
+1 Vault の管理メタデータは 1 つの SQLite DO に収まる必要があり、Workers の CPU、メモリ、リクエストの制約も残ります。
+大きな Vault での検索の費用と速度、巨大な履歴の復元時間は測定していません。
+既存の SQLite 方式からの移行は自動では行われないので、[明示的な移行手順](docs/r2-operations.md#既存sqliteデータの移行)に従ってください。

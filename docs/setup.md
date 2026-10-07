@@ -1,18 +1,25 @@
-# セットアップ・設定・認可
+# セットアップと設定
 
-このフォークのWorkerを新規に導入するための手順です。既存SQLite Vaultがある場合は、先に[移行手順](r2-operations.md)を確認してください。以下の本番用コマンドはCloudflareの実資源を作成・使用します。ローカルテストだけなら[テスト手順](testing.md)を使用し、setup／deployは実行しません。
+この Worker を新しく導入する手順と、設定項目を説明します。
+既存の SQLite 方式の Vault がある場合は、先に[移行手順](r2-operations.md#既存sqliteデータの移行)を確認してください。
 
 ## 新規導入
 
-Node.js 24、pnpm 12、CloudflareアカウントとWranglerの認証が必要です。
+Node.js 24、pnpm 12、Cloudflare アカウント、Wrangler の認証が必要です。
 
 ```sh
 pnpm install --frozen-lockfile
 pnpm build
 pnpm typecheck
 pnpm test
+```
 
-# 本番資源を作成する場合だけ実行
+ここまではローカルで完結します。
+ローカルでテストするだけなら、続きは[テスト手順](testing.md)を参照してください。
+
+以下のコマンドは、Cloudflare の実際の資源を作成して使います。
+
+```sh
 pnpm exec wrangler login
 pnpm run setup
 pnpm exec wrangler secret put LIVESYNC_PASSWORD
@@ -21,32 +28,56 @@ pnpm exec wrangler secret put SESSION_SECRET
 pnpm run deploy
 ```
 
-`scripts/setup.mjs`は`wrangler.jsonc`のR2 bucketを作成します。現設定ではVectorizeを作成しません。OAuth KVは初回deploy時の自動provisioningを利用する設定です。SQLite DOクラスの作成はWranglerの`migrations`にあります。既存環境のbucket名・binding ID・DO migration履歴は上書きせず維持してください。
+`pnpm deploy` と `pnpm setup` は pnpm 自体のコマンドなので、`pnpm run` をつけて実行します。
 
-| binding／secret | 用途 |
-| --- | --- |
-| `CONTENT_BUCKET` | コンテンツ正本のR2。必須 |
-| `FTS_BUCKET` | 検索用R2。必須。正本と分離 |
-| `VAULT_DB`／`MCP_OBJECT` | `VaultDO`／`VaultMCP`のSQLite DO |
-| `OAUTH_KV` | OAuth情報 |
-| `SQLITE_MAX_BYTES`／`SQLITE_HEADROOM_BYTES` | DO容量の書込停止設定。既定900MB／100MB、[運用説明](r2-operations.md)参照 |
-| `LIVESYNC_PASSWORD` | 既定VaultのBasic認証パスワード |
-| `ADMIN_PASSWORD` | 管理者ログイン・OAuth承認用 |
-| `SESSION_SECRET` | 管理セッション署名・DO内部API用。32文字以上のランダム値を推奨 |
+`pnpm run setup`（`scripts/setup.mjs`）は、`wrangler.jsonc` に書かれた R2 バケットを作成します。
+Vectorize の索引は、現在の設定では作成しません。
+OAuth 用の KV namespace は、初回 deploy 時に Wrangler が自動で作成します。
+SQLite DO のクラスは、`wrangler.jsonc` の `migrations` で作成されます。
 
-空・`change-me`系の仮シークレットは拒否します。ローカル開発では`.dev.vars.example`を参考に`.dev.vars`へ値を設定します。資格情報をGitへコミットしないでください。
+既存の環境を更新するときは、バケット名、binding の ID、DO の migration 履歴を書き換えずに維持してください。
 
-## 単一VaultのLiveSync接続
+## binding と secret
 
-既定は`LIVESYNC_VAULT_ID=primary`、`LIVESYNC_DATABASE=vault`、`LIVESYNC_USERNAME=obsidian`です。プラグインのCouchDB URIを`https://<Workerのホスト>/livesync`、DB名を`vault`、ユーザーを`obsidian`、パスワードを設定済みsecretにします。
+| 名前 | 種類 | 用途 |
+| --- | --- | --- |
+| `CONTENT_BUCKET` | R2 | コンテンツの正本。必須 |
+| `FTS_BUCKET` | R2 | 検索索引。必須。正本とは別のバケットにする |
+| `VAULT_DB` | DO | `VaultDO`。Vault ごとの SQLite DO |
+| `MCP_OBJECT` | DO | `VaultMCP`。MCP セッション |
+| `OAUTH_KV` | KV | OAuth の情報と、サインイン失敗によるロック |
+| `AUTH_FAILURE_LIMITER` | Rate Limiting | サインイン失敗の回数。省略するとロックアウトは無効 |
+| `SQLITE_MAX_BYTES`、`SQLITE_HEADROOM_BYTES` | 変数 | DO の容量による書き込み停止の設定。既定は 900MB と 100MB。詳細は[容量の制約](r2-operations.md#容量と性能の制約) |
+| `LIVESYNC_PASSWORD` | secret | 既定 Vault の Basic 認証パスワード |
+| `ADMIN_PASSWORD` | secret | 管理者ログインと OAuth の承認に使うパスワード |
+| `SESSION_SECRET` | secret | 管理セッションの署名と、DO の内部 API の保護。32 文字以上のランダムな値を推奨 |
 
-Workerのトップページで管理者ログインすると状態とSetup URIを生成できます。接続設定の取得は管理者のみ・`Cache-Control: no-store`です。URIは接続設定を受け渡すために暗号化しますが、VaultデータのE2EEを有効にするものではありません。
+空の値や、`change-me` で始まる仮の値は、未設定として扱います。
+ローカル開発では、`.dev.vars.example` を参考に `.dev.vars` を作成します。
+資格情報は Git にコミットしないでください。
 
-生成設定と検証済み構成はE2EE・パス難読化・圧縮を無効にしています。サーバーに復号・展開処理やユーザーの復号鍵管理はありません。暗号化データの全文検索・MCP読取／編集は対応済みとして扱えません。暗号化同期自体も現在のGUI／CLI E2Eの検証対象外です。
+## LiveSync の接続（単一 Vault）
 
-## 複数Vault
+既定値は `LIVESYNC_VAULT_ID=primary`、`LIVESYNC_DATABASE=vault`、`LIVESYNC_USERNAME=obsidian` です。
+プラグインには次のように設定します。
 
-`VAULTS_JSON`をWorker変数に指定すると、既定設定の代わりにこの静的レジストリを使います。
+- **URI**：`https://<Worker のホスト>/livesync`
+- **データベース名**：`vault`
+- **ユーザー名**：`obsidian`
+- **パスワード**：`LIVESYNC_PASSWORD` に設定した値
+
+Worker のトップページで管理者としてログインすると、状態の確認と Setup URI の生成ができます。
+接続設定を返す API は管理者だけが使え、`Cache-Control: no-store` で返します。
+Setup URI は接続設定を受け渡すために暗号化しますが、Vault のデータを E2EE にするものではありません。
+
+生成する接続設定では、E2EE、パスの難読化、圧縮を無効にしています。
+サーバーには復号や展開の処理がなく、ユーザーの復号鍵も管理しません。
+そのため、暗号化したデータは全文検索も MCP からの読み書きもできません。
+暗号化した同期そのものも、E2E テストの対象外です。
+
+## 複数 Vault
+
+Worker の変数 `VAULTS_JSON` を指定すると、既定の単一 Vault の設定の代わりに、この静的なレジストリを使います。
 
 ```json
 [
@@ -63,30 +94,77 @@ Workerのトップページで管理者ログインすると状態とSetup URI�
 ]
 ```
 
-`passwordSecret`はsecret名で、パスワード本文をJSONへ入れません。この例では`wrangler secret put WORK_PASSWORD`で設定します。各Vaultの`vaultId`と`username`はレジストリ内で一意にします。不変IDとtenantを保持すれば、表示名・接続DB名を変更してもDO／R2／索引のIDは変わりません。
+`passwordSecret` には secret の名前を書き、パスワード本体は JSON に入れません。
+この例では `wrangler secret put WORK_PASSWORD` でパスワードを設定します。
+`vaultId` と `username` は、レジストリの中で一意にします。
 
-Basic認証は各リクエストで検証し、その資格情報のDBだけを許可します。MCPは各ツール呼出しで現在のowner／readersとスコープを確認します。readersは読取共有のみです。`VAULT_EXCLUDED_FOLDERS`はカンマ区切りで検索から除外するフォルダを指定し、読取認可の代わりにはなりません。
+`vaultId` と `tenantId` を変えなければ、表示名や接続 DB 名を変更しても、DO、R2、索引の ID は変わりません。
 
-現在のWorkerのOAuth principalは管理者`admin`です。別ownerはBasic同期できても、現在のMCP管理者ログインでそのVaultにアクセスできるとは限りません。一般ユーザーの登録・権限管理画面はありません。独自principalは[ホスト組込み](embedding.md)で実装します。Setup URI／管理状態画面はadminがアクセスできる最初のVaultを使用します。
+Basic 認証はリクエストごとに検証し、その資格情報に対応する DB だけを許可します。
+MCP は、ツールを呼び出すたびに現在の owner、readers、scope を確認します。
+readers に与えられるのは読み取りだけです。
+
+`VAULT_EXCLUDED_FOLDERS` には、検索から除外するフォルダをカンマ区切りで指定します。
+これは検索対象の設定であり、読み取りの認可には影響しません。
+
+この Worker の OAuth で認証される principal は管理者 `admin` だけです。
+別の owner の Vault は Basic 認証で同期できても、管理者として MCP からアクセスできるとは限りません。
+一般ユーザーの登録や権限を管理する画面はありません。
+独自の principal が必要な場合は、[ホストへの組み込み](embedding.md)で実装します。
+Setup URI と状態画面は、admin がアクセスできる最初の Vault を使います。
+
+## サインインの保護
+
+`AUTH_FAILURE_LIMITER` を設定すると、LiveSync の Basic 認証と管理者ログインの失敗を、クライアントの IP ごとに数えます。
+既定の設定では、1 分間に 10 回失敗した IP を 15 分間ロックします。
+ロック中は、その IP からの試行を、パスワードが正しいかどうかに関係なく 429 で拒否します。
+正しいパスワードだけを通すと、どの推測が当たったかが攻撃者に分かってしまうためです。
+
+ロックは `OAUTH_KV` に保存するので、Worker のインスタンスをまたいで有効です。
+同じ NAT の内側にいる利用者は同じ IP として数えられます。
+保存したパスワードが古い LiveSync クライアントが失敗を繰り返すと、同じネットワークの正しいクライアントもロックされます。
+回数と期間は、`wrangler.jsonc` の `ratelimits` と `worker/throttle.ts` で変更できます。
 
 ## MCP
 
-接続先は`https://<Workerのホスト>/mcp`です。既存OAuthの承認フローを使うか、任意の`MCP_STATIC_TOKEN`をBearer tokenにします。静的tokenはadminとして動作し、既定で`vault:read`のみです。追加権限は`MCP_STATIC_TOKEN_SCOPES=vault:append,vault:write`で明示します。
+接続先は `https://<Worker のホスト>/mcp` です。
+OAuth の承認フローを使うか、`MCP_STATIC_TOKEN` を Bearer トークンとして使います。
 
-| 操作 | scope／制限 |
+OAuth の同意画面には、クライアント名に加えて、承認結果の送り先（redirect URI の origin）を表示します。
+クライアントの登録は誰でもでき、名前も自由に付けられるので、承認する前に送り先が使っているアプリのものかを確認してください。
+
+静的トークンは admin として動作し、既定の scope は `vault:read` だけです。
+書き込みを許可するには、`MCP_STATIC_TOKEN_SCOPES=vault:append,vault:write` のように明示します。
+
+| ツール | 必要な scope と制限 |
 | --- | --- |
-| `listVaults`、`listFiles`、`listDirectory`、`listNotes`、`listRecentNotes`、`readNote`、`readDailyNote`、`grepNotes`、`readAttachment`、`vaultStatus` | `vault:read` |
-| `appendToNote`、`appendToDailyNote` | `vault:append`。1回20,000 UTF-16コード単位まで |
-| `writeNote` | `vault:write`。200,000 UTF-16コード単位まで。作成または上書き |
-| `uploadAttachment` | `vault:write`。デコード後10 MiB、base64文字列14,000,000文字まで |
-| `readAttachment` | デコード後10 MiBまで。base64・contentHash・size・contentTypeを返す |
+| `listVaults`、`listFiles`、`listDirectory`、`listNotes`、`listRecentNotes`、`readNote`、`readDailyNote`、`searchNotes`、`grepNotes`、`vaultStatus` | `vault:read` |
+| `readAttachment` | `vault:read`。デコード後 10 MiB まで。base64、contentHash、size、contentType を返す |
+| `appendToNote`、`appendToDailyNote` | `vault:append`。1 回 20,000 UTF-16 コード単位まで |
+| `writeNote` | `vault:write`。200,000 UTF-16 コード単位まで。作成または上書き |
+| `uploadAttachment` | `vault:write`。デコード後 10 MiB、base64 文字列で 14,000,000 文字まで |
 
-各ツールの`vaultId`を省略すると、認可された既定Vaultを使用します。既存ノート・添付の上書きには読取結果の`contentHash`を`expectedContentHash`として渡します。追記も内部で読取版のハッシュを確認します。競合や未同期チャンクがある場合は更新を拒否します。MCPに削除・名前変更ツールはありません。
+各ツールで `vaultId` を省略すると、認可された既定の Vault を使います。
 
-MCPには操作IDによるexactly-once保証はありません。応答を失った追記を新操作として再実行すると重複し得るため、内容を再読取して結果を確認してください。上書き・添付の新規作成も空本文のハッシュを用いて同時作成を検出します。
+既存のノートや添付を上書きするときは、読み取ったときの `contentHash` を `expectedContentHash` として渡します。
+ハッシュが一致しない場合と、チャンクが同期しきっていない場合は、更新を拒否します。
+新規作成でも空の本文のハッシュを照合するので、同時に作成されたことを検出できます。
+追記は、読み取った版のハッシュを照合して書き込み、別の書き込みと競合したときは読み直して最大 3 回まで試します。
+MCP に削除と名前変更のツールはありません。
 
-MCP書込はVault相対パスを検査し、先頭`/`、`.`／`..`、空セグメント、バックスラッシュ、制御文字を拒否します。ライブラリのreservedPathsも適用します。現WorkerのreservedPathsは空です。添付10 MiBはMCPの上限であり、LiveSync同期の一般ファイル上限ではありません。LiveSync側にもWorkersの実行・リクエスト制約が残ります。
+MCP の操作には重複排除の ID がなく、ちょうど 1 回だけ実行されることは保証しません。
+応答を受け取れなかった追記を新しい操作として再実行すると、同じ内容が重複して追記されることがあります。
+再実行する前に内容を読み直して、前の操作が成功していないかを確認してください。
 
-`searchNotes`は任意のベクトル検索用です。既定では無効で`grepNotes`を案内します。`SEMANTIC_SEARCH=on`にする場合のみ`AI`と`VECTORIZE`を追加し、現在のembeddinggemma-300mに合う768次元・cosineの索引を設定します。全文検索だけなら不要です。
+MCP からの書き込みでは Vault 相対パスを検査し、先頭の `/`、`.` や `..`、空のセグメント、バックスラッシュ、制御文字を拒否します。
+ライブラリの reservedPaths も適用しますが、この Worker の reservedPaths は空です。
 
-同期のHTTP本文・文書JSON・バルク件数には[明示上限](request-limits.md)があります。設定APIの値を確認し、413時はバッチ／チャンク設定を調整してください。
+10 MiB は MCP の添付の上限であり、LiveSync で同期するファイルの上限ではありません。
+LiveSync の同期にも、Workers の実行とリクエストの制約は残ります。
+同期リクエストの上限は[リクエスト上限](request-limits.md)を参照してください。
+
+`searchNotes` は任意のベクトル検索です。
+既定では無効で、呼び出すと `grepNotes` を使うよう案内を返します。
+有効にするには `SEMANTIC_SEARCH=on` にして、`AI` と `VECTORIZE` の binding を追加します。
+Vectorize の索引は、埋め込みモデル embeddinggemma-300m に合わせて 768 次元、cosine で作成します。
+全文検索だけを使うなら、どちらも不要です。
