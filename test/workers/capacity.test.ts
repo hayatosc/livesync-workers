@@ -172,7 +172,7 @@ it("replays only unapplied commits and preserves derived index progress on incre
   let progress: unknown;
   await runInDurableObject(object, async (instance: PersistentVaultDO, state) => {
     await instance.alarm();
-    applied = state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key='r2_applied_head'").one().value;
+    applied = state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key='r2_applied_head_v3'").one().value;
     progress = state.storage.sql.exec("SELECT * FROM index_state").toArray();
   });
   const journal = new R2Journal(bindings.CONTENT, contentPrefix("incremental-cache", "vault"));

@@ -1,0 +1,448 @@
+{
+  "label": "before",
+  "runtime": "local workerd, local official SQLite/R2 bindings",
+  "artificialOperationDelayMs": 2,
+  "productionMeasurement": false,
+  "results": [
+    {
+      "name": "index-build-32",
+      "ms": 126,
+      "operations": {
+        "get": 3,
+        "put": 34,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-32-needle",
+      "samples": [
+        108,
+        107,
+        104,
+        104,
+        103
+      ],
+      "p50Ms": 104,
+      "p95Ms": 108,
+      "operations": {
+        "get": 165,
+        "put": 0,
+        "list": 5,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-32-\"東京 API\"",
+      "samples": [
+        104,
+        105,
+        103,
+        103,
+        105
+      ],
+      "p50Ms": 104,
+      "p95Ms": 105,
+      "operations": {
+        "get": 165,
+        "put": 0,
+        "list": 5,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-32-missing",
+      "samples": [
+        107,
+        107,
+        104,
+        103,
+        103
+      ],
+      "p50Ms": 104,
+      "p95Ms": 107,
+      "operations": {
+        "get": 165,
+        "put": 0,
+        "list": 5,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "index-build-128",
+      "ms": 467,
+      "operations": {
+        "get": 3,
+        "put": 130,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-128-needle",
+      "samples": [
+        396,
+        392,
+        398,
+        391,
+        399
+      ],
+      "p50Ms": 396,
+      "p95Ms": 399,
+      "operations": {
+        "get": 645,
+        "put": 0,
+        "list": 5,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-128-\"東京 API\"",
+      "samples": [
+        413,
+        402,
+        401,
+        394,
+        404
+      ],
+      "p50Ms": 402,
+      "p95Ms": 413,
+      "operations": {
+        "get": 645,
+        "put": 0,
+        "list": 5,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-128-missing",
+      "samples": [
+        399,
+        400,
+        395,
+        406,
+        394
+      ],
+      "p50Ms": 399,
+      "p95Ms": 406,
+      "operations": {
+        "get": 645,
+        "put": 0,
+        "list": 5,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "index-build-512",
+      "ms": 1847,
+      "operations": {
+        "get": 3,
+        "put": 514,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-512-needle",
+      "samples": [
+        1577,
+        1588,
+        1582,
+        1579,
+        1572
+      ],
+      "p50Ms": 1579,
+      "p95Ms": 1588,
+      "operations": {
+        "get": 2565,
+        "put": 0,
+        "list": 5,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-512-\"東京 API\"",
+      "samples": [
+        1652,
+        1918,
+        1656,
+        1635,
+        1625
+      ],
+      "p50Ms": 1652,
+      "p95Ms": 1918,
+      "operations": {
+        "get": 2565,
+        "put": 0,
+        "list": 5,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-512-missing",
+      "samples": [
+        1597,
+        1589,
+        1660,
+        1657,
+        1587
+      ],
+      "p50Ms": 1597,
+      "p95Ms": 1660,
+      "operations": {
+        "get": 2565,
+        "put": 0,
+        "list": 5,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "normal",
+      "samples": [
+        20,
+        19,
+        17,
+        18,
+        17,
+        17,
+        17,
+        18,
+        17,
+        18,
+        17,
+        17,
+        18,
+        19,
+        17,
+        18,
+        17,
+        17,
+        18,
+        18
+      ],
+      "p50Ms": 17,
+      "p95Ms": 19,
+      "elapsedMs": 355,
+      "operations": {
+        "get": 20,
+        "put": 80,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      },
+      "sqliteBytes": 126976
+    },
+    {
+      "name": "bulk-burst",
+      "samples": [
+        193,
+        194,
+        198,
+        193
+      ],
+      "p50Ms": 193,
+      "p95Ms": 198,
+      "elapsedMs": 778,
+      "operations": {
+        "get": 4,
+        "put": 208,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      },
+      "sqliteBytes": 159744
+    },
+    {
+      "name": "initial",
+      "samples": [
+        952
+      ],
+      "p50Ms": 952,
+      "p95Ms": 952,
+      "elapsedMs": 952,
+      "operations": {
+        "get": 1,
+        "put": 258,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      },
+      "sqliteBytes": 266240
+    },
+    {
+      "name": "offline-catchup",
+      "samples": [
+        4,
+        3,
+        4,
+        3,
+        4,
+        3,
+        3,
+        3
+      ],
+      "operations": {
+        "get": 8,
+        "put": 0,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "concurrent-16",
+      "p50Ms": 140,
+      "p95Ms": 278,
+      "elapsedMs": 279,
+      "operations": {
+        "get": 16,
+        "put": 64,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "head-429-retry",
+      "elapsedMs": 269,
+      "operations": {
+        "get": 1,
+        "put": 4,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "cache-loss-restore",
+      "elapsedMs": 291,
+      "operations": {
+        "get": 89,
+        "put": 0,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      },
+      "sqliteBytes": 278528
+    },
+    {
+      "name": "checkpoint-indexing-128",
+      "elapsedMs": 1469,
+      "firstIndexAlarm": 14,
+      "checkpointFinishedAlarm": 13,
+      "progress": [
+        {
+          "alarm": 1,
+          "ms": 11,
+          "indexed": 0,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 2,
+          "ms": 4,
+          "indexed": 0,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 3,
+          "ms": 8,
+          "indexed": 0,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 4,
+          "ms": 0,
+          "indexed": 0,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 5,
+          "ms": 6,
+          "indexed": 0,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 6,
+          "ms": 1,
+          "indexed": 0,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 7,
+          "ms": 6,
+          "indexed": 0,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 8,
+          "ms": 0,
+          "indexed": 0,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 9,
+          "ms": 1,
+          "indexed": 0,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 10,
+          "ms": 4,
+          "indexed": 0,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 11,
+          "ms": 1,
+          "indexed": 0,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 12,
+          "ms": 0,
+          "indexed": 0,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 13,
+          "ms": 14,
+          "indexed": 0,
+          "pendingCheckpoint": false
+        },
+        {
+          "alarm": 14,
+          "ms": 1413,
+          "indexed": 128,
+          "pendingCheckpoint": false
+        }
+      ],
+      "contentOperations": {
+        "get": 258,
+        "put": 11,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      },
+      "searchOperations": {
+        "get": 3,
+        "put": 130,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      },
+      "sqliteBytes": 188416
+    }
+  ]
+}

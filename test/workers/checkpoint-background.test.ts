@@ -3,7 +3,7 @@ import { it, expect, afterEach } from "vitest";
 import { PersistentVaultDO, type TestEnv } from "./entry.js";
 import type { VaultBindings } from "../../packages/livesync-workers/src/types.js";
 import { R2Journal, contentPrefix } from "../../packages/livesync-workers/src/storage/r2-journal.js";
-import { drainCheckpoint, stopCheckpointAlarms } from "./checkpoint-helpers.js";
+import { drainCheckpoint, stopCheckpointAlarms, advanceCheckpoint } from "./checkpoint-helpers.js";
 const bindings = env as unknown as TestEnv;
 const created: DurableObjectStub[] = [];
 afterEach(() => stopCheckpointAlarms(created.splice(0)));
@@ -34,7 +34,7 @@ it("acknowledges a cadence write with ordinary R2 work and survives cache loss b
     try{
       state.storage.sql.exec("INSERT INTO meta (key,value) VALUES ('monotonic_seq','4095') ON CONFLICT(key) DO UPDATE SET value='4095'");
       expect((await instance.fetch(new Request("https://db/accepted",{method:"PUT",body:'{"data":"durable before checkpoint"}'}))).status).toBe(200);
-      expect(puts).toBe(4); // Body, lineage, immutable commit, head CAS; no full snapshot.
+      expect(puts).toBe(3); // Coalesced body/lineage, immutable commit, head CAS; no full snapshot.
       expect(state.storage.sql.exec("SELECT * FROM checkpoint_work").toArray()).toHaveLength(1);
     }finally{mutable.bindings=original;}
   });
@@ -47,7 +47,7 @@ it("reconciles writes, local checkpoint deletion and binary/deleted/conflict lea
   await object.fetch("https://db/_compact",{method:"POST"});
   await runInDurableObject(object,async(instance:PersistentVaultDO,state)=>{
     // Read enough pages to pass the first rows; changes now require overlays.
-    for(let i=0;i<3;i++)await instance.alarm();
+    for(let i=0;i<3;i++)await advanceCheckpoint(instance,state);
     expect(JSON.parse(state.storage.sql.exec<{state:string}>("SELECT state FROM checkpoint_work").one().state).phase).toBe("scan");
   });
   await object.fetch("https://db/note-0",{method:"PUT",body:'{"_rev":"1-original","data":"changed","path":"0.md","type":"plain"}'});
@@ -61,7 +61,7 @@ it("reconciles writes, local checkpoint deletion and binary/deleted/conflict lea
     for(let i=0;i<50;i++){
       const work=JSON.parse(state.storage.sql.exec<{state:string}>("SELECT state FROM checkpoint_work").one().state);
       if(work.phase==="dirty")break;
-      await instance.alarm();
+      await advanceCheckpoint(instance,state);
     }
     expect(JSON.parse(state.storage.sql.exec<{state:string}>("SELECT state FROM checkpoint_work").one().state).phase).toBe("dirty");
   });
@@ -77,14 +77,14 @@ it("resumes the saved scan cursor across DO reconstruction and protects in-progr
   const object=await fixture("resumable-checkpoint");
   await object.fetch("https://db/_compact",{method:"POST"});
   await runInDurableObject(object,async(instance:PersistentVaultDO,state)=>{
-    for(let i=0;i<4;i++)await instance.alarm();
+    for(let i=0;i<4;i++)await advanceCheckpoint(instance,state);
     const work=JSON.parse(state.storage.sql.exec<{state:string}>("SELECT state FROM checkpoint_work").one().state);
     expect(work.references.length).toBeGreaterThan(0);
     const journal=new R2Journal(bindings.CONTENT,contentPrefix("resumable-checkpoint","vault"));
     const garbage=await journal.collectGarbage({execute:true,graceMs:-1,roots:[work.references,work.previous]});
     for(const ref of work.references)expect(garbage).not.toContain(ref.r2);
     const fresh=new PersistentVaultDO(state,bindings);
-    await fresh.alarm();
+    await advanceCheckpoint(fresh,state);
     const resumed=JSON.parse(state.storage.sql.exec<{state:string}>("SELECT state FROM checkpoint_work").one().state);
     expect(resumed.table>work.table||resumed.cursor>work.cursor).toBe(true);
   });
@@ -94,12 +94,12 @@ it("resumes the saved scan cursor across DO reconstruction and protects in-progr
 it("does not restart a snapshot scan when an immutable page upload is interrupted",async()=>{
   const object=await fixture("scan-interruption",256);await object.fetch("https://db/_compact",{method:"POST"});
   await runInDurableObject(object,async(instance:PersistentVaultDO,state)=>{
-    await instance.alarm(); // Compaction completes; start scanning.
+    await advanceCheckpoint(instance,state); // Compaction completes; start scanning.
     const before=state.storage.sql.exec<{state:string}>("SELECT state FROM checkpoint_work").one().state;
     const mutable=instance as unknown as {bindings():VaultBindings};const original=mutable.bindings.bind(instance);const bucket=original().contentBucket!;
     let failed=false;
     mutable.bindings=()=>({...original(),contentBucket:new Proxy(bucket,{get(target,key){const value=Reflect.get(target,key);if(key!=="put")return typeof value==="function"?value.bind(target):value;return async()=>{failed=true;throw new Error("Injected snapshot page interruption");};}})});
-    try{await instance.alarm();}finally{mutable.bindings=original;}
+    try{await advanceCheckpoint(instance,state);}finally{mutable.bindings=original;}
     expect(failed).toBe(true);
     expect(state.storage.sql.exec<{state:string}>("SELECT state FROM checkpoint_work").one().state).toBe(before);
   });
@@ -132,11 +132,11 @@ it("fences a stale rolling checkpoint if another journal writer advances the hea
   await runInDurableObject(object,async(instance:PersistentVaultDO,state)=>{
     for(let i=0;i<30;i++){
       const work=JSON.parse(state.storage.sql.exec<{state:string}>("SELECT state FROM checkpoint_work").one().state);
-      if(work.phase==="dirty")break;await instance.alarm();
+      if(work.phase==="dirty")break;await advanceCheckpoint(instance,state);
     }
     const journal=new R2Journal(bindings.CONTENT,contentPrefix("stale-snapshot","vault"));
     const external=await journal.commit([{sql:"INSERT INTO meta (key,value) VALUES (?,?)",args:["external_probe","preserved"]}],(await journal.head()).commit);
-    await instance.alarm(); // CAS must reject the snapshot of the older local state.
+    await advanceCheckpoint(instance,state); // CAS must reject the snapshot of the older local state.
     expect((await journal.head()).commit).toBe(external);
     expect(state.storage.sql.exec<{value:string}>("SELECT value FROM meta WHERE key='external_probe'").one().value).toBe("preserved");
   });

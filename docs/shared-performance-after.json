@@ -1,0 +1,646 @@
+{
+  "label": "after",
+  "runtime": "local workerd, local official SQLite/R2 bindings",
+  "artificialOperationDelayMs": 2,
+  "productionMeasurement": false,
+  "results": [
+    {
+      "name": "index-build-32",
+      "ms": 156,
+      "operations": {
+        "get": 5,
+        "put": 43,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-32-needle",
+      "samples": [
+        18,
+        15,
+        16,
+        15,
+        15
+      ],
+      "p50Ms": 15,
+      "p95Ms": 18,
+      "operations": {
+        "get": 25,
+        "put": 0,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-32-\"東京 API\"",
+      "samples": [
+        47,
+        49,
+        49,
+        49,
+        47
+      ],
+      "p50Ms": 49,
+      "p95Ms": 49,
+      "operations": {
+        "get": 75,
+        "put": 0,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-32-missing",
+      "samples": [
+        9,
+        10,
+        9,
+        9,
+        9
+      ],
+      "p50Ms": 9,
+      "p95Ms": 10,
+      "operations": {
+        "get": 15,
+        "put": 0,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "index-build-128",
+      "ms": 788,
+      "operations": {
+        "get": 40,
+        "put": 195,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-128-needle",
+      "samples": [
+        15,
+        17,
+        17,
+        15,
+        15
+      ],
+      "p50Ms": 15,
+      "p95Ms": 17,
+      "operations": {
+        "get": 25,
+        "put": 0,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-128-\"東京 API\"",
+      "samples": [
+        55,
+        54,
+        55,
+        71,
+        55
+      ],
+      "p50Ms": 55,
+      "p95Ms": 71,
+      "operations": {
+        "get": 85,
+        "put": 0,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-128-missing",
+      "samples": [
+        10,
+        8,
+        10,
+        9,
+        9
+      ],
+      "p50Ms": 9,
+      "p95Ms": 10,
+      "operations": {
+        "get": 15,
+        "put": 0,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "index-build-512",
+      "ms": 3785,
+      "operations": {
+        "get": 254,
+        "put": 884,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-512-needle",
+      "samples": [
+        19,
+        18,
+        19,
+        18,
+        18
+      ],
+      "p50Ms": 18,
+      "p95Ms": 19,
+      "operations": {
+        "get": 30,
+        "put": 0,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-512-\"東京 API\"",
+      "samples": [
+        245,
+        172,
+        178,
+        171,
+        179
+      ],
+      "p50Ms": 178,
+      "p95Ms": 245,
+      "operations": {
+        "get": 250,
+        "put": 0,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "search-512-missing",
+      "samples": [
+        9,
+        9,
+        9,
+        10,
+        12
+      ],
+      "p50Ms": 9,
+      "p95Ms": 12,
+      "operations": {
+        "get": 15,
+        "put": 0,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "normal",
+      "samples": [
+        18,
+        14,
+        15,
+        15,
+        17,
+        14,
+        15,
+        15,
+        14,
+        15,
+        14,
+        18,
+        15,
+        16,
+        16,
+        14,
+        15,
+        16,
+        14,
+        15
+      ],
+      "p50Ms": 15,
+      "p95Ms": 18,
+      "elapsedMs": 306,
+      "operations": {
+        "get": 20,
+        "put": 60,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      },
+      "sqliteBytes": 126976
+    },
+    {
+      "name": "bulk-burst",
+      "samples": [
+        110,
+        115,
+        113,
+        114
+      ],
+      "p50Ms": 113,
+      "p95Ms": 115,
+      "elapsedMs": 452,
+      "operations": {
+        "get": 4,
+        "put": 108,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      },
+      "sqliteBytes": 167936
+    },
+    {
+      "name": "initial",
+      "samples": [
+        528
+      ],
+      "p50Ms": 528,
+      "p95Ms": 528,
+      "elapsedMs": 528,
+      "operations": {
+        "get": 1,
+        "put": 130,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      },
+      "sqliteBytes": 278528
+    },
+    {
+      "name": "offline-catchup",
+      "samples": [
+        4,
+        4,
+        4,
+        3,
+        3,
+        3,
+        4,
+        3
+      ],
+      "operations": {
+        "get": 8,
+        "put": 0,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "concurrent-16",
+      "p50Ms": 121,
+      "p95Ms": 241,
+      "elapsedMs": 242,
+      "operations": {
+        "get": 16,
+        "put": 48,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "head-429-retry",
+      "elapsedMs": 267,
+      "operations": {
+        "get": 1,
+        "put": 3,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      }
+    },
+    {
+      "name": "cache-loss-restore",
+      "elapsedMs": 318,
+      "operations": {
+        "get": 88,
+        "put": 0,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      },
+      "sqliteBytes": 290816
+    },
+    {
+      "name": "checkpoint-indexing-128",
+      "elapsedMs": 1539,
+      "firstIndexAlarm": 2,
+      "checkpointFinishedAlarm": 47,
+      "progress": [
+        {
+          "alarm": 1,
+          "ms": 9,
+          "indexed": 0,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 2,
+          "ms": 73,
+          "indexed": 7,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 3,
+          "ms": 4,
+          "indexed": 7,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 4,
+          "ms": 60,
+          "indexed": 14,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 5,
+          "ms": 6,
+          "indexed": 14,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 6,
+          "ms": 57,
+          "indexed": 20,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 7,
+          "ms": 0,
+          "indexed": 20,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 8,
+          "ms": 58,
+          "indexed": 26,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 9,
+          "ms": 5,
+          "indexed": 26,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 10,
+          "ms": 73,
+          "indexed": 33,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 11,
+          "ms": 0,
+          "indexed": 33,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 12,
+          "ms": 59,
+          "indexed": 39,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 13,
+          "ms": 4,
+          "indexed": 39,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 14,
+          "ms": 58,
+          "indexed": 45,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 15,
+          "ms": 0,
+          "indexed": 45,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 16,
+          "ms": 60,
+          "indexed": 51,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 17,
+          "ms": 0,
+          "indexed": 51,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 18,
+          "ms": 59,
+          "indexed": 57,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 19,
+          "ms": 4,
+          "indexed": 57,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 20,
+          "ms": 59,
+          "indexed": 63,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 21,
+          "ms": 0,
+          "indexed": 63,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 22,
+          "ms": 97,
+          "indexed": 69,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 23,
+          "ms": 5,
+          "indexed": 69,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 24,
+          "ms": 57,
+          "indexed": 74,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 25,
+          "ms": 0,
+          "indexed": 74,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 26,
+          "ms": 55,
+          "indexed": 79,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 27,
+          "ms": 7,
+          "indexed": 79,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 28,
+          "ms": 60,
+          "indexed": 85,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 29,
+          "ms": 4,
+          "indexed": 85,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 30,
+          "ms": 64,
+          "indexed": 91,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 31,
+          "ms": 4,
+          "indexed": 91,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 32,
+          "ms": 64,
+          "indexed": 97,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 33,
+          "ms": 4,
+          "indexed": 97,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 34,
+          "ms": 136,
+          "indexed": 102,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 35,
+          "ms": 4,
+          "indexed": 102,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 36,
+          "ms": 61,
+          "indexed": 108,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 37,
+          "ms": 4,
+          "indexed": 108,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 38,
+          "ms": 59,
+          "indexed": 114,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 39,
+          "ms": 4,
+          "indexed": 114,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 40,
+          "ms": 62,
+          "indexed": 120,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 41,
+          "ms": 4,
+          "indexed": 120,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 42,
+          "ms": 63,
+          "indexed": 126,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 43,
+          "ms": 4,
+          "indexed": 126,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 44,
+          "ms": 43,
+          "indexed": 128,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 45,
+          "ms": 7,
+          "indexed": 128,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 46,
+          "ms": 4,
+          "indexed": 128,
+          "pendingCheckpoint": true
+        },
+        {
+          "alarm": 47,
+          "ms": 14,
+          "indexed": 128,
+          "pendingCheckpoint": false
+        }
+      ],
+      "contentOperations": {
+        "get": 129,
+        "put": 22,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      },
+      "searchOperations": {
+        "get": 90,
+        "put": 187,
+        "list": 0,
+        "delete": 0,
+        "head": 0
+      },
+      "sqliteBytes": 192512
+    }
+  ]
+}

@@ -19,7 +19,9 @@ it("stores raw binary originals, retains history during GC and rejects oversize/
   await runInDurableObject(stub, async (_instance: PersistentVaultDO, state) => {
     const row = state.storage.sql.exec<{ body: string }>("SELECT body FROM revs WHERE id = ?", "資料/Original.pdf").one();
     const pointer = JSON.parse(row.body) as { r2: string };
-    const envelope = await (await bindings.CONTENT.get(pointer.r2))!.json<{ binaryKey: string; children: string[] }>();
+    const stored = await (await bindings.CONTENT.get(pointer.r2))!.json<{ format: number; body: { binaryKey: string; children: string[] } }>();
+    expect(stored.format).toBe(3);
+    const envelope = stored.body;
     binaryKey = envelope.binaryKey;
     expect(envelope.children.length).toBeGreaterThan(1);
     const raw = await (await bindings.CONTENT.get(binaryKey))!.arrayBuffer();

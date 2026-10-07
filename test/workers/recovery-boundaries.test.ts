@@ -20,7 +20,7 @@ async function reopen(object: DurableObjectStub, completely = false) {
   });
 }
 describe("SQL and R2 acknowledgement boundaries", () => {
-  for (const boundary of ["INSERT INTO changes", "r2_applied_head"]) {
+  for (const boundary of ["INSERT INTO changes", "r2_applied_head_v3"]) {
     it(`recovers after SQL failure at ${boundary}`, async () => {
       const object = stub(`sql-${boundary.replace(/\W/g, "")}`);
       await object.fetch("https://db/", { method: "PUT" });
@@ -29,7 +29,7 @@ describe("SQL and R2 acknowledgement boundaries", () => {
         const original = mutable.sqlExec.bind(instance);
         let failed = false;
         mutable.sqlExec = (sql, ...args) => {
-          if (!failed && (boundary === "r2_applied_head" ? /^INSERT/i.test(sql) && args.includes(boundary) : sql.includes(boundary))) { failed = true; throw new Error("Injected SQL failure"); }
+          if (!failed && (boundary === "r2_applied_head_v3" ? /^INSERT/i.test(sql) && args.includes(boundary) : sql.includes(boundary))) { failed = true; throw new Error("Injected SQL failure"); }
           return original(sql, ...args);
         };
         try {
@@ -38,7 +38,7 @@ describe("SQL and R2 acknowledgement boundaries", () => {
           expect(failed).toBe(true);
         } finally { mutable.sqlExec = original; }
       });
-      expect((await object.fetch("https://db/doc")).status).toBe(boundary === "r2_applied_head" ? 200 : 404);
+      expect((await object.fetch("https://db/doc")).status).toBe(boundary === "r2_applied_head_v3" ? 200 : 404);
       expect((await object.fetch("https://db/_bulk_docs", { method: "POST", body: '{"new_edits":false,"docs":[{"_id":"doc","_rev":"1-stable","data":"durable"}]}' })).status).toBe(200);
       await reopen(object, true);
       expect((await (await object.fetch("https://db/doc")).json() as { data: string }).data).toBe("durable");

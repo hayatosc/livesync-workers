@@ -125,8 +125,8 @@ type InternalOp = {
 const INDEXED_SEQ_META_KEY = "indexed_seq";
 const INDEX_VERSION_META_KEY = "index_version";
 // Bump to force a one-time full re-embed (e.g. when vector metadata gains new fields).
-const CURRENT_INDEX_VERSION = "3";
-const INDEX_BATCH_SIZE = 200;
+const CURRENT_INDEX_VERSION = "4";
+const INDEX_BATCH_SIZE = 32;
 const INDEX_ALARM_DELAY_MS = 1_500;
 const INDEX_RETRY_DELAY_MS = 30_000;
 const INDEX_MAX_ATTEMPTS = 20;
@@ -188,7 +188,7 @@ const FTS_RESOLVE_MAX_CANDIDATES = 500;
 // External full-text index (VaultBindings.fullText): notes already
 // vector-indexed but not yet written there (a fresh setup, or after
 // "ftsRebuild") are backfilled this many per alarm run.
-const FTS_BACKLOG_BATCH_SIZE = 50;
+const FTS_BACKLOG_BATCH_SIZE = 16;
 // Chunk documents written by the server. The hash salt is a persisted format
 // detail (chunk ids are content addressed); keep it stable.
 const WRITE_CHUNK_PREFIX = "h:";
@@ -579,7 +579,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const ref = this.vaultRef();
     if (!ref) throw new Error("R2 storage requires a named vault DO");
     const prefix = contentPrefix(ref.tenantId, ref.vaultId ?? ref.databaseName);
-    if (!this.contentJournal || this.contentJournal.bucket !== bucket || this.contentJournal.prefix !== prefix) this.contentJournal = new R2Journal(bucket, prefix);
+    if (!this.contentJournal || this.contentJournal.bucket !== bucket || this.contentJournal.prefix !== prefix) this.contentJournal = new R2Journal(bucket, prefix, 3);
     return this.contentJournal;
   }
 
@@ -604,7 +604,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const journal = this.journal();
     if (!journal) return;
     const head = (await journal.head()).commit;
-    if (!force && this.getMeta("r2_applied_head") === head && head != null) {
+    if (!force && this.getMeta("r2_applied_head_v3") === head && head != null) {
       this.journalHead = head;
       return;
     }
@@ -613,7 +613,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     if (this.journalHead === undefined && !head && this.dbExists()) {
       throw new Error("Legacy vault requires explicit R2 migration before writes");
     }
-    const applied = force ? null : this.getMeta("r2_applied_head");
+    const applied = force ? null : this.getMeta("r2_applied_head_v3");
     this.statements = null;
     const clear = () => {
       this.sqlExec("DELETE FROM checkpoint_work");
@@ -626,11 +626,11 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       this.ctx.storage.transactionSync(() => {
         if (batch.reset) { clear(); fullReset = true; }
         for (const statement of batch.statements) this.sqlExec(statement.sql, ...statement.args);
-        if (batch.commit) this.setMeta("r2_applied_head", batch.commit);
+        if (batch.commit) this.setMeta("r2_applied_head_v3", batch.commit);
       });
     }
     this.journalHead = head;
-    if (head) this.setMeta("r2_applied_head", head);
+    if (head) this.setMeta("r2_applied_head_v3", head);
     // Search is derived and is rebuilt from recovered content.
     if (fullReset && this.dbExists()) {
       this.requestFullTextRebuild();
@@ -704,7 +704,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         this.statements = null;
         if (statements.length) {
           this.journalHead = await journal.commit(statements,this.journalHead);
-          this.setMeta("r2_applied_head",this.journalHead);
+          this.setMeta("r2_applied_head_v3",this.journalHead);
         }
         this.saveCheckpointWork(work);
         return;
@@ -717,7 +717,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         for (const source of rows) {
           work.cursor = Number(source.snapshot_rowid);
           const { snapshot_rowid: _, ...row } = source;
-          if (table === "meta" && row.key === "r2_applied_head") continue;
+          if (table === "meta" && ["r2_applied_head_v3", "maintenance_turn"].includes(String(row.key))) continue;
           statements.push(this.snapshotRow(table,row));
         }
         if (statements.length) await this.checkpointPage(work,statements);
@@ -755,7 +755,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         this.sqlExec("DELETE FROM checkpoint_work");
         this.sqlExec("DELETE FROM checkpoint_dirty");
         this.setMeta("checkpoint_seq",String(work.startedSeq));
-        this.setMeta("r2_applied_head",this.journalHead!);
+        this.setMeta("r2_applied_head_v3",this.journalHead!);
       });
     } catch (error) {
       this.statements = null;
@@ -877,7 +877,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       this.statements = null;
       if (journal && statements?.length) {
         this.journalHead = await journal.commit(statements, this.journalHead);
-        this.setMeta("r2_applied_head", this.journalHead);
+        this.setMeta("r2_applied_head_v3", this.journalHead);
         this.notifyWatchers();
       }
       return response;
@@ -1133,10 +1133,11 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         const versions = event === "UPDATE" ? ["OLD", "NEW"] : [event === "DELETE" ? "OLD" : "NEW"];
         const changes = versions.map(version => {
           const rowKey = `json_array(${keys.map(key => `${version}.${key}`).join(",")})`;
-          const condition = table === "meta" ? ` AND ${version}.key <> 'r2_applied_head'` : "";
+          const condition = table === "meta" ? ` AND ${version}.key NOT IN ('r2_applied_head_v3','maintenance_turn')` : "";
           return `INSERT INTO checkpoint_dirty (table_name,row_key) SELECT '${table}', ${rowKey} WHERE NOT EXISTS (SELECT 1 FROM checkpoint_dirty WHERE table_name='${table}' AND row_key=${rowKey})${condition};`;
         }).join(" ");
-        sql.exec(`CREATE TRIGGER IF NOT EXISTS checkpoint_${table}_${event} AFTER ${event} ON ${table}
+        sql.exec(`DROP TRIGGER IF EXISTS checkpoint_${table}_${event}`);
+        sql.exec(`CREATE TRIGGER checkpoint_${table}_${event} AFTER ${event} ON ${table}
           WHEN EXISTS (SELECT 1 FROM checkpoint_work WHERE json_extract(state,'$.phase') <> 'compact') BEGIN ${changes} END`);
       }
     }
@@ -1562,7 +1563,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     return files;
   }
 
-  private async findNoteRow(path: string, includeDeleted = false): Promise<RevRow | null> {
+  private async findNoteRow(path: string, includeDeleted = false, hydrate = true): Promise<RevRow | null> {
     let row = this.first<RevRow>(
       `SELECT r.*
        FROM docs d
@@ -1583,6 +1584,10 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       path,
     );
     if (!row) return null;
+    if (!hydrate) {
+      const metadata = this.first<{ soft_deleted: number }>("SELECT soft_deleted FROM rev_metadata WHERE id=? AND rev=?", row.id, row.rev);
+      return !includeDeleted && (row.deleted || metadata?.soft_deleted) ? null : row;
+    }
     const hydrated = (await this.hydrateRevision(row));
     return !includeDeleted && docIsDeleted(cloneBody(hydrated)) ? null : hydrated;
   }
@@ -1677,34 +1682,36 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       await this.resolveVaultIdentity();
       // Pure maintenance can use the last confirmed local head. A new instance or
       // lost applied marker reloads it; every canonical publication still uses CAS.
-      if (!this.checkpointWork() || this.journalHead === undefined || this.getMeta("r2_applied_head") !== this.journalHead) await this.restoreJournal();
+      if (!this.checkpointWork() || this.journalHead === undefined || this.getMeta("r2_applied_head_v3") !== this.journalHead) await this.restoreJournal();
       return this.withMaintenance(() => this.runAlarm());
     });
   }
 
   private async runAlarm(): Promise<void> {
-    console.log("LiveSync alarm fired", {
-      indexedSeq: this.indexedSeq(),
-      ftsRebuildAt: this.getMeta(FTS_REBUILD_AT_META_KEY),
-    });
+    let nextTurn: "index" | "checkpoint" | undefined;
     try {
-      if (this.journal() && (this.checkpointWork() || this.currentSeq() - Number(this.getMeta("checkpoint_seq") ?? 0) >= 4096)) {
+      const checkpointDue = this.journal() && (this.checkpointWork() || this.currentSeq() - Number(this.getMeta("checkpoint_seq") ?? 0) >= 4096);
+      if (checkpointDue && this.getMeta("maintenance_turn") !== "index") {
+        nextTurn = "index";
         if (!this.checkpointWork()) await this.requestCheckpoint(false);
         await this.runCheckpointSlice();
+        this.setMeta("maintenance_turn", nextTurn);
         await this.scheduleIndexing(this.checkpointWork() ? 25 : 0);
         return;
       }
+      nextTurn = "checkpoint";
       const { more, retry, worked } = await this.runIndexing();
-      if (more) await this.scheduleIndexing(0);
+      this.setMeta("maintenance_turn", nextTurn);
+      if (this.checkpointWork()) await this.scheduleIndexing(25);
+      else if (more || worked) await this.scheduleIndexing(0);
       else if (retry) await this.scheduleIndexing(INDEX_RETRY_DELAY_MS);
-      // The FTS rebuild runs in an alarm event of its own: a crashing rebuild
-      // must not roll back the vector-indexing progress made above (SQLite DO
-      // events are transactional), so defer it whenever this event did work.
-      if (more || worked) await this.scheduleIndexing(0);
       else await this.maybeRunFtsBuild();
     } catch (error) {
-      console.warn("LiveSync indexing failed", error);
-      await this.scheduleIndexing(INDEX_RETRY_DELAY_MS);
+      // A failed checkpoint may have restored SQLite; persist the other task's
+      // next turn afterwards so repeated failures cannot monopolize maintenance.
+      if (nextTurn) this.setMeta("maintenance_turn", nextTurn);
+      console.warn("LiveSync maintenance failed", error);
+      await this.scheduleIndexing(this.checkpointWork() ? 25 : INDEX_RETRY_DELAY_MS);
     }
   }
 
@@ -1736,7 +1743,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       INDEX_BATCH_SIZE,
     );
     const ids = new Set(changes.map((change) => change.id));
-    const pendingRows = this.rows<IndexStateRow>(`SELECT * FROM index_state WHERE pending = 1`);
+
     const fullText = this.bindings().fullText;
     // Vector-indexed notes not yet in the external full-text index.
     const fullTextBacklog = fullText
@@ -1754,13 +1761,14 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     for (const id of ids) {
       const row = this.rawWinningRow(id);
       if (!row) continue;
-      const hydrated = (await this.hydrateRevision(row));
-      const doc = cloneBody(hydrated);
-      if (isNoteDoc(doc)) {
-        touchedPaths.set(doc.path, row.deleted || docIsDeleted(doc) ? null : hydrated);
+      const metadata = this.first<RevisionMetadata>("SELECT path,size,mtime,type,soft_deleted FROM rev_metadata WHERE id=? AND rev=?", row.id, row.rev);
+      if (metadata?.path && metadata.type !== "leaf" && metadata.type !== "chunkpack") {
+        touchedPaths.set(metadata.path, row.deleted || metadata.soft_deleted ? null : row);
         continue;
       }
-      if (!row.deleted && !docIsDeleted(doc)) chunkArrived = true;
+      const doc = metadata ? null : cloneBody(await this.hydrateRevision(row));
+      if (doc && isNoteDoc(doc)) { touchedPaths.set(doc.path, row.deleted || docIsDeleted(doc) ? null : row); continue; }
+      if (!row.deleted && !metadata?.soft_deleted && (!doc || !docIsDeleted(doc))) chunkArrived = true;
       // Tombstones carry no path; recover it from the index state or an earlier revision.
       const previousPath =
         this.first<{ path: string }>(`SELECT path FROM index_state WHERE doc_id = ?`, id)?.path ??
@@ -1769,34 +1777,53 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
           id,
         )?.path;
       if (previousPath && !touchedPaths.has(previousPath)) {
-        touchedPaths.set(previousPath, (await this.findNoteRow(previousPath)));
+        touchedPaths.set(previousPath, (await this.findNoteRow(previousPath, false, false)));
       }
     }
+    if (chunkArrived) {
+      if (this.getMeta("index_chunk_sweep") != null) this.setMeta("index_chunk_sweep_again", "1");
+      else this.setMeta("index_chunk_sweep", "");
+    }
+    const sweep = this.getMeta("index_chunk_sweep");
+    const pendingRows = sweep != null
+      ? this.rows<IndexStateRow>("SELECT * FROM index_state WHERE pending=1 AND path>? ORDER BY path LIMIT 16", sweep)
+      : this.rows<IndexStateRow>("SELECT * FROM index_state WHERE pending=1 AND attempts<? ORDER BY attempts,path LIMIT 16", INDEX_MAX_ATTEMPTS);
     // Chunk arrivals do not carry a path: re-check every pending note when a
     // chunk arrived, however often it was tried before. Without one, only
     // notes still under the periodic retry cap are re-checked.
     for (const pending of pendingRows) {
       if (touchedPaths.has(pending.path)) continue;
-      if (chunkArrived || pending.attempts < INDEX_MAX_ATTEMPTS) {
-        touchedPaths.set(pending.path, (await this.findNoteRow(pending.path)));
+      if (sweep != null || pending.attempts < INDEX_MAX_ATTEMPTS) {
+        touchedPaths.set(pending.path, (await this.findNoteRow(pending.path, false, false)));
       }
     }
     for (const backlog of fullTextBacklog) {
       if (touchedPaths.has(backlog.path)) continue;
       // doc_id is known here, so skip findNoteRow's JSON-scan fallback.
       const raw = this.rawWinningRow(backlog.doc_id!);
-      const row = raw && !raw.deleted ? (await this.hydrateRevision(raw)) : null;
-      touchedPaths.set(backlog.path, row && !docIsDeleted(cloneBody(row)) ? row : null);
+      touchedPaths.set(backlog.path, raw && !raw.deleted ? raw : null);
+    }
+    // Resume a chunk sweep ahead of newly arriving changes. Its durable cursor
+    // advances only over attempted paths, so a time-budget deferral neither
+    // consumes a retry nor strands a note already at the retry limit.
+    if (sweep != null) {
+      const ordered = new Map<string, RevRow | null>();
+      for (const pending of pendingRows) if (touchedPaths.has(pending.path)) ordered.set(pending.path, touchedPaths.get(pending.path)!);
+      for (const [path, row] of touchedPaths) ordered.set(path, row);
+      touchedPaths.clear();
+      for (const [path, row] of ordered) touchedPaths.set(path, row);
     }
 
     // One writer per run, opened on first use. A failed write leaves the note
     // pending so a later run retries it; the vectors are kept either way.
     let writer: Promise<FullTextIndexWriter> | undefined;
+    const attemptedPaths = new Set<string>();
     const writeFullText = async (
       path: string,
       work: (writer: FullTextIndexWriter) => Promise<void>,
     ): Promise<boolean> => {
       try {
+        attemptedPaths.add(path);
         writer ??= fullText!.openWriter(ref);
         await work(await writer);
         return true;
@@ -1810,15 +1837,34 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     try {
       retry = await this.indexTouchedPaths(touchedPaths, { ref, policy, fullText, writeFullText });
     } finally {
-      if (writer) await writer.then((opened) => opened.close()).catch(() => undefined);
+      if (writer) {
+        try { await (await writer).close(); }
+        catch (error) {
+          // A shared writer acknowledges staged notes only when its manifest is
+          // published. Mark every attempted path for retry, including deletes.
+          retry = true;
+          for (const path of attemptedPaths) this.sqlExec(`INSERT INTO index_state (path,fts_hash,pending,attempts) VALUES (?,NULL,1,1)
+            ON CONFLICT(path) DO UPDATE SET fts_hash=NULL,pending=1,attempts=index_state.attempts+1`, path);
+          console.warn("Full-text publication failed", error);
+        }
+      }
     }
 
+    if (sweep != null) {
+      const deferredAt = pendingRows.findIndex(row => this.indexDeferredPaths.has(row.path));
+      if (deferredAt >= 0) {
+        if (deferredAt > 0) this.setMeta("index_chunk_sweep", pendingRows[deferredAt - 1]!.path);
+      }
+      else if (pendingRows.length === 16) this.setMeta("index_chunk_sweep", pendingRows.at(-1)!.path);
+      else if (this.getMeta("index_chunk_sweep_again") === "1") { this.setMeta("index_chunk_sweep", ""); this.sqlExec("DELETE FROM meta WHERE key='index_chunk_sweep_again'"); }
+      else this.sqlExec("DELETE FROM meta WHERE key='index_chunk_sweep'");
+    }
     const lastSeq = changes.at(-1)?.seq ?? since;
     if (lastSeq > since) {
       this.setMeta(INDEXED_SEQ_META_KEY, String(lastSeq));
       if (!fullText) this.armFtsBuild(FTS_BUILD_DEBOUNCE_MS);
     }
-    const more = changes.length >= INDEX_BATCH_SIZE || fullTextBacklog.length >= FTS_BACKLOG_BATCH_SIZE;
+    const more = changes.length >= INDEX_BATCH_SIZE || fullTextBacklog.length >= FTS_BACKLOG_BATCH_SIZE || this.indexSliceMore || this.getMeta("index_chunk_sweep") != null;
     if (!more && !retry && !this.hasFullTextBacklog() && !this.first(`SELECT 1 FROM index_state WHERE pending = 1 LIMIT 1`) && this.indexedSeq() >= this.currentSeq()) {
       await fullText?.completeRebuild?.(ref);
     }
@@ -1843,6 +1889,9 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   }
 
   /** Brings vectors (and the external full-text index, if any) up to date for these notes. Returns whether to retry later. */
+  private indexSliceMore = false;
+  private indexDeferredPaths = new Set<string>();
+
   private async indexTouchedPaths(
     touchedPaths: Map<string, RevRow | null>,
     options: {
@@ -1854,7 +1903,18 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   ): Promise<boolean> {
     const { ref, policy, fullText, writeFullText } = options;
     let retry = false;
-    for (const [path, row] of touchedPaths) {
+    this.indexSliceMore = false;
+    this.indexDeferredPaths.clear();
+    const started = Date.now(); let processed = 0;
+    for (const [path, source] of touchedPaths) {
+      if (processed >= 16 || processed > 0 && Date.now() - started >= 50) {
+        this.indexDeferredPaths.add(path);
+        this.sqlExec(`INSERT INTO index_state (path,doc_id,pending,attempts) VALUES (?,?,1,0)
+          ON CONFLICT(path) DO UPDATE SET doc_id=excluded.doc_id,pending=1`, path, source?.id ?? null);
+        this.indexSliceMore = true; continue;
+      }
+      processed++;
+      const row = source ? await this.hydrateRevision(source) : null;
       const state = this.first<IndexStateRow>(`SELECT * FROM index_state WHERE path = ?`, path);
       const indexable = row != null && cloneBody(row).type !== "newnote" && isIndexableMarkdownPath(path, policy);
       if (!indexable) {
@@ -2605,11 +2665,19 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
 
   private async hydrateRevision(row: RevRow): Promise<RevRow> {
     if (row.body_chunked === 2) {
-      const key = (JSON.parse(row.body) as { r2: string }).r2;
+      const pointer = JSON.parse(row.body) as { r2: string; part?: string };
       const journal = this.journal();
       if (!journal) throw new Error("Missing content bucket binding");
+      if (pointer.part === "body") {
+        const stored = JSON.parse(await journal.body(pointer.r2)) as { format: number; body: DocBody; history: unknown };
+        if (stored.format !== 3) throw new Error("Unsupported revision envelope");
+        return { ...row, body: JSON.stringify(stored.body), body_chunked: 0, rev_history: JSON.stringify(stored.history) };
+      }
       const history = row.rev_history ? JSON.parse(row.rev_history) as { r2?: string } : null;
-      return { ...row, body: await journal.body(key), body_chunked: 0, rev_history: history?.r2 ? await journal.body(history.r2) : row.rev_history };
+      // Legacy body/history objects are independent; settle both reads before continuing.
+      const parts = await Promise.allSettled([journal.body(pointer.r2), history?.r2 ? journal.body(history.r2) : Promise.resolve(row.rev_history)]);
+      for (const result of parts) if (result.status === "rejected") throw result.reason;
+      return { ...row, body: (parts[0] as PromiseFulfilledResult<string>).value, body_chunked: 0, rev_history: (parts[1] as PromiseFulfilledResult<string | null>).value };
     }
     return row.body_chunked ? { ...row, body: this.revisionBody(row), body_chunked: 0 } : row;
   }
@@ -2751,8 +2819,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     revHistory: string;
   }): Promise<void> {
     const journal = this.journal();
-    const key = journal ? await journal.putBody(row.body) : null;
-    const historyKey = journal ? await journal.putBody(row.revHistory) : null;
+    const key = journal ? await journal.putBody(JSON.stringify({ format: 3, body: JSON.parse(row.body), history: JSON.parse(row.revHistory) })) : null;
+    const historyKey = key;
     // Stop hot ancestry at the archived tree; the full lineage stays in R2.
     if (journal && row.ancestors) {
       const hot: string[] = [];
@@ -2778,11 +2846,11 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         row.rev,
         row.gen,
         row.parentRev,
-        key ? JSON.stringify({ r2: key }) : chunks ? "{}" : row.body,
+        key ? JSON.stringify({ r2: key, part: "body" }) : chunks ? "{}" : row.body,
         key ? 2 : chunks ? 1 : 0,
         row.deleted,
         row.seq,
-        historyKey ? JSON.stringify({ r2: historyKey }) : row.revHistory,
+        historyKey ? JSON.stringify({ r2: historyKey, part: "history" }) : row.revHistory,
       );
       if (chunks) {
         for (const [chunkIndex, chunk] of chunks.entries()) {
@@ -2917,9 +2985,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         }
       }
       const body = JSON.stringify({ ...withoutMeta(doc), _id: id, _rev: doc._rev });
-      const r2 = await this.journal()!.putBody(body);
-      const history = await this.journal()!.putBody(revisionHistory(doc, doc._rev));
-      await this.archiveRows(id, [{ ...existing, parent_rev: existing.parent_rev ?? ancestors[0] ?? null, body: JSON.stringify({ r2 }), body_chunked: 2, body_available: 1, deleted, rev_history: JSON.stringify({ r2: history }) }]);
+      const r2 = await this.journal()!.putBody(JSON.stringify({ format: 3, body: JSON.parse(body), history: JSON.parse(revisionHistory(doc, doc._rev)) }));
+      await this.archiveRows(id, [{ ...existing, parent_rev: existing.parent_rev ?? ancestors[0] ?? null, body: JSON.stringify({ r2, part: "body" }), body_chunked: 2, body_available: 1, deleted, rev_history: JSON.stringify({ r2, part: "history" }) }]);
       this.sqlExec("INSERT INTO changes (seq,id,rev,deleted) VALUES (?,?,?,?)", seq, id, doc._rev, deleted);
       this.setMeta("monotonic_seq", String(seq));
       this.recalculateWinner(id);

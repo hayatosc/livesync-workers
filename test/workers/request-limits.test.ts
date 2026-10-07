@@ -70,7 +70,7 @@ it("enforces document limits for direct PUT and local progress documents",async(
 it("accepts exact streamed request bytes and cancels overflow with absent or understated Content-Length",async()=>{
   const stub=await fixture("stream-limits");
   await runInDurableObject(stub,async(instance:PersistentVaultDO,state)=>{
-    const head=state.storage.sql.exec<{value:string}>("SELECT value FROM meta WHERE key='r2_applied_head'").one().value;
+    const head=state.storage.sql.exec<{value:string}>("SELECT value FROM meta WHERE key='r2_applied_head_v3'").one().value;
     for(const extra of [0,1])for(const declared of [undefined,"1","invalid"]){
       let remaining=REQUEST_LIMITS.maxRequestBytes-2+extra;let canceled=false;let reads=0;
       const body=new ReadableStream<Uint8Array>({
@@ -82,7 +82,7 @@ it("accepts exact streamed request bytes and cancels overflow with absent or und
       expect(response.status).toBe(extra?413:200);
       if(extra)expect(canceled).toBe(true);
       expect(reads).toBeLessThan(260);
-      expect(state.storage.sql.exec<{value:string}>("SELECT value FROM meta WHERE key='r2_applied_head'").one().value).toBe(head);
+      expect(state.storage.sql.exec<{value:string}>("SELECT value FROM meta WHERE key='r2_applied_head_v3'").one().value).toBe(head);
     }
   });
 },15_000);
