@@ -143,6 +143,8 @@ export interface VaultBindings {
   vaultDb: AnyDurableObjectNamespace;
   /** Authoritative content and recovery journal; separate from derived search. */
   contentBucket?: R2Bucket;
+  /** Keep derived latest files at files/v1/<tenant>/<vault>/<original-path> in contentBucket. */
+  fileMirror?: boolean;
   /** Soft used-byte ceiling; leave headroom below the platform SQLite limit. */
   sqliteMaxBytes?: number;
   sqliteHeadroomBytes?: number;

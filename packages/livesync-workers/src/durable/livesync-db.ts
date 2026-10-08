@@ -1,5 +1,6 @@
 import { REQUEST_LIMITS, BadRequestError, RequestLimitError, readBoundedJson, assertDocumentSize, assertBulkLimits, decodePathSegment } from "../livesync/limits.js";
 import { R2Journal, contentPrefix, type JournalStatement } from "../storage/r2-journal.js";
+import { R2FileMirror, FileMirrorPending, FileMirrorUnsupported, type MirroredFile } from "../storage/file-mirror.js";
 import { mapBatches, limitConcurrency } from "../storage/concurrency.js";
 import { hashText } from "../search/chunk-md.js";
 import { removeNoteVectors, upsertNoteVectors } from "../search/vector-index.js";
@@ -677,6 +678,13 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     return this.contentJournal;
   }
 
+  private fileMirror(): R2FileMirror | null {
+    const bindings = this.bindings();
+    const ref = this.vaultRef();
+    return bindings.fileMirror && bindings.contentBucket && ref
+      ? new R2FileMirror(this.ctx.storage.sql, bindings.contentBucket, ref) : null;
+  }
+
   private sqlExec<T extends Record<string, SqlStorageValue> = Record<string, SqlStorageValue>>(query: string, ...args: unknown[]): SqlStorageCursor<T> {
     const cursor = this.ctx.storage.sql.exec<T>(query, ...args);
     if (this.statements && /^(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(query.trim()) &&
@@ -725,6 +733,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     }
     this.journalHead = head;
     if (head) this.setMeta("r2_applied_head_v3", head);
+    if (fullReset) this.fileMirror()?.reset();
     // Search is derived and is rebuilt from recovered content.
     if (fullReset && this.dbExists()) {
       this.requestFullTextRebuild();
@@ -952,6 +961,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       return this.migrateLegacy(request);
     }
     await this.restoreJournal();
+    const previousSeq = this.currentSeq();
     if (journal) this.statements = [];
     let mutated = false;
     try {
@@ -975,6 +985,11 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         this.journalHead = await journal.commit(statements, this.journalHead);
         this.setMeta("r2_applied_head_v3", this.journalHead);
         this.notifyWatchers();
+        const mirror = this.fileMirror();
+        if (mirror && this.currentSeq() > previousSeq) {
+          mirror.changesCommitted(previousSeq);
+          await this.scheduleIndexing();
+        }
       }
       return response;
     } catch (error) {
@@ -1243,6 +1258,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_changes_id ON changes (id)`);
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_docs_updated_seq ON docs (updated_seq)`);
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_rev_metadata_path ON rev_metadata (path)`);
+    R2FileMirror.init(sql);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -1279,7 +1295,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       (this.indexNeedsVersionUpgrade() ||
         this.indexedSeq() < this.currentSeq() ||
         this.first(`SELECT 1 FROM index_state WHERE pending = 1 AND attempts < ? LIMIT 1`, INDEX_MAX_ATTEMPTS) ||
-        this.hasFullTextBacklog())
+        this.hasFullTextBacklog() || this.fileMirror()?.hasWork(this.currentSeq()))
     ) {
       void this.scheduleIndexing();
     }
@@ -1396,6 +1412,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   }
 
   private async purgeDb(): Promise<Response> {
+    await this.fileMirror()?.deleteVault();
     await this.removeAllVectors();
     const ref = this.vaultRef();
     if (ref) {
@@ -1428,6 +1445,13 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         const work = this.checkpointWork();
         const garbage = await journal.collectGarbage({ execute: body.execute === true, roots: work ? [work.references, work.previous] : [] });
         return json({ execute: body.execute === true, keys: garbage });
+      }
+      case "filesRebuild": {
+        const mirror = this.fileMirror();
+        if (!mirror) return json({ error: "FILE_MIRROR_DISABLED" }, { status: 409 });
+        mirror.reset();
+        await this.scheduleIndexing(0);
+        return json({ ok: true, pending: true });
       }
       case "listMarkdownPaths": {
         const missing = this.requireDb();
@@ -1524,6 +1548,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
             : {}),
           capacity: this.capacity(),
           checkpoint: this.checkpointProgress(),
+          fileMirror: this.fileMirror()?.status() ?? null,
           indexedSeq: this.indexedSeq(),
           currentSeq: this.currentSeq(),
           indexed: this.first<{ count: number }>(
@@ -1702,12 +1727,66 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     return row ? (await this.fileContentForRow(row)) : null;
   }
 
+  private async readMirrorFile(path: string): Promise<MirroredFile | null> {
+    // The mirror path has already lost the transport prefix; preserve a literal "i:" in a filename.
+    const row = (path.startsWith("i:") ? null : await this.findNoteRow(path)) ?? await this.findNoteRow(`i:${path}`);
+    if (!row) return null;
+    const doc = cloneBody(row);
+    if (doc.type !== "plain" && doc.type !== "newnote") throw new FileMirrorUnsupported("Unsupported LiveSync file type");
+    if (typeof doc.size === "number" && doc.size > REQUEST_LIMITS.maxAttachmentBytes) throw new FileMirrorUnsupported("File exceeds the 10 MiB mirror limit");
+    let encodedBytes = 0;
+    const inspect = (body: DocBody, countData = true) => {
+      if (body.e_ === true) throw new FileMirrorUnsupported("Encrypted LiveSync content cannot be mirrored");
+      const pieces = Array.isArray(body.data) ? body.data : [body.data];
+      for (const piece of pieces) {
+        if (typeof piece !== "string") continue;
+        if (piece.startsWith("\u000eLZ\u001d")) throw new FileMirrorUnsupported("Compressed LiveSync content cannot be mirrored");
+        if (countData) encodedBytes += enc.encode(piece).byteLength;
+        if (encodedBytes > Math.ceil(REQUEST_LIMITS.maxAttachmentBytes / 3) * 4) throw new FileMirrorUnsupported("File exceeds the mirror limit");
+      }
+      if (body.eden && typeof body.eden === "object") {
+        for (const [id, value] of Object.entries(body.eden)) {
+          if (id.startsWith("h:++encrypted")) throw new FileMirrorUnsupported("Encrypted LiveSync content cannot be mirrored");
+          if (value && typeof value === "object") inspect(value as DocBody, false);
+        }
+      }
+    };
+    const content = await this.fileContentForRow(row, async source => {
+      const hydrated = await this.hydrateRevision(source);
+      inspect(cloneBody(hydrated));
+      return hydrated;
+    }, Math.ceil(REQUEST_LIMITS.maxAttachmentBytes / 3) * 4);
+    if (content == null) throw new FileMirrorPending("Waiting for LiveSync chunks");
+    let bytes: Uint8Array;
+    if (doc.type === "newnote") {
+      try { bytes = Uint8Array.from(atob(content), char => char.charCodeAt(0)); }
+      catch { throw new FileMirrorUnsupported("Unsupported binary encoding; expected base64"); }
+    } else bytes = enc.encode(content);
+    if (bytes.byteLength > REQUEST_LIMITS.maxAttachmentBytes) throw new FileMirrorUnsupported("File exceeds the 10 MiB mirror limit");
+    const mimeTypes: Record<string, string> = {
+      md: "text/markdown; charset=utf-8", txt: "text/plain; charset=utf-8", json: "application/json",
+      png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml",
+      pdf: "application/pdf", mp3: "audio/mpeg", wav: "audio/wav", mp4: "video/mp4",
+    };
+    const contentType = typeof doc.contentType === "string" && doc.contentType.length <= 128 && !/[\u0000-\u001f\u007f]/.test(doc.contentType)
+      ? doc.contentType : mimeTypes[path.split(".").at(-1)!.toLowerCase()] ?? "application/octet-stream";
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+    return { docId: row.id, bytes, contentType, contentHash: [...digest].map(value => value.toString(16).padStart(2, "0")).join(""), mtime: typeof doc.mtime === "number" ? doc.mtime : null };
+  }
+
   /** Reassemble a note's content from inline data or child chunks. */
-  private async fileContentForRow(row: RevRow, hydrate = (row: RevRow) => this.hydrateRevision(row)): Promise<string | null> {
+  private async fileContentForRow(row: RevRow, hydrate = (row: RevRow) => this.hydrateRevision(row), maximumCodeUnits?: number): Promise<string | null> {
+    const join = (pieces: string[]) => {
+      // Bound mirror output before joining, even when a document repeats one child many times.
+      if (maximumCodeUnits !== undefined && pieces.reduce((total, piece) => total + piece.length, 0) > maximumCodeUnits) {
+        throw new FileMirrorUnsupported("File exceeds the mirror limit");
+      }
+      return pieces.join("");
+    };
     const doc = cloneBody((await hydrate(row)));
     if (typeof doc.data === "string") return doc.data;
     if (Array.isArray(doc.data) && doc.data.every((piece) => typeof piece === "string")) {
-      return (doc.data as string[]).join("");
+      return join(doc.data as string[]);
     }
     const children = Array.isArray(doc.children)
       ? doc.children.filter((id): id is string => typeof id === "string")
@@ -1739,7 +1818,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       return typeof edenChunk?.data === "string" ? edenChunk.data : null;
     });
     return content.every((chunk): chunk is string => typeof chunk === "string")
-      ? content.join("")
+      ? join(content)
       : null;
   }
 
@@ -1790,9 +1869,22 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     let nextTurn: "index" | "checkpoint" | undefined;
     const started = Date.now();
     try {
-      const result = await this.exclusive(async () => {
+      await this.exclusive(async () => {
         await this.resolveVaultIdentity();
         if (!this.checkpointWork() || this.journalHead === undefined || this.getMeta("r2_applied_head_v3") !== this.journalHead) await this.restoreJournal();
+      });
+      const mirror = this.fileMirror();
+      if (mirror) {
+        try {
+          const work = await mirror.run(path => this.readMirrorFile(path), operation => this.exclusive(operation));
+          if (work.runAt != null) await this.scheduleIndexing(Math.max(0, work.runAt - Date.now()));
+          else if (work.more || work.retry) await this.scheduleIndexing(work.more ? 0 : INDEX_RETRY_DELAY_MS);
+        } catch (error) {
+          console.warn("LiveSync file mirror failed", { message: String(error) });
+          await this.scheduleIndexing(INDEX_RETRY_DELAY_MS);
+        }
+      }
+      const result = await this.exclusive(async () => {
         const checkpointDue = this.journal() && (this.checkpointWork() || this.currentSeq() - Number(this.getMeta("checkpoint_seq") ?? 0) >= 4096);
         if (checkpointDue && this.getMeta("maintenance_turn") !== "index") {
           nextTurn = "index";

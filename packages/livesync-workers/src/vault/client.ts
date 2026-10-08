@@ -1,6 +1,7 @@
 import { INTERNAL_SECRET_HEADER, VAULT_REF_HEADER } from "../livesync/http.js";
 import { vaultStub } from "../livesync/handler.js";
 import { hashText } from "../search/chunk-md.js";
+import type { FileMirrorStatus } from "../storage/file-mirror.js";
 import { vectorSearch, type VectorSearchHit } from "../search/vector-index.js";
 import { defaultFtsCache, ftsSearch, readFtsPhase } from "../search/fts-index.js";
 import { extractSnippet } from "../search/fts/search.js";
@@ -35,6 +36,7 @@ export type VaultNoteStat = {
 };
 
 export type VaultIndexStatus = {
+  fileMirror?: FileMirrorStatus | null;
   checkpoint?: { phase: "compact" | "scan" | "dirty"; startedSeq: number; dirtyKeys: number } | null;
   capacity?: { databaseSize: number; usedBytes: number; limitBytes: number; headroomBytes: number; writable: boolean };
   indexedSeq: number;
