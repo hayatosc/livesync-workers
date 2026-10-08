@@ -123,6 +123,44 @@ async function requestWithStub(
 }
 
 describe("LiveSync worker routing", () => {
+  it("splits large keyed _all_docs reads without changing row order", async () => {
+    const keys = Array.from({ length: 300 }, (_, index) => `doc-${index}`);
+    for (const method of ["GET", "POST"] as const) {
+      const stub = {
+        fetch: vi.fn(async (request: Request) => {
+          const url = new URL(request.url);
+          const batch = method === "GET"
+            ? JSON.parse(url.searchParams.get("keys")!) as string[]
+            : ((await request.json()) as { keys: string[] }).keys;
+          expect(batch.length).toBeLessThanOrEqual(128);
+          expect(url.searchParams.get("include_docs")).toBe("true");
+          return Response.json({
+            total_rows: 500,
+            offset: 0,
+            rows: batch.map((id) => ({ id, key: id, value: { rev: "1-test" }, doc: { _id: id } })),
+          });
+        }),
+      };
+      const query = method === "GET" ? `&keys=${encodeURIComponent(JSON.stringify(keys))}` : "";
+      const response = await requestWithStub(
+        new Request(`https://kuro.example/livesync/my-vault/_all_docs?include_docs=true${query}`, {
+          method,
+          headers: { Authorization: basic("sync-user", "sync-pass"), Origin: "capacitor://localhost" },
+          ...(method === "POST" ? { body: JSON.stringify({ keys }) } : {}),
+        }),
+        stub,
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Access-Control-Allow-Origin")).toBe("capacitor://localhost");
+      await expect(response.json()).resolves.toMatchObject({
+        total_rows: 500,
+        offset: 0,
+        rows: keys.map((id) => ({ id, doc: { _id: id } })),
+      });
+      expect(stub.fetch).toHaveBeenCalledTimes(3);
+    }
+  });
+
   it("answers root health endpoints without auth", async () => {
     const stub = { fetch: vi.fn() };
     const response = await requestWithStub(
@@ -735,6 +773,17 @@ describe("LiveSync CouchDB compatibility", () => {
     expect(keyed.rows[0]!.value.deleted).toBe(true);
     expect(keyed.rows[0]!.doc).toBeNull();
     expect(keyed.rows[1]!.doc).toMatchObject({ value: "doc-a" });
+
+    const getKeys = encodeURIComponent(JSON.stringify(["doc-d", "missing", "doc-b"]));
+    const keyedGet = await (await durableObject.fetch(
+      new Request(`https://db/_all_docs?keys=${getKeys}&include_docs=true`),
+    )).json() as { rows: Array<{ id?: string; key: string; error?: string; doc?: { value: string } }> };
+    expect(keyedGet.rows).toEqual([
+      expect.objectContaining({ id: "doc-d", doc: expect.objectContaining({ value: "doc-d" }) }),
+      { key: "missing", error: "not_found" },
+      expect.objectContaining({ id: "doc-b", doc: expect.objectContaining({ value: "doc-b" }) }),
+    ]);
+    expect((await durableObject.fetch(new Request("https://db/_all_docs?keys=broken"))).status).toBe(400);
   });
 
   it("rejects creating a database twice", async () => {
