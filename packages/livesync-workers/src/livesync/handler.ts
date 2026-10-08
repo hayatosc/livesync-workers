@@ -273,6 +273,51 @@ function stripIdleHeader(response: Response): Response {
 }
 
 type ChangeFeedBatch = { results?: unknown[]; last_seq?: unknown };
+const ALL_DOCS_BATCH_SIZE = 128;
+
+async function proxyAllDocs(
+  request: Request,
+  rewritten: URL,
+  headers: Headers,
+  stub: DurableObjectStub,
+): Promise<Response> {
+  const bodyText = request.method === "POST" ? await readBoundedText(request) : null;
+  const body = parseJsonObject(bodyText ?? "");
+  const queryKeys = rewritten.searchParams.get("keys");
+  let keys: unknown = body.keys;
+  if (!("keys" in body) && queryKeys !== null) {
+    try {
+      keys = JSON.parse(queryKeys);
+    } catch {
+      // The Durable Object returns a CouchDB-style bad_request for malformed keys.
+    }
+  }
+
+  const forward = (batch?: string[]): Promise<Response> => {
+    const url = new URL(rewritten);
+    if (batch && request.method === "GET") url.searchParams.set("keys", JSON.stringify(batch));
+    return stub.fetch(new Request(url, {
+      method: request.method,
+      headers,
+      ...(bodyText !== null ? { body: batch ? JSON.stringify({ ...body, keys: batch }) : bodyText } : {}),
+    }));
+  };
+
+  if (!Array.isArray(keys) || keys.length <= ALL_DOCS_BATCH_SIZE || !keys.every((key) => typeof key === "string")) {
+    return forward();
+  }
+
+  const rows: unknown[] = [];
+  let totalRows = 0;
+  for (let index = 0; index < keys.length; index += ALL_DOCS_BATCH_SIZE) {
+    const response = await forward(keys.slice(index, index + ALL_DOCS_BATCH_SIZE));
+    if (!response.ok) return response;
+    const result = (await response.json()) as { total_rows: number; rows: unknown[] };
+    totalRows = result.total_rows;
+    rows.push(...result.rows);
+  }
+  return json({ total_rows: totalRows, offset: 0, rows });
+}
 
 async function proxyChanges(
   request: Request,
@@ -538,6 +583,9 @@ async function routeLiveSyncRequest(
       host,
       await proxyChanges(request, rewritten, headers, stub, host.internalSecret),
     );
+  }
+  if (dbPath === "/_all_docs" && (request.method === "GET" || request.method === "POST")) {
+    return withCors(request, host, await proxyAllDocs(request, rewritten, headers, stub));
   }
   const response = await stub.fetch(
     new Request(rewritten.toString(), {

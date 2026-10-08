@@ -3421,8 +3421,19 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   private async allDocsOptions(request: Request): Promise<Record<string, unknown>> {
     const url = new URL(request.url);
     const body = request.method === "POST" ? await readJsonBody(request) : {};
+    const queryKeys = url.searchParams.get("keys");
+    let keys: unknown;
+    if (queryKeys !== null) {
+      try {
+        keys = JSON.parse(queryKeys);
+      } catch {
+        throw new BadRequestError("keys must be a JSON array");
+      }
+      if (!Array.isArray(keys)) throw new BadRequestError("keys must be a JSON array");
+    }
     return {
       ...Object.fromEntries(url.searchParams.entries()),
+      ...(queryKeys !== null ? { keys } : {}),
       ...body,
     };
   }
@@ -3475,7 +3486,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   }
 
   private async allDocsRow(id: string, includeDoc: boolean, conflicts: boolean): Promise<Record<string, unknown>> {
-    const row = (await this.winningRow(id));
+    const row = includeDoc ? await this.winningRow(id) : this.rawWinningRow(id);
     if (!row) return { key: id, error: "not_found" };
     const value: Record<string, unknown> = { rev: row.rev };
     if (row.deleted) value.deleted = true;
@@ -3578,7 +3589,10 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   private async changeBatch(options: Record<string, unknown>, since: number): Promise<ChangeBatch> {
     const started = Date.now();
     const metrics = { scanned: 0, metadataMatches: 0, bodyFallbacks: 0 };
-    const limit = Math.min(Math.max(numberParam(options.limit, 1000), 1), 5000);
+    // Hydrating a large page can exhaust one invocation's R2 subrequests.
+    // Clients continue from last_seq; pending reports the remaining rows.
+    const maxLimit = boolParam(options.include_docs) || options.selector ? 128 : 5000;
+    const limit = Math.min(Math.max(numberParam(options.limit, 1000), 1), maxLimit);
     const selector = (options.selector ?? null) as Selector | null;
     const style = String(options.style ?? "main_only");
     const scanLimit = selector ? Math.min(limit * 10, 5000) : limit;

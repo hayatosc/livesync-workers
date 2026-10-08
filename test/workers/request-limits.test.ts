@@ -1,6 +1,8 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { it, expect, afterEach } from "vitest";
 import type { PersistentVaultDO, TestEnv } from "./entry.js";
+import { host } from "./entry.js";
+import { handleLiveSyncRequest } from "../../packages/livesync-workers/src/livesync/handler.js";
 import { REQUEST_LIMITS } from "../../packages/livesync-workers/src/livesync/limits.js";
 import { R2Journal, contentPrefix } from "../../packages/livesync-workers/src/storage/r2-journal.js";
 import { stopCheckpointAlarms } from "./checkpoint-helpers.js";
@@ -48,6 +50,43 @@ it("accepts the exact bulk count and rejects one more before any revision or jou
   expect((await stub.fetch("https://db/would-be-written")).status).toBe(404);
   const accepted=await post(stub,docs);expect(accepted.status).toBe(200);
   expect(await accepted.json()).toHaveLength(REQUEST_LIMITS.maxBulkDocuments);
+},20_000);
+it("pages large changes feeds before R2 reads exhaust one invocation",async()=>{
+  const stub=await fixture("changes-page-limit");
+  const docs=Array.from({length:130},(_,index)=>({_id:`note-${index}`,_rev:"1-fixed",data:index}));
+  expect((await post(stub,docs)).status).toBe(200);
+  const first=await(await stub.fetch("https://db/_changes?since=0&limit=1704&include_docs=true"))
+    .json() as {results:Array<{doc:{data:number}}>;last_seq:number;pending:number};
+  expect(first.results).toHaveLength(128);
+  expect(first.results[0]?.doc.data).toBe(0);
+  expect(first.last_seq).toBe(128);
+  expect(first.pending).toBe(2);
+  const second=await(await stub.fetch(`https://db/_changes?since=${first.last_seq}&limit=1704&include_docs=true`))
+    .json() as {results:Array<{doc:{data:number}}>;last_seq:number;pending:number};
+  expect(second.results.map((row)=>row.doc.data)).toEqual([128,129]);
+  expect(second.last_seq).toBe(130);
+  expect(second.pending).toBe(0);
+
+  const streamPage=async(since:number)=>{
+    const response=await handleLiveSyncRequest(new Request(
+      `https://worker/livesync/vault/_changes?feed=continuous&since=${since}&limit=1704&include_docs=true&style=all_docs&conflicts=true&revs=true&timeout=1000`,
+      {headers:{Authorization:`Basic ${btoa("alice:integration-pass")}`,Origin:"capacitor://localhost"}},
+    ),{
+      host:{...host,async verifyCredential(){return {tenantId:"changes-page-limit",databaseName:"vault"};}},
+      bindings:{vaultDb:bindings.VAULT_DB},
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Access-Control-Allow-Origin")).toBe("capacitor://localhost");
+    return (await response.text()).trim().split("\n").filter(Boolean)
+      .map((line)=>JSON.parse(line)) as Array<{doc?:{data:number};last_seq?:number}>;
+  };
+  const firstStream=await streamPage(0);
+  expect(firstStream).toHaveLength(129);
+  expect(firstStream.at(-1)?.last_seq).toBe(128);
+  const secondStream=await streamPage(firstStream.at(-1)!.last_seq!);
+  expect(secondStream.at(-1)?.last_seq).toBe(130);
+  expect([...firstStream,...secondStream].filter((row)=>row.doc).map((row)=>row.doc!.data))
+    .toEqual(docs.map((doc)=>doc.data));
 },20_000);
 it("counts canonical document UTF-8 bytes, accepts the boundary and preflights every document",async()=>{
   const stub=await fixture("document-byte-limit");
