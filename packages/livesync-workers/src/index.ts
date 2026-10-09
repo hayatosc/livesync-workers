@@ -1,5 +1,7 @@
 export * from "./types.js";
-export { LiveSyncVaultDO, splitRevisionBody, splitNoteContentForChunks } from "./durable/livesync-db.js";
+export { LiveSyncVaultDO } from "./durable/livesync-db.js";
+export { splitRevisionBody } from "./durable/revisions.js";
+export { splitNoteContentForChunks } from "./durable/notes.js";
 export { handleLiveSyncRequest, vaultStub, type LiveSyncHandlerOptions } from "./livesync/handler.js";
 export { INTERNAL_SECRET_HEADER } from "./livesync/http.js";
 export {

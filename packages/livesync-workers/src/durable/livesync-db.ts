@@ -1,4 +1,4 @@
-import { REQUEST_LIMITS, BadRequestError, RequestLimitError, readBoundedJson, assertDocumentSize, assertBulkLimits, decodePathSegment } from "../livesync/limits.js";
+import { REQUEST_LIMITS, BadRequestError, RequestLimitError, assertDocumentSize, assertBulkLimits, decodePathSegment } from "../livesync/limits.js";
 import { R2Journal, contentPrefix, type JournalStatement } from "../storage/r2-journal.js";
 import { R2FileMirror, FileMirrorUnsupported } from "../storage/file-mirror.js";
 import { MirrorSourceReader } from "../storage/file-mirror-source.js";
@@ -34,8 +34,6 @@ import {
   secretEquals,
 } from "../livesync/http.js";
 import {
-  isHiddenPath,
-  isReservedPath,
   parseVaultObjectName,
   vaultObjectName,
   type FullTextIndex,
@@ -45,247 +43,76 @@ import {
   type VaultPolicy,
   type VaultRef,
 } from "../types.js";
-
-type DocBody = Record<string, unknown>;
-
-type DocRow = {
-  id: string;
-  winning_rev: string | null;
-  deleted: number;
-  updated_seq: number;
-};
-
-type RevRow = {
-  id: string;
-  rev: string;
-  gen: number;
-  parent_rev: string | null;
-  body: string;
-  body_chunked: number;
-  body_available: number;
-  deleted: number;
-  seq: number;
-  rev_history: string | null;
-};
-
-type LocalDocRow = {
-  id: string;
-  rev: string;
-  body: string;
-};
-
-type ChangeRow = {
-  seq: number;
-  id: string;
-  rev: string;
-  deleted: number;
-  revs?: string[];
-};
-
-type ChangeBatch = {
-  rows: ChangeRow[];
-  lastSeq: number;
-  pending: number;
-};
-
-type RevisionMetadata = {
-  soft_deleted: number;
-  path: string | null;
-  size: number | null;
-  mtime: number | null;
-  type: string | null;
-};
-
-type LiveSyncFileRow = {
-  path: string;
-  size: number | null;
-  mtime: number | null;
-  type: string | null;
-};
-
-type Selector = Record<string, unknown>;
-
-type IndexStateRow = {
-  path: string;
-  doc_id: string | null;
-  hash: string | null;
-  chunks: number;
-  pending: number;
-  attempts: number;
-  /** Content hash last written to the full-text index (null = not there yet). */
-  fts_hash: string | null;
-};
-
-type InternalOp = {
-  execute?: unknown;
-  contentType?: unknown;
-  op: string;
-  path?: unknown;
-  paths?: unknown;
-  content?: unknown;
-  expectedBaseHash?: unknown;
-};
-
-const INDEXED_SEQ_META_KEY = "indexed_seq";
-const INDEX_VERSION_META_KEY = "index_version";
-// Bump to force a one-time full re-embed (e.g. when vector metadata gains new fields).
-const CURRENT_INDEX_VERSION = "4";
-const INDEX_BATCH_SIZE = 32;
-const INDEX_ALARM_DELAY_MS = 1_500;
-const INDEX_RETRY_DELAY_MS = 30_000;
-const INDEX_MAX_ATTEMPTS = 20;
-// Newest segment the built-in full-text index wrote (shown as fts.generation).
-const FTS_GENERATION_META_KEY = "fts_generation";
-// Layout of the built-in index this code writes: "2" = per-note segments,
-// "3" = bucketed shards read by range, "4" = same layout, but the build
-// streams (0.5.x) so a "failed" verdict recorded by an earlier build no
-// longer applies, "5" (0.5.2) clears the verdict a pass that indexed nothing
-// used to earn. The whole-vault generation before them had no version
-// meta. A change clears that verdict and arms a maintenance pass, which
-// rewrites what the new code cannot read efficiently.
-const FTS_INDEX_VERSION_META_KEY = "fts_index_version";
-const CURRENT_FTS_INDEX_VERSION = "5";
-const FTS_REBUILD_AT_META_KEY = "fts_rebuild_at";
-// Why the last pass gave up; cleared by the next successful pass.
-const FTS_ERROR_META_KEY = "fts_error";
-// Every full-text pass writes a segment (~18 R2 objects), so wait for the
-// vault to go quiet before writing one for a burst of edits.
-const FTS_BUILD_DEBOUNCE_MS = 2 * 60_000;
-const FTS_BUILD_RETRY_MS = 60_000;
-// One pass indexes at most this much note text (JS code units, what the
-// tokenizer walks) into one segment. Measured 2026-09: ~10 bytes of heap and
-// ~1.5 s of DO CPU per million code units, so a pass stays well under the
-// 128 MB / 30 s Durable Object limits; a big backlog takes several passes.
-const FTS_SEGMENT_MAX_CODE_UNITS = 2_000_000;
-const FTS_SEGMENT_MAX_DOCS = 4_000;
-// Ceiling on the whole index (sum of segment text); passes stop with an
-// explicit error above it. 50M code units is ~120 MB of Japanese Markdown.
-const FTS_MAX_TOTAL_CODE_UNITS = 50_000_000;
-// One note contributes at most this much text (code units): the built-in
-// index takes the first part of a longer note, an external one skips it.
-// Measured 2026-09: a 2M-code-unit note builds in ~65 MB of heap, so this
-// leaves room for the rest of the segment.
-const FTS_MAX_NOTE_CODE_UNITS = 1_000_000;
-// A pass that dies from a memory reset leaves no SQLite trace (the event's
-// writes roll back), so attempts are counted in the R2 phase marker. After
-// this many interrupted attempts the index is disarmed instead of looping.
-const FTS_MAX_BUILD_ATTEMPTS = 3;
-// Compaction merges the two smallest segments once there are more than this
-// many, as long as the merged text stays under the char bound (one merge per
-// alarm event, no re-tokenizing).
-const FTS_COMPACT_MAX_SEGMENTS = 8;
-const FTS_COMPACT_MAX_MERGED_CHARS = 16_000_000;
-// Segments count replaced/deleted versions until compaction drops them, and
-// the size guard counts them too. A segment is rewritten alone once that
-// dead weight is this large (share of its text, and at least this many
-// code units), so a vault that is edited a lot does not grow into the guard.
-const FTS_STALE_REWRITE_MIN_RATIO = 0.25;
-const FTS_STALE_REWRITE_MIN_CHARS = 250_000;
-// Finding stale text means reading every segment's doc list; skip that while
-// the manifest's doc count is within this factor of the live doc count.
-const FTS_STALE_SCAN_DOC_RATIO = 1.2;
-// Set by ftsRebuild: segments built before this are retired once every note
-// has been re-indexed, and the size guard ignores them meanwhile.
-const FTS_REBUILD_EPOCH_META_KEY = "fts_rebuild_epoch";
-// Most candidates one search asks the vault to check against its current state.
-const FTS_RESOLVE_MAX_CANDIDATES = 500;
-// External full-text index (VaultBindings.fullText): notes already
-// vector-indexed but not yet written there (a fresh setup, or after
-// "ftsRebuild") are backfilled this many per alarm run.
-const FTS_BACKLOG_BATCH_SIZE = 16;
-// Chunk documents written by the server. The hash salt is a persisted format
-// detail (chunk ids are content addressed); keep it stable.
-const WRITE_CHUNK_PREFIX = "h:";
-const WRITE_CHUNK_HASH_SALT = "kuro-chunk";
-const WRITE_CHUNK_CODE_UNITS = 100_000;
+import type {
+  ChangeBatch,
+  ChangeRow,
+  DocBody,
+  DocRow,
+  IndexStateRow,
+  InternalOp,
+  LiveSyncFileRow,
+  LocalDocRow,
+  RevRow,
+  RevisionMetadata,
+  Selector,
+} from "./rows.js";
+import {
+  CURRENT_FTS_INDEX_VERSION,
+  CURRENT_INDEX_VERSION,
+  FTS_BACKLOG_BATCH_SIZE,
+  FTS_BUILD_DEBOUNCE_MS,
+  FTS_BUILD_RETRY_MS,
+  FTS_COMPACT_MAX_MERGED_CHARS,
+  FTS_COMPACT_MAX_SEGMENTS,
+  FTS_ERROR_META_KEY,
+  FTS_GENERATION_META_KEY,
+  FTS_INDEX_VERSION_META_KEY,
+  FTS_MAX_BUILD_ATTEMPTS,
+  FTS_MAX_NOTE_CODE_UNITS,
+  FTS_MAX_TOTAL_CODE_UNITS,
+  FTS_REBUILD_AT_META_KEY,
+  FTS_REBUILD_EPOCH_META_KEY,
+  FTS_RESOLVE_MAX_CANDIDATES,
+  FTS_SEGMENT_MAX_CODE_UNITS,
+  FTS_SEGMENT_MAX_DOCS,
+  FTS_STALE_REWRITE_MIN_CHARS,
+  FTS_STALE_REWRITE_MIN_RATIO,
+  FTS_STALE_SCAN_DOC_RATIO,
+  INDEXED_SEQ_META_KEY,
+  INDEX_ALARM_DELAY_MS,
+  INDEX_BATCH_SIZE,
+  INDEX_MAX_ATTEMPTS,
+  INDEX_RETRY_DELAY_MS,
+  INDEX_VERSION_META_KEY,
+} from "./settings.js";
+import {
+  ancestorsFromRevisions,
+  bodyWithRevisions,
+  cloneBody,
+  compareWinning,
+  docIdFromBody,
+  newRevision,
+  parseRev,
+  revisionHistory,
+  revisionMetadata,
+  sha1Hex,
+  splitRevisionBody,
+  stableJson,
+  withoutMeta,
+} from "./revisions.js";
+import {
+  docIsDeleted,
+  isIndexableMarkdownPath,
+  isNoteDoc,
+  isSafeVaultPath,
+  noteDocIdForPath,
+  splitNoteContentForChunks,
+  writeChunkId,
+} from "./notes.js";
+import { allDocsKey, boolParam, normalizeSince, readJsonBody } from "./params.js";
+import { matchesMetadata, matchesSelector } from "./selector.js";
 
 const enc = new TextEncoder();
-const inlineRevisionBodyMaxBytes = 1_000_000;
-const revisionBodyChunkCodeUnits = 250_000;
-
-export function splitRevisionBody(body: string): string[] | null {
-  if (enc.encode(body).byteLength <= inlineRevisionBodyMaxBytes) return null;
-
-  const chunks: string[] = [];
-  for (let start = 0; start < body.length;) {
-    let end = Math.min(start + revisionBodyChunkCodeUnits, body.length);
-    const lastCodeUnit = body.charCodeAt(end - 1);
-    if (end < body.length && lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) {
-      end -= 1;
-    }
-    chunks.push(body.slice(start, end));
-    start = end;
-  }
-  return chunks;
-}
-
-
-function isExcludedByFolders(path: string, excludedFolders: string[]): boolean {
-  const normalized = path.replace(/^\/+|\/+$/g, "");
-  return excludedFolders.some(
-    (folder) => normalized === folder || normalized.startsWith(`${folder}/`),
-  );
-}
-
-function isIndexableMarkdownPath(path: string, policy: VaultPolicy): boolean {
-  return (
-    path.endsWith(".md") &&
-    !isReservedPath(path, policy.reservedPaths) &&
-    !isExcludedByFolders(path, policy.excludedFolders) &&
-    // "i:" marks files LiveSync's hidden file sync carries (".obsidian/…").
-    !(policy.excludeHiddenPaths && (path.startsWith("i:") || isHiddenPath(path)))
-  );
-}
-
-
-async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
-  return readBoundedJson(request);
-}
-
-function isSafeVaultPath(path: string): boolean {
-  if (!path || path.startsWith("/") || path.includes("\\") || /[\u0000-\u001f\u007f]/.test(path)) return false;
-  const segments = path.split("/");
-  return segments.every((segment) => segment && segment !== "." && segment !== "..");
-}
-
-function isNoteDoc(doc: DocBody): doc is DocBody & { path: string } {
-  return typeof doc.path === "string" && doc.type !== "leaf" && doc.type !== "chunkpack";
-}
-
-function docIsDeleted(doc: DocBody): boolean {
-  return doc._deleted === true || doc.deleted === true;
-}
-
-/** Split note content into LiveSync chunk pieces (surrogate-pair safe). */
-export function splitNoteContentForChunks(content: string): string[] {
-  const pieces: string[] = [];
-  for (let start = 0; start < content.length;) {
-    let end = Math.min(start + WRITE_CHUNK_CODE_UNITS, content.length);
-    const lastCodeUnit = content.charCodeAt(end - 1);
-    if (end < content.length && lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) {
-      end -= 1;
-    }
-    pieces.push(content.slice(start, end));
-    start = end;
-  }
-  return pieces;
-}
-
-async function writeChunkId(piece: string): Promise<string> {
-  const digest = await hashText(`${WRITE_CHUNK_HASH_SALT}\n${piece.length}\n${piece}`);
-  return `${WRITE_CHUNK_PREFIX}k${digest.slice(0, 40)}`;
-}
-
-/**
- * Derive a LiveSync document id for a path the way the plugin does without
- * path obfuscation: ids starting with "_" are prefixed with "/", and ids are
- * lower-cased when the vault appears to be using case-insensitive ids.
- */
-function noteDocIdForPath(path: string, caseInsensitive: boolean): string {
-  let id = caseInsensitive ? path.toLowerCase() : path;
-  if (id.startsWith("_")) id = `/${id}`;
-  return id;
-}
 
 class FtsTooLargeError extends Error {
   constructor(
@@ -296,338 +123,6 @@ class FtsTooLargeError extends Error {
   }
 }
 
-function revisionMetadata(doc: DocBody): RevisionMetadata {
-  return {
-    soft_deleted: doc.deleted === true ? 1 : 0,
-    path: typeof doc.path === "string" ? doc.path : null,
-    size: typeof doc.size === "number" ? doc.size : null,
-    mtime: typeof doc.mtime === "number" ? doc.mtime : null,
-    type: typeof doc.type === "string" ? doc.type : null,
-  };
-}
-
-function parseRev(rev: string): { gen: number; hash: string } | null {
-  const match = /^(\d+)-(.+)$/.exec(rev);
-  if (!match) return null;
-  return { gen: Number(match[1]), hash: match[2]! };
-}
-
-function withoutMeta(doc: DocBody): DocBody {
-  const out: DocBody = {};
-  for (const [key, value] of Object.entries(doc)) {
-    if (key !== "_rev" && key !== "_revisions" && key !== "_conflicts") {
-      out[key] = value;
-    }
-  }
-  return out;
-}
-
-function stableJson(value: unknown): string {
-  if (value == null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  const obj = value as Record<string, unknown>;
-  return `{${Object.keys(obj)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${stableJson(obj[key])}`)
-    .join(",")}}`;
-}
-
-async function sha1Hex(text: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-1", enc.encode(text));
-  return [...new Uint8Array(digest)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-async function newRevision(doc: DocBody, parentRev: string | null): Promise<string> {
-  const parent = parentRev ? parseRev(parentRev) : null;
-  const gen = (parent?.gen ?? 0) + 1;
-  const hash = await sha1Hex(`${stableJson(withoutMeta(doc))}\n${parentRev ?? ""}`);
-  return `${gen}-${hash.slice(0, 32)}`;
-}
-
-function docIdFromBody(doc: DocBody): string | null {
-  return typeof doc._id === "string" && doc._id ? doc._id : null;
-}
-
-function cloneBody(row: RevRow): DocBody {
-  return JSON.parse(row.body) as DocBody;
-}
-
-function normalizeSince(value: unknown, currentSeq: number): number {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && /^\d+$/.test(value)) return Number(value);
-  if (value === "now") return currentSeq;
-  return 0;
-}
-
-
-function boolParam(value: unknown): boolean {
-  return value === true || value === "true";
-}
-
-function allDocsKey(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  if (!value.startsWith('"')) return value;
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return typeof parsed === "string" ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Ancestors of a replicated revision, nearest first, from its `_revisions`
- * path (`ids[0]` is the revision itself). Replicators send only leaves, so
- * the generations in between must be recorded from this list or the
- * previously stored ancestor stays a leaf and surfaces as a conflict.
- */
-function ancestorsFromRevisions(doc: DocBody): string[] {
-  const rev = typeof doc._rev === "string" ? parseRev(doc._rev) : null;
-  const revisions = doc._revisions as
-    | { start?: unknown; ids?: unknown }
-    | undefined;
-  if (!rev || !revisions || !Array.isArray(revisions.ids)) return [];
-  const ids = revisions.ids.filter((id): id is string => typeof id === "string");
-  const ancestors: string[] = [];
-  for (let index = 1; index < ids.length && rev.gen - index >= 1; index += 1) {
-    ancestors.push(`${rev.gen - index}-${ids[index]}`);
-  }
-  return ancestors;
-}
-
-function revisionHistory(doc: DocBody, rev: string, parentHistory?: string | null): string {
-  const existing = doc._revisions;
-  if (existing && typeof existing === "object") return JSON.stringify(existing);
-  const parsed = parseRev(rev);
-  if (!parsed) return JSON.stringify({ start: 1, ids: [rev] });
-  if (parentHistory) {
-    try {
-      const parent = JSON.parse(parentHistory) as { ids?: unknown };
-      const parentIds = Array.isArray(parent.ids)
-        ? parent.ids.filter((id): id is string => typeof id === "string")
-        : [];
-      return JSON.stringify({ start: parsed.gen, ids: [parsed.hash, ...parentIds] });
-    } catch {
-      // Fall through to a single-revision history.
-    }
-  }
-  return JSON.stringify({ start: parsed.gen, ids: [parsed.hash] });
-}
-
-function bodyWithRevisions(row: RevRow): DocBody {
-  const body = cloneBody(row);
-  if (row.rev_history) {
-    body._revisions = JSON.parse(row.rev_history);
-  }
-  return body;
-}
-
-function compareWinning(a: RevRow, b: RevRow): number {
-  if (a.deleted !== b.deleted) return a.deleted ? -1 : 1;
-  if (a.gen !== b.gen) return a.gen - b.gen;
-  return compareCodePoints(a.rev, b.rev);
-}
-
-function compareCodePoints(a: string, b: string): number {
-  const aPoints = Array.from(a, (char) => char.codePointAt(0)!);
-  const bPoints = Array.from(b, (char) => char.codePointAt(0)!);
-  const length = Math.min(aPoints.length, bPoints.length);
-  for (let index = 0; index < length; index += 1) {
-    if (aPoints[index] !== bPoints[index]) return aPoints[index]! - bPoints[index]!;
-  }
-  return aPoints.length - bPoints.length;
-}
-
-function getField(doc: DocBody, field: string): unknown {
-  if (field === "_id") return doc._id;
-  if (field === "_rev") return doc._rev;
-  return field.split(".").reduce<unknown>((value, key) => {
-    if (value == null || typeof value !== "object") return undefined;
-    return (value as Record<string, unknown>)[key];
-  }, doc);
-}
-
-function compareValues(a: unknown, b: unknown): number {
-  if (typeof a === "number" && typeof b === "number") return a - b;
-  return compareCodePoints(String(a), String(b));
-}
-
-const MAX_SELECTOR_REGEX_LENGTH = 256;
-
-/**
- * Whether a pattern has the shapes that make backtracking blow up: a
- * quantified group whose contents, at any depth, repeat or alternate
- * ((a+)+, ((a+))+, (a|aa)*), and backreferences. A conservative check, not
- * a proof: chains of plain quantifiers such as a*a*a* still cost polynomial time.
- */
-function hasNestedRepetition(pattern: string): boolean {
-  // One entry per open group: whether its contents repeat or alternate.
-  const groups: boolean[] = [];
-  const isQuantifier = (index: number) => {
-    const c = pattern[index];
-    return c === "*" || c === "+" || c === "?" || (c === "{" && /\d/.test(pattern[index + 1] ?? ""));
-  };
-  let inClass = false;
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i]!;
-    if (c === "\\") {
-      const next = pattern[i + 1] ?? "";
-      if (!inClass && (/[1-9]/.test(next) || next === "k")) return true;
-      i++;
-    } else if (inClass) {
-      if (c === "]") inClass = false;
-    } else if (c === "[") {
-      inClass = true;
-    } else if (c === "(") {
-      groups.push(false);
-      // Skip the ?: ?= ?! ?<= ?<! ?<name> prefix, whose "?" is not a quantifier.
-      if (pattern[i + 1] === "?") {
-        if (pattern[i + 2] === "<" && pattern[i + 3] !== "=" && pattern[i + 3] !== "!") {
-          const end = pattern.indexOf(">", i);
-          i = end < 0 ? pattern.length : end;
-        } else {
-          i += pattern[i + 2] === "<" ? 3 : 2;
-        }
-      }
-    } else if (c === ")") {
-      const inner = groups.pop() ?? false;
-      const quantified = isQuantifier(i + 1);
-      if (inner && quantified) return true;
-      if (groups.length && (inner || quantified)) groups[groups.length - 1] = true;
-    } else if ((c === "|" || isQuantifier(i)) && groups.length) {
-      groups[groups.length - 1] = true;
-    }
-  }
-  return false;
-}
-
-const selectorRegexCache = new Map<string, RegExp | null>();
-
-/**
- * Compile a Mango $regex once per pattern. Over-long patterns and nested
- * quantifiers never match, so one selector cannot easily pin the vault
- * object's CPU. LiveSync itself does not use $regex.
- */
-function selectorRegex(pattern: string): RegExp | null {
-  if (selectorRegexCache.has(pattern)) return selectorRegexCache.get(pattern)!;
-  let compiled: RegExp | null = null;
-  if (pattern.length <= MAX_SELECTOR_REGEX_LENGTH && !hasNestedRepetition(pattern)) {
-    try {
-      compiled = new RegExp(pattern);
-    } catch {
-      compiled = null;
-    }
-  }
-  if (selectorRegexCache.size >= 64) selectorRegexCache.clear();
-  selectorRegexCache.set(pattern, compiled);
-  return compiled;
-}
-
-function matchesCondition(value: unknown, condition: unknown): boolean {
-  if (condition == null || typeof condition !== "object" || Array.isArray(condition)) {
-    return value === condition;
-  }
-  for (const [op, expected] of Object.entries(condition as Record<string, unknown>)) {
-    switch (op) {
-      case "$eq":
-        if (value !== expected) return false;
-        break;
-      case "$ne":
-        if (value === expected) return false;
-        break;
-      case "$lt":
-        if (compareValues(value, expected) >= 0) return false;
-        break;
-      case "$lte":
-        if (compareValues(value, expected) > 0) return false;
-        break;
-      case "$gt":
-        if (compareValues(value, expected) <= 0) return false;
-        break;
-      case "$gte":
-        if (compareValues(value, expected) < 0) return false;
-        break;
-      case "$exists":
-        if ((value !== undefined) !== Boolean(expected)) return false;
-        break;
-      case "$in":
-        if (!Array.isArray(expected) || !expected.includes(value)) return false;
-        break;
-      case "$nin":
-        if (Array.isArray(expected) && expected.includes(value)) return false;
-        break;
-      case "$regex":
-        if (typeof value !== "string" || typeof expected !== "string") return false;
-        if (!selectorRegex(expected)?.test(value)) return false;
-        break;
-      default:
-        return false;
-    }
-  }
-  return true;
-}
-
-function matchesSelector(doc: DocBody, selector: Selector | null): boolean {
-  if (!selector || Object.keys(selector).length === 0) return true;
-  for (const [field, condition] of Object.entries(selector)) {
-    if (field === "$and") {
-      if (!Array.isArray(condition)) return false;
-      if (!condition.every((item) => matchesSelector(doc, item as Selector))) {
-        return false;
-      }
-      continue;
-    }
-    if (field === "$or") {
-      if (!Array.isArray(condition)) return false;
-      if (!condition.some((item) => matchesSelector(doc, item as Selector))) {
-        return false;
-      }
-      continue;
-    }
-    if (!matchesCondition(getField(doc, field), condition)) return false;
-  }
-  return true;
-}
-
-/** Unknown fields need the body; SQL NULL does not distinguish missing, null or a non-scalar value. */
-function matchesMetadata(row: RevRow, metadata: RevisionMetadata | null, selector: Selector): boolean | undefined {
-  if (!selector || Object.keys(selector).length === 0) return true;
-  let unknown = false;
-  for (const [field, condition] of Object.entries(selector)) {
-    let matched: boolean | undefined;
-    if (field === "$and" || field === "$or") {
-      if (!Array.isArray(condition)) return false;
-      const parts = condition.map(item => matchesMetadata(row, metadata, item as Selector));
-      matched = field === "$and"
-        ? parts.includes(false) ? false : parts.includes(undefined) ? undefined : true
-        : parts.includes(true) ? true : parts.includes(undefined) ? undefined : false;
-    } else {
-      const value = field === "_id" ? row.id : field === "_rev" ? row.rev
-        : field === "_deleted" && row.deleted ? true
-        : field === "deleted" && metadata?.soft_deleted ? true
-        : field === "type" || field === "path" || field === "size" || field === "mtime" ? metadata?.[field]
-        : undefined;
-      matched = value == null ? undefined : matchesCondition(value, condition);
-    }
-    if (matched === false) return false;
-    if (matched === undefined) unknown = true;
-  }
-  return unknown ? undefined : true;
-}
-
-
-/**
- * Durable Object holding one LiveSync database (vault) in SQLite and keeping
- * its search indexes up to date. Hosts subclass it, export the subclass from
- * their Worker and bind it as a SQLite-backed Durable Object class:
- *
- *   export class VaultDO extends LiveSyncVaultDO<Env> {
- *     protected host() { return myHost(this.env); }
- *     protected bindings() { return myBindings(this.env); }
- *   }
- */
 const CHECKPOINT_KEYS: Record<string, string[]> = {
   meta: ["key"], revs: ["id", "rev"], rev_metadata: ["id", "rev"], docs: ["id"],
   local_docs: ["id"], changes: ["seq"], index_state: ["path"],
@@ -641,6 +136,16 @@ type CheckpointWork = {
   previous: { r2: string } | null;
 };
 
+/**
+ * Durable Object holding one LiveSync database (vault) in SQLite and keeping
+ * its search indexes up to date. Hosts subclass it, export the subclass from
+ * their Worker and bind it as a SQLite-backed Durable Object class:
+ *
+ *   export class VaultDO extends LiveSyncVaultDO<Env> {
+ *     protected host() { return myHost(this.env); }
+ *     protected bindings() { return myBindings(this.env); }
+ *   }
+ */
 export abstract class LiveSyncVaultDO<TEnv = unknown> {
   /** Last successful setAlarm, as a cheap time-based throttle (never a hard gate). */
   private lastIndexScheduleAt = 0;
