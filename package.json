@@ -11,7 +11,7 @@
   "scripts": {
     "build": "pnpm --filter livesync-workers build",
     "prepare": "pnpm --filter livesync-workers build",
-    "deploy": "pnpm build && cf deploy",
+    "deploy": "node scripts/deploy.mjs",
     "dev": "pnpm build && cf dev",
     "setup": "node scripts/setup.mjs",
     "rollback:prepare": "node scripts/prepare-rollback.mjs",

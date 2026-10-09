@@ -32,7 +32,7 @@ Worker 名を変更するときは、DO binding の `worker` も同じ名前に�
 pnpm exec cf auth login
 pnpm run setup
 # .dev.vars.example を参考に .dev.vars に必要な secret を用意する
-pnpm exec cf deploy --secrets-file .dev.vars
+pnpm run deploy -- --secrets-file .dev.vars
 ```
 
 `pnpm deploy` と `pnpm setup` は pnpm 自体のコマンドなので、`pnpm run` をつけて実行します。
@@ -41,6 +41,7 @@ pnpm exec cf deploy --secrets-file .dev.vars
 Vectorize の索引は、現在の設定では作成しません。
 SQLite DO のクラスは、`worker.exports` の宣言で作成されます。
 以降の更新には `pnpm run deploy` を使います。既存の secret は維持されます。
+デプロイに成功すると、その commit に `deploy/<UTC の日時>` タグを付けて push します。詳しくは [Cloudflare CLI](cloudflare-cli.md#デプロイと記録) を参照してください。
 
 既存の環境を更新するときは、バケット名、binding の ID、DO の migration 履歴を書き換えずに維持してください。
 

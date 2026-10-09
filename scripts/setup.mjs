@@ -36,6 +36,7 @@ The OAuth KV binding is declared in cloudflare.config.ts.
 Next:
   1. Sign in: pnpm exec cf auth login
   2. For a first deployment, fill .dev.vars using .dev.vars.example and upload
-     its secrets: pnpm exec cf deploy --secrets-file .dev.vars
+     its secrets: pnpm run deploy -- --secrets-file .dev.vars
   3. For subsequent deployments: pnpm run deploy
+     (each deployment tags the deployed commit as deploy/<UTC timestamp>)
 `);
