@@ -12,7 +12,6 @@ export function normalizeSince(value: unknown, currentSeq: number): number {
   return 0;
 }
 
-
 export function boolParam(value: unknown): boolean {
   return value === true || value === "true";
 }

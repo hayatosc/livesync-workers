@@ -76,18 +76,13 @@ export class BuiltInFullText {
   }
 
   hasFtsPending(): boolean {
-    return (
-      this.host.first<{ n: number }>(
-        `SELECT 1 AS n FROM index_state WHERE ${FTS_PENDING_WHERE} LIMIT 1`,
-      ) != null
-    );
+    return this.host.first<{ n: number }>(`SELECT 1 AS n FROM index_state WHERE ${FTS_PENDING_WHERE} LIMIT 1`) != null;
   }
 
   countFtsPending(): number {
     return (
-      this.host.first<{ count: number }>(
-        `SELECT COUNT(*) AS count FROM index_state WHERE ${FTS_PENDING_WHERE}`,
-      )?.count ?? 0
+      this.host.first<{ count: number }>(`SELECT COUNT(*) AS count FROM index_state WHERE ${FTS_PENDING_WHERE}`)
+        ?.count ?? 0
     );
   }
 
@@ -169,7 +164,9 @@ export class BuiltInFullText {
         // is too big when live is recorded as such and disarmed.
         const rewrite = manifest ? await this.planFtsStaleRewrite(ref, manifest, { force: true }) : null;
         if (rewrite) {
-          console.warn("FTS pass over the size guard; rewriting a segment to drop stale text", { segment: rewrite.segments[0]?.id });
+          console.warn("FTS pass over the size guard; rewriting a segment to drop stale text", {
+            segment: rewrite.segments[0]?.id,
+          });
           await this.runFtsCompaction(ref, rewrite, marker, "current");
           return true;
         }
@@ -227,7 +224,9 @@ export class BuiltInFullText {
     const merged = await compactFtsSegments(this.ftsBucket(), ref, plan, {
       isLive: (docs) =>
         docs.map((doc) =>
-          keep === "indexed" ? this.ftsDocIsLive(doc.path, doc.hash ?? null) : this.ftsDocIsCurrent(doc.path, doc.hash ?? null),
+          keep === "indexed"
+            ? this.ftsDocIsLive(doc.path, doc.hash ?? null)
+            : this.ftsDocIsCurrent(doc.path, doc.hash ?? null),
         ),
       marker,
     });
@@ -266,7 +265,8 @@ export class BuiltInFullText {
     const candidates = this.ftsStaleRewriteCandidates(manifest);
     if (!candidates.some((s) => s.totalChars >= FTS_STALE_REWRITE_MIN_CHARS)) return false;
     const liveDocs =
-      this.host.first<{ count: number }>(`SELECT COUNT(*) AS count FROM index_state WHERE fts_hash IS NOT NULL`)?.count ?? 0;
+      this.host.first<{ count: number }>(`SELECT COUNT(*) AS count FROM index_state WHERE fts_hash IS NOT NULL`)
+        ?.count ?? 0;
     return candidates.reduce((sum, s) => sum + s.docCount, 0) > liveDocs * FTS_STALE_SCAN_DOC_RATIO;
   }
 
@@ -327,7 +327,7 @@ export class BuiltInFullText {
       for (const row of pending) {
         if (consumed >= FTS_SEGMENT_MAX_DOCS || codeUnits >= FTS_SEGMENT_MAX_CODE_UNITS) break;
         const rev = self.host.rawWinningRow(row.doc_id);
-        const full = rev ? (await self.host.fileContentForRow(rev)) : null;
+        const full = rev ? await self.host.fileContentForRow(rev) : null;
         if (full == null) {
           consumed += 1;
           console.warn("FTS pass skipping note without a readable body", { path: row.path });
@@ -367,7 +367,8 @@ export class BuiltInFullText {
     // A note the build handed back (segment full of terms) stays pending for
     // the next segment; one it dropped (too many terms on its own) is marked
     // like an oversized note.
-    if (result.dropped.length > 0) console.warn("FTS pass dropping notes with too many distinct terms", { paths: result.dropped });
+    if (result.dropped.length > 0)
+      console.warn("FTS pass dropping notes with too many distinct terms", { paths: result.dropped });
     const settled = new Set([...result.docs.map((doc) => doc.path), ...result.dropped]);
     const indexed = written.filter((row) => settled.has(row.path));
     for (const row of [...indexed, ...skipped]) {

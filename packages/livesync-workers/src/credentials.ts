@@ -38,10 +38,7 @@ export async function hashCredentialPassword(
   return { salt, hash: await sha256Hex(`${salt}:${password}`) };
 }
 
-export async function verifyCredentialPassword(
-  password: string,
-  stored: HashedCredential,
-): Promise<boolean> {
+export async function verifyCredentialPassword(password: string, stored: HashedCredential): Promise<boolean> {
   const hash = await sha256Hex(`${stored.salt}:${password}`);
   return constantTimeEquals(hash, stored.hash);
 }

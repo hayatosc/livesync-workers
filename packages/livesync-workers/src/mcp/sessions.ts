@@ -17,9 +17,7 @@ export function withMcpSessionIsolation<Env>(
       if (!principal?.userId || !Array.isArray(principal.scope)) {
         return new Response("Unauthorized", { status: 401 });
       }
-      const partition = await sha256Hex(
-        JSON.stringify([principal.userId, [...new Set(principal.scope)].sort()]),
-      );
+      const partition = await sha256Hex(JSON.stringify([principal.userId, [...new Set(principal.scope)].sort()]));
       const namespace = env[bindingName] as DurableObjectNamespace;
       // McpAgent names objects `transport:sessionId`. A suffix preserves the
       // session ID on the wire while making each user/scope combination distinct.

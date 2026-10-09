@@ -5,10 +5,7 @@ export const DEFAULT_WORKERS_AI_EMBEDDING_MODEL = "@cf/google/embeddinggemma-300
 export const DEFAULT_EMBEDDING_DIMENSIONS = 768;
 
 /** Embedder backed by Workers AI. */
-export function workersAiEmbedder(
-  ai: Ai,
-  model: string = DEFAULT_WORKERS_AI_EMBEDDING_MODEL,
-): Embedder {
+export function workersAiEmbedder(ai: Ai, model: string = DEFAULT_WORKERS_AI_EMBEDDING_MODEL): Embedder {
   return {
     async embed(texts) {
       if (texts.length === 0) return [];

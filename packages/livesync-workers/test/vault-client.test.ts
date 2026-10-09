@@ -4,10 +4,7 @@ import { memoryBucket, testBindings, testEnv, TEST_SECRET } from "./helpers.js";
 import { appendFtsSegment } from "../src/search/fts-index.js";
 import { hashText } from "../src/search/chunk-md.js";
 
-function vaultWith(
-  response: Response | Response[],
-  options: { searchHits?: unknown[]; restricted?: boolean } = {},
-) {
+function vaultWith(response: Response | Response[], options: { searchHits?: unknown[]; restricted?: boolean } = {}) {
   const env = testEnv();
   env.VECTORIZE.query.mockImplementation(async () => ({
     matches: (options.searchHits ?? []).map((hit) => ({ score: 1, metadata: hit })),
@@ -29,9 +26,7 @@ function vaultWith(
 
 describe("Vault.writeNote", () => {
   it("writes notes through the vault's durable object", async () => {
-    const { vault, fetch, idFromName } = vaultWith(
-      Response.json({ ok: true, path: "2026-06-03.md" }),
-    );
+    const { vault, fetch, idFromName } = vaultWith(Response.json({ ok: true, path: "2026-06-03.md" }));
 
     await expect(vault.writeNote("2026-06-03.md", "updated", "base-hash")).resolves.toEqual({
       ok: true,
@@ -51,9 +46,7 @@ describe("Vault.writeNote", () => {
   });
 
   it("maps write conflicts", async () => {
-    const { vault } = vaultWith(
-      Response.json({ error: "CONFLICT", path: "2026-06-03.md" }, { status: 409 }),
-    );
+    const { vault } = vaultWith(Response.json({ error: "CONFLICT", path: "2026-06-03.md" }, { status: 409 }));
     await expect(vault.writeNote("2026-06-03.md", "updated", "base-hash")).resolves.toEqual({
       ok: false,
       error: "CONFLICT",
@@ -74,23 +67,26 @@ describe("Vault.writeNote", () => {
 
 describe("Vault reserved paths", () => {
   it("hides reserved notes from markdown listings", async () => {
-    const { vault } = vaultWith(
-      Response.json({ paths: ["Daily/2026-06-03.md", ".kuro/MEMORY.md"] }),
-    );
+    const { vault } = vaultWith(Response.json({ paths: ["Daily/2026-06-03.md", ".kuro/MEMORY.md"] }));
     await expect(vault.listMarkdownPaths()).resolves.toEqual(["Daily/2026-06-03.md"]);
   });
 
   it("hides reserved notes from search results", async () => {
-    const { vault } = vaultWith(Response.json({ contents: {
-      "Daily/2026-06-03.md": "- [ ] 牛乳を買う",
-      "Daily/2026-06-02.md": "Log",
-    } }), {
-      searchHits: [
-        { path: ".kuro/MEMORY.md", heading: "" },
-        { path: "Daily/2026-06-03.md", heading: "Todo", preview: "- [ ] 牛乳を買う" },
-        { path: "Daily/2026-06-02.md", heading: "Log" },
-      ],
-    });
+    const { vault } = vaultWith(
+      Response.json({
+        contents: {
+          "Daily/2026-06-03.md": "- [ ] 牛乳を買う",
+          "Daily/2026-06-02.md": "Log",
+        },
+      }),
+      {
+        searchHits: [
+          { path: ".kuro/MEMORY.md", heading: "" },
+          { path: "Daily/2026-06-03.md", heading: "Todo", preview: "- [ ] 牛乳を買う" },
+          { path: "Daily/2026-06-02.md", heading: "Log" },
+        ],
+      },
+    );
 
     await expect(vault.search("query", 8)).resolves.toEqual([
       { score: 1, path: "Daily/2026-06-03.md", heading: "Todo", textPreview: "- [ ] 牛乳を買う" },
@@ -108,9 +104,7 @@ describe("Vault reserved paths", () => {
         ],
       }),
     );
-    await expect(vault.listNoteStats()).resolves.toEqual([
-      { path: "Daily/2026-06-03.md", mtime: 1000, size: 42 },
-    ]);
+    await expect(vault.listNoteStats()).resolves.toEqual([{ path: "Daily/2026-06-03.md", mtime: 1000, size: 42 }]);
   });
 
   it("blocks reserved notes from reads unless unrestricted", async () => {
@@ -152,9 +146,12 @@ describe("Vault.appendToNote", () => {
   it("gives up with CONFLICT after three attempts", async () => {
     const conflict = () => Response.json({ error: "CONFLICT" }, { status: 409 });
     const { vault, fetch } = vaultWith([
-      Response.json({ content: "a" }), conflict(),
-      Response.json({ content: "b" }), conflict(),
-      Response.json({ content: "c" }), conflict(),
+      Response.json({ content: "a" }),
+      conflict(),
+      Response.json({ content: "b" }),
+      conflict(),
+      Response.json({ content: "c" }),
+      conflict(),
     ]);
     await expect(vault.appendToNote("a.md", "world")).resolves.toEqual({ ok: false, error: "CONFLICT", path: "a.md" });
     expect(fetch).toHaveBeenCalledTimes(6);
@@ -170,24 +167,34 @@ describe("Vault.appendToNote", () => {
   });
 });
 
-
 describe("Vault search freshness", () => {
   it("drops deleted and replaced semantic hits while keeping the current version", async () => {
-    const { vault, fetch } = vaultWith(Response.json({ contents: {
-      "gone.md": null, "updated.md": "current", "live.md": "live",
-    } }), { searchHits: [
-      { path: "gone.md", hash: await hashText("gone"), preview: "gone" },
-      { path: "updated.md", hash: await hashText("old"), preview: "old" },
-      { path: "updated.md", hash: await hashText("current"), preview: "current" },
-      { path: "live.md", hash: await hashText("live"), preview: "live" },
-    ] });
+    const { vault, fetch } = vaultWith(
+      Response.json({
+        contents: {
+          "gone.md": null,
+          "updated.md": "current",
+          "live.md": "live",
+        },
+      }),
+      {
+        searchHits: [
+          { path: "gone.md", hash: await hashText("gone"), preview: "gone" },
+          { path: "updated.md", hash: await hashText("old"), preview: "old" },
+          { path: "updated.md", hash: await hashText("current"), preview: "current" },
+          { path: "live.md", hash: await hashText("live"), preview: "live" },
+        ],
+      },
+    );
     const hits = await vault.search("query", 8);
     expect(hits.map((hit) => [hit.path, hit.textPreview])).toEqual([
-      ["updated.md", "current"], ["live.md", "live"],
+      ["updated.md", "current"],
+      ["live.md", "live"],
     ]);
     expect(fetch).toHaveBeenCalledTimes(1);
     await expect(fetch.mock.calls[0]![0].json()).resolves.toEqual({
-      op: "readNotes", paths: ["gone.md", "updated.md", "live.md"],
+      op: "readNotes",
+      paths: ["gone.md", "updated.md", "live.md"],
     });
   });
 });
@@ -200,24 +207,33 @@ describe("Vault.grep candidate pages", () => {
     const liveHash = await hashText(live);
     await appendFtsSegment(bucket, ref, [
       ...Array.from({ length: 40 }, (_, index) => ({
-        path: `gone-${index}.md`, content: "needle", hash: `gone-${index}`,
+        path: `gone-${index}.md`,
+        content: "needle",
+        hash: `gone-${index}`,
       })),
       ...(includeLive ? [{ path: "live.md", content: live, hash: liveHash }] : []),
     ]);
     const get = vi.spyOn(bucket, "get");
     const fetch = vi.fn(async (request: Request) => {
-      const body = await request.json() as {
-        candidates: Array<{ path: string; hash: string | null }>; limit: number;
+      const body = (await request.json()) as {
+        candidates: Array<{ path: string; hash: string | null }>;
+        limit: number;
       };
-      const hits = body.candidates.filter((candidate) => candidate.path === "live.md" && candidate.hash === liveHash)
-        .slice(0, body.limit).map((candidate) => ({ ...candidate, content: live }));
+      const hits = body.candidates
+        .filter((candidate) => candidate.path === "live.md" && candidate.hash === liveHash)
+        .slice(0, body.limit)
+        .map((candidate) => ({ ...candidate, content: live }));
       return Response.json({ hits });
     });
     const env = testEnv();
-    const vault = createVault({
-      ...testBindings(env), bucket,
-      vaultDb: { idFromName: (name: string) => name, get: () => ({ fetch }) } as unknown as DurableObjectNamespace,
-    }, { ref, policy: { reservedPaths: [], excludedFolders: [], timeZone: "UTC" }, internalSecret: TEST_SECRET });
+    const vault = createVault(
+      {
+        ...testBindings(env),
+        bucket,
+        vaultDb: { idFromName: (name: string) => name, get: () => ({ fetch }) } as unknown as DurableObjectNamespace,
+      },
+      { ref, policy: { reservedPaths: [], excludedFolders: [], timeZone: "UTC" }, internalSecret: TEST_SECRET },
+    );
     return { vault, fetch, get };
   }
 

@@ -134,10 +134,7 @@ function redirectTarget(redirectUri: string): string {
 }
 
 /** Scopes a principal may be offered: `principal.scopes` when set, every scope otherwise. */
-export function scopesForPrincipal(
-  scopes: OAuthScopeSpec[],
-  principal: OAuthPrincipal,
-): OAuthScopeSpec[] {
+export function scopesForPrincipal(scopes: OAuthScopeSpec[], principal: OAuthPrincipal): OAuthScopeSpec[] {
   if (!principal.scopes) return scopes;
   const allowed = new Set(principal.scopes);
   return scopes.filter((s) => s.required || allowed.has(s.name));
@@ -195,9 +192,7 @@ function consentHandler<Env>(options: VaultOAuthOptions<Env>): ExportedHandler<E
       // principal, e.g. by plan or feature flag).
       const principalScopes = scopesForPrincipal(options.scopes, principal);
       const allScopes = principalScopes.map((s) => s.name);
-      const defaultScopes = principalScopes
-        .filter((s) => s.required || s.default)
-        .map((s) => s.name);
+      const defaultScopes = principalScopes.filter((s) => s.required || s.default).map((s) => s.name);
       // Many MCP clients request no scope at all; offer every supported
       // scope then, or only what the client asked for otherwise.
       const requestedScopes = authRequest.scope.filter((scope) => allScopes.includes(scope));
@@ -224,8 +219,7 @@ function consentHandler<Env>(options: VaultOAuthOptions<Env>): ExportedHandler<E
         const scopeRows = offeredScopes
           .map((scope) => {
             const required = requiredScopes.includes(scope);
-            const checked =
-              required || (requestedScopes.length > 0 ? true : defaultScopes.includes(scope));
+            const checked = required || (requestedScopes.length > 0 ? true : defaultScopes.includes(scope));
             return `<label class="scope"><input type="checkbox" name="grant_scope" value="${escapeHtml(
               scope,
             )}"${checked ? " checked" : ""}${required ? " disabled" : ""}> <code>${escapeHtml(
@@ -234,15 +228,12 @@ function consentHandler<Env>(options: VaultOAuthOptions<Env>): ExportedHandler<E
           })
           .join("");
         const intro = escapeHtml(
-          options.consent?.intro ??
-            `{client} is asking for access to ${options.resourceName}. Choose what to allow.`,
+          options.consent?.intro ?? `{client} is asking for access to ${options.resourceName}. Choose what to allow.`,
         ).replace("{client}", `<strong>${escapeHtml(clientName)}</strong>`);
         const destination = `<p>After you allow, the authorization is sent to <code>${escapeHtml(
           redirectTarget(authRequest.redirectUri),
         )}</code>. Allow only if you started this from that app.</p>`;
-        const who = principal.label
-          ? `<p class="muted">Signed in as ${escapeHtml(principal.label)}</p>`
-          : "";
+        const who = principal.label ? `<p class="muted">Signed in as ${escapeHtml(principal.label)}</p>` : "";
         const response = htmlPage(
           title,
           `<div class="card"><h1>${escapeHtml(title)}</h1><p>${intro}</p>${destination}${who}<form method="post" action="${escapeHtml(
@@ -278,9 +269,7 @@ function consentHandler<Env>(options: VaultOAuthOptions<Env>): ExportedHandler<E
         );
       }
       const selected = new Set(
-        (form?.getAll("grant_scope") ?? [])
-          .map(String)
-          .filter((scope) => offeredScopes.includes(scope)),
+        (form?.getAll("grant_scope") ?? []).map(String).filter((scope) => offeredScopes.includes(scope)),
       );
       for (const required of requiredScopes) selected.add(required);
       const grantedScopes = allScopes.filter((scope) => selected.has(scope));

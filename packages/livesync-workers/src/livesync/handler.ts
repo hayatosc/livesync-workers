@@ -35,11 +35,7 @@ export type LiveSyncHandlerOptions = {
 const DEFAULT_PREFIX = "/livesync";
 const DEFAULT_SERVER_NAME = "livesync-workers";
 
-const liveSyncDefaultOrigins = [
-  "app://obsidian.md",
-  "capacitor://localhost",
-  "http://localhost",
-] as const;
+const liveSyncDefaultOrigins = ["app://obsidian.md", "capacitor://localhost", "http://localhost"] as const;
 
 function allowsAnyOrigin(host: VaultHost): boolean {
   return host.allowedOrigins === "*";
@@ -59,8 +55,7 @@ function corsHeaders(request: Request, host: VaultHost): HeadersInit | null {
   const origin = request.headers.get("Origin");
   const base = {
     "Access-Control-Allow-Methods": "GET,HEAD,POST,PUT,DELETE,OPTIONS",
-    "Access-Control-Allow-Headers":
-      "authorization,content-type,accept,origin,referer,x-couch-full-commit",
+    "Access-Control-Allow-Headers": "authorization,content-type,accept,origin,referer,x-couch-full-commit",
     "Access-Control-Expose-Headers": "etag",
     // Let clients cache the preflight instead of sending OPTIONS before every _changes poll.
     "Access-Control-Max-Age": "86400",
@@ -108,9 +103,7 @@ function decodeBasicAuth(header: string | null): { user: string; pass: string } 
   }
 }
 
-type AuthResult =
-  | { ok: true; ref: VaultRef; username: string }
-  | { ok: false; response: Response };
+type AuthResult = { ok: true; ref: VaultRef; username: string } | { ok: false; response: Response };
 
 async function checkBasicAuth(request: Request, host: VaultHost): Promise<AuthResult> {
   const auth = decodeBasicAuth(request.headers.get("Authorization"));
@@ -215,7 +208,11 @@ class ChangeWatcher {
     try {
       const response = await stub.fetch(
         new Request("https://livesync-db/internal/watch", {
-          headers: { Upgrade: "websocket", [INTERNAL_SECRET_HEADER]: internalSecret, ...(vaultRef ? { [VAULT_REF_HEADER]: vaultRef } : {}) },
+          headers: {
+            Upgrade: "websocket",
+            [INTERNAL_SECRET_HEADER]: internalSecret,
+            ...(vaultRef ? { [VAULT_REF_HEADER]: vaultRef } : {}),
+          },
         }),
       );
       const socket = response.webSocket;
@@ -296,11 +293,13 @@ async function proxyAllDocs(
   const forward = (batch?: string[]): Promise<Response> => {
     const url = new URL(rewritten);
     if (batch && request.method === "GET") url.searchParams.set("keys", JSON.stringify(batch));
-    return stub.fetch(new Request(url, {
-      method: request.method,
-      headers,
-      ...(bodyText !== null ? { body: batch ? JSON.stringify({ ...body, keys: batch }) : bodyText } : {}),
-    }));
+    return stub.fetch(
+      new Request(url, {
+        method: request.method,
+        headers,
+        ...(bodyText !== null ? { body: batch ? JSON.stringify({ ...body, keys: batch }) : bodyText } : {}),
+      }),
+    );
   };
 
   if (!Array.isArray(keys) || keys.length <= ALL_DOCS_BATCH_SIZE || !keys.every((key) => typeof key === "string")) {
@@ -340,9 +339,7 @@ async function proxyChanges(
     for (const [key, value] of Object.entries(overrides)) url.searchParams.set(key, value);
     const init: RequestInit = { method: request.method, headers };
     if (bodyText !== null) {
-      init.body = Object.keys(overrides).length
-        ? JSON.stringify({ ...body, ...overrides })
-        : bodyText;
+      init.body = Object.keys(overrides).length ? JSON.stringify({ ...body, ...overrides }) : bodyText;
     }
     return stub.fetch(new Request(url.toString(), init));
   };
@@ -361,9 +358,7 @@ async function proxyChanges(
       const idle = (await response.json()) as { last_seq?: unknown };
       const changed = await watcher.wait(timeout);
       if (changed && idle.last_seq !== undefined) {
-        return stripIdleHeader(
-          await fetchChanges({ feed: "normal", since: String(idle.last_seq) }),
-        );
+        return stripIdleHeader(await fetchChanges({ feed: "normal", since: String(idle.last_seq) }));
       }
       return json(idle);
     } finally {
@@ -422,11 +417,7 @@ function continuousChangesProxy(
           }
           batch = (await response.json()) as ChangeFeedBatch;
         }
-        controller.enqueue(
-          encoder.encode(
-            `${JSON.stringify({ last_seq: Number(cursor) || cursor, pending: 0 })}\n`,
-          ),
-        );
+        controller.enqueue(encoder.encode(`${JSON.stringify({ last_seq: Number(cursor) || cursor, pending: 0 })}\n`));
         controller.close();
       } catch (error) {
         controller.error(error);
@@ -454,36 +445,28 @@ export function vaultStub(
  * Serve the CouchDB-compatible API that Self-hosted LiveSync talks to.
  * Mount it for every request whose path starts with `prefix`.
  */
-export async function handleLiveSyncRequest(
-  request: Request,
-  options: LiveSyncHandlerOptions,
-): Promise<Response> {
+export async function handleLiveSyncRequest(request: Request, options: LiveSyncHandlerOptions): Promise<Response> {
   try {
     return await routeLiveSyncRequest(request, options);
   } catch (error) {
     // An escaping exception becomes the platform's error page without CORS
     // headers, which the plugin reports as a CORS problem. Answer with a
     // CouchDB-style 500 the client can show and retry instead.
-    if (error instanceof RequestLimitError) return withCors(request, options.host, couchError(413, "request_entity_too_large", error.message));
-    if (error instanceof BadRequestError) return withCors(request, options.host, couchError(400, "bad_request", error.message));
+    if (error instanceof RequestLimitError)
+      return withCors(request, options.host, couchError(413, "request_entity_too_large", error.message));
+    if (error instanceof BadRequestError)
+      return withCors(request, options.host, couchError(400, "bad_request", error.message));
     if (error instanceof AuthThrottledError) {
       const response = couchError(429, "too_many_requests", "Too many failed sign-in attempts. Try again later.");
       response.headers.set("Retry-After", String(error.retryAfterSeconds));
       return withCors(request, options.host, response);
     }
     console.warn("LiveSync request failed", error);
-    return withCors(
-      request,
-      options.host,
-      couchError(500, "internal_server_error", "Internal server error"),
-    );
+    return withCors(request, options.host, couchError(500, "internal_server_error", "Internal server error"));
   }
 }
 
-async function routeLiveSyncRequest(
-  request: Request,
-  options: LiveSyncHandlerOptions,
-): Promise<Response> {
+async function routeLiveSyncRequest(request: Request, options: LiveSyncHandlerOptions): Promise<Response> {
   const { host } = options;
   const prefix = (options.prefix ?? DEFAULT_PREFIX).replace(/\/+$/, "");
 
@@ -560,11 +543,7 @@ async function routeLiveSyncRequest(
   }
   const decodedDbName = decodePathSegment(dbName);
   if (auth!.ref.databaseName !== decodedDbName) {
-    return withCors(
-      request,
-      host,
-      couchError(403, "forbidden", "Database is not allowed for this credential."),
-    );
+    return withCors(request, host, couchError(403, "forbidden", "Database is not allowed for this credential."));
   }
 
   // Trusted identity forwarding must never expose DO management routes through Basic sync.
@@ -578,11 +557,7 @@ async function routeLiveSyncRequest(
   headers.set(INTERNAL_SECRET_HEADER, host.internalSecret);
   const stub = vaultStub(options.bindings.vaultDb, auth!.ref, options.bindings.objectName);
   if (dbPath === "/_changes" && (request.method === "GET" || request.method === "POST")) {
-    return withCors(
-      request,
-      host,
-      await proxyChanges(request, rewritten, headers, stub, host.internalSecret),
-    );
+    return withCors(request, host, await proxyChanges(request, rewritten, headers, stub, host.internalSecret));
   }
   if (dbPath === "/_all_docs" && (request.method === "GET" || request.method === "POST")) {
     return withCors(request, host, await proxyAllDocs(request, rewritten, headers, stub));

@@ -63,9 +63,7 @@ export async function upsertNoteVectors(
   const namespace = isolation(bindings) === "namespace" ? vaultObjectName(ref) : undefined;
   for (let start = 0; start < chunks.length; start += VECTORIZE_UPSERT_BATCH_SIZE) {
     const slice = chunks.slice(start, start + VECTORIZE_UPSERT_BATCH_SIZE);
-    const embeddings = await bindings.embedder.embed(
-      slice.map((chunk) => chunk.text.slice(0, EMBED_INPUT_MAX_CHARS)),
-    );
+    const embeddings = await bindings.embedder.embed(slice.map((chunk) => chunk.text.slice(0, EMBED_INPUT_MAX_CHARS)));
     const vectors: VectorizeVector[] = [];
     for (let offset = 0; offset < slice.length; offset += 1) {
       const chunkIndex = start + offset;
@@ -124,22 +122,21 @@ export async function vectorSearch(
   const res = await bindings.vectorize.query(qvec!, {
     topK: Math.min(20, namespaced ? topK : topK + 8),
     returnMetadata: "all",
-    ...(namespaced
-      ? { namespace: vaultObjectName(ref) }
-      : { filter: { userId: { $eq: ref.tenantId } } }),
+    ...(namespaced ? { namespace: vaultObjectName(ref) } : { filter: { userId: { $eq: ref.tenantId } } }),
   });
-  const matches = res.matches
-    .filter((m) => {
-      const md = m.metadata ?? {};
-      if (namespaced) return true;
-      if (md.origin != null && md.origin !== "vault") return false;
-      return md.vaultId === (ref.vaultId ?? ref.databaseName) || (ref.vaultId === undefined && md.vaultId == null);
-    });
+  const matches = res.matches.filter((m) => {
+    const md = m.metadata ?? {};
+    if (namespaced) return true;
+    if (md.origin != null && md.origin !== "vault") return false;
+    return md.vaultId === (ref.vaultId ?? ref.databaseName) || (ref.vaultId === undefined && md.vaultId == null);
+  });
   const current = validate
-    ? await validate(matches.map((m) => ({
-        path: String(m.metadata?.path ?? ""),
-        hash: typeof m.metadata?.hash === "string" ? m.metadata.hash : null,
-      })))
+    ? await validate(
+        matches.map((m) => ({
+          path: String(m.metadata?.path ?? ""),
+          hash: typeof m.metadata?.hash === "string" ? m.metadata.hash : null,
+        })),
+      )
     : matches.map(() => true);
   return matches
     .filter((_match, index) => current[index])

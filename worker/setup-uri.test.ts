@@ -27,7 +27,13 @@ async function referenceDecrypt(encrypted: string, passphrase: string): Promise<
   const hkdfSalt = bytes.slice(44, 76);
   const data = bytes.slice(76);
   const enc = new TextEncoder();
-  const material = await crypto.subtle.importKey("raw", enc.encode(passphrase), { name: "PBKDF2", length: 256 }, false, ["deriveKey"]);
+  const material = await crypto.subtle.importKey(
+    "raw",
+    enc.encode(passphrase),
+    { name: "PBKDF2", length: 256 },
+    false,
+    ["deriveKey"],
+  );
   const master = await crypto.subtle.deriveKey(
     { name: "PBKDF2", salt: pbkdf2Salt, iterations: 310000, hash: "SHA-256" },
     material,
@@ -35,7 +41,13 @@ async function referenceDecrypt(encrypted: string, passphrase: string): Promise<
     true,
     ["encrypt", "decrypt"],
   );
-  const hkdf = await crypto.subtle.importKey("raw", await crypto.subtle.exportKey("raw", master), { name: "HKDF" }, false, ["deriveKey"]);
+  const hkdf = await crypto.subtle.importKey(
+    "raw",
+    await crypto.subtle.exportKey("raw", master),
+    { name: "HKDF" },
+    false,
+    ["deriveKey"],
+  );
   const key = await crypto.subtle.deriveKey(
     { name: "HKDF", salt: hkdfSalt, info: new Uint8Array(), hash: "SHA-256" },
     hkdf,

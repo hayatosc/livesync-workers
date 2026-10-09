@@ -112,7 +112,12 @@ export interface FullTextIndex {
     docCount: number;
   }>;
   /** Optional bounded ranking/filtering without requesting the entire corpus of hits. */
-  searchWithOptions?(ref: VaultRef, query: string, limit: number, options: FullTextSearchOptions): ReturnType<FullTextIndex["search"]>;
+  searchWithOptions?(
+    ref: VaultRef,
+    query: string,
+    limit: number,
+    options: FullTextSearchOptions,
+  ): ReturnType<FullTextIndex["search"]>;
   /** Drop everything indexed for the vault (the vault is being deleted). */
   deleteVault(ref: VaultRef): Promise<void>;
 }
@@ -207,7 +212,9 @@ export function parseVaultObjectName(name: string): VaultRef | null {
       const tenantId = decodeURIComponent(parts[1]!);
       const vaultId = decodeURIComponent(parts[2]!);
       return tenantId && vaultId ? { tenantId, vaultId, databaseName: vaultId } : null;
-    } catch { return null; }
+    } catch {
+      return null;
+    }
   }
   const index = name.indexOf(":");
   if (index <= 0) return null;

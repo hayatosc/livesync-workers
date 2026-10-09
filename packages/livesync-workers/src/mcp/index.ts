@@ -111,7 +111,8 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
     if (scope !== "vault:read") requireScope(scope);
     const vault = await ctx.vault(vaultId, scope);
     if (!vault) throw new Error(`${label} vault is not connected`);
-    if (vaultId && (vault.ref.vaultId ?? vault.ref.databaseName) !== vaultId) throw new Error("Vault selection mismatch");
+    if (vaultId && (vault.ref.vaultId ?? vault.ref.databaseName) !== vaultId)
+      throw new Error("Vault selection mismatch");
     return vault;
   };
 
@@ -120,10 +121,7 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
     "List Markdown files and subdirectories directly under a vault-relative directory.",
     {
       vaultId: z.string().min(1).max(128).optional().describe("Immutable vault ID; omit for the default vault."),
-      path: z
-        .string()
-        .optional()
-        .describe("Vault-relative directory path. Omit or use empty string for root."),
+      path: z.string().optional().describe("Vault-relative directory path. Omit or use empty string for root."),
     },
     async ({ path, vaultId }) => {
       const vault = await readyVault("vault:read", vaultId);
@@ -162,13 +160,7 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
     "List Markdown notes sorted by modification time (newest first), with mtime and size.",
     {
       vaultId: z.string().min(1).max(128).optional().describe("Immutable vault ID; omit for the default vault."),
-      limit: z
-        .number()
-        .int()
-        .min(1)
-        .max(100)
-        .optional()
-        .describe("Maximum number of notes to return. Default is 20."),
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of notes to return. Default is 20."),
     },
     async ({ limit, vaultId }) => {
       const vault = await readyVault("vault:read", vaultId);
@@ -218,13 +210,7 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
     {
       vaultId: z.string().min(1).max(128).optional().describe("Immutable vault ID; omit for the default vault."),
       query: z.string().min(1).describe("Search query."),
-      limit: z
-        .number()
-        .int()
-        .min(1)
-        .max(20)
-        .optional()
-        .describe("Maximum search hits to return. Default is 8."),
+      limit: z.number().int().min(1).max(20).optional().describe("Maximum search hits to return. Default is 8."),
     },
     async ({ query, limit, vaultId }) => {
       const vault = await readyVault("vault:read", vaultId);
@@ -247,13 +233,7 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
       vaultId: z.string().min(1).max(128).optional().describe("Immutable vault ID; omit for the default vault."),
       query: z.string().min(1).max(200).describe("Search words or quoted phrases."),
       folder: z.string().optional().describe("Limit to a vault-relative folder and its descendants."),
-      limit: z
-        .number()
-        .int()
-        .min(1)
-        .max(50)
-        .optional()
-        .describe("Maximum search hits to return. Default is 20."),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum search hits to return. Default is 20."),
     },
     async ({ query, limit, folder, vaultId }) => {
       const vault = await readyVault("vault:read", vaultId);
@@ -287,10 +267,7 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
     },
     async ({ date, vaultId }) => {
       const vault = await readyVault("vault:read", vaultId);
-      const [paths, settings] = await Promise.all([
-        vault.listMarkdownPaths(),
-        vault.dailyNoteSettings(),
-      ]);
+      const [paths, settings] = await Promise.all([vault.listMarkdownPaths(), vault.dailyNoteSettings()]);
       const path = inferDailyNotePath(paths, date, settings);
       const content = await vault.readNote(path);
       if (content == null) return textResult({ error: "NOT_FOUND", date, path });
@@ -315,10 +292,7 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
     async ({ text, date, vaultId }) => {
       const vault = await readyVault("vault:append", vaultId);
       const targetDate = date ?? dateStringIn(vault.policy.timeZone);
-      const [paths, settings] = await Promise.all([
-        vault.listMarkdownPaths(),
-        vault.dailyNoteSettings(),
-      ]);
+      const [paths, settings] = await Promise.all([vault.listMarkdownPaths(), vault.dailyNoteSettings()]);
       const path = inferDailyNotePath(paths, targetDate, settings);
       const result = await vault.appendToNote(path, text, { createIfMissing: true });
       if (!result.ok) return textResult({ error: result.error, date: targetDate, path });
@@ -358,16 +332,11 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
     {
       vaultId: z.string().min(1).max(128).optional().describe("Immutable vault ID; omit for the default vault."),
       path: z.string().min(1).describe("Vault-relative Markdown path, e.g. Projects/Plan.md"),
-      content: z
-        .string()
-        .max(200_000)
-        .describe("Full note content (replaces the existing content)."),
+      content: z.string().max(200_000).describe("Full note content (replaces the existing content)."),
       expectedContentHash: z
         .string()
         .optional()
-        .describe(
-          "contentHash from readNote of the version being replaced. Required when the note already exists.",
-        ),
+        .describe("contentHash from readNote of the version being replaced. Required when the note already exists."),
     },
     async ({ path, content, expectedContentHash, vaultId }) => {
       const vault = await readyVault("vault:write", vaultId);
@@ -379,11 +348,7 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
           message: "Note already exists. Call readNote first and pass its contentHash as expectedContentHash.",
         });
       }
-      const result = await vault.writeNote(
-        path,
-        content,
-        current == null ? await hashText("") : expectedContentHash!,
-      );
+      const result = await vault.writeNote(path, content, current == null ? await hashText("") : expectedContentHash!);
       if (!result.ok) return textResult({ error: result.error, path });
       return textResult({ ok: true, path, created: current == null });
     },
@@ -396,7 +361,8 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
     async ({ vaultId }) => {
       requireScope("vault:read");
       const vault = await ctx.vault(vaultId);
-      if (vaultId && vault && (vault.ref.vaultId ?? vault.ref.databaseName) !== vaultId) throw new Error("Vault selection mismatch");
+      if (vaultId && vault && (vault.ref.vaultId ?? vault.ref.databaseName) !== vaultId)
+        throw new Error("Vault selection mismatch");
       if (!vault || !(await vault.exists())) {
         return textResult({ connected: false, index: null });
       }
@@ -404,34 +370,66 @@ export function registerVaultTools(server: McpServer, ctx: VaultToolContext): vo
       return textResult({ connected: true, timeZone: vault.policy.timeZone, index });
     },
   );
-  server.tool("listVaults", "List vaults the current principal can access; IDs survive display-name changes.", {}, async () => {
-    requireScope("vault:read");
-    if (ctx.listVaults) return textResult({ vaults: await ctx.listVaults() });
-    const vault = await ctx.vault();
-    return textResult({ vaults: vault ? [{ vaultId: vault.ref.vaultId ?? vault.ref.databaseName, displayName: vault.ref.databaseName }] : [] });
-  });
-  server.tool("listFiles", "List notes and binary attachments in one vault.", { vaultId: z.string().optional() }, async ({ vaultId }) => {
-    const vault = await readyVault("vault:read", vaultId);
-    if (!vault.listFiles) throw new Error("Attachment operations are unavailable");
-    return textResult({ files: await vault.listFiles() });
-  });
-  server.tool("readAttachment", "Read the original binary attachment as base64 (maximum 10 MiB).", {
-    vaultId: z.string().optional(), path: z.string().min(1),
-  }, async ({ vaultId, path }) => {
-    const vault = await readyVault("vault:read", vaultId);
-    if (!vault.readAttachment) throw new Error("Attachment operations are unavailable");
-    return textResult(await vault.readAttachment(path) ?? { error: "NOT_FOUND", path });
-  });
-  server.tool("uploadAttachment", "Create or replace a binary attachment without changing its vault path. Requires vault:write and the previous contentHash when overwriting. Maximum 10 MiB decoded.", {
-    vaultId: z.string().optional(), path: z.string().min(1), base64: z.string().max(Math.ceil(REQUEST_LIMITS.maxAttachmentBytes / 3) * 4),
-    contentType: z.string().max(200).optional(), expectedContentHash: z.string().optional(),
-  }, async ({ vaultId, path, base64, contentType, expectedContentHash }) => {
-    const vault = await readyVault("vault:write", vaultId);
-    if (!vault.readAttachment || !vault.writeAttachment) throw new Error("Attachment operations are unavailable");
-    const current = await vault.readAttachment(path);
-    if (current && !expectedContentHash) return textResult({ error: "HASH_REQUIRED", path });
-    const result = await vault.writeAttachment(path, base64, current ? expectedContentHash! : await hashText(""), contentType);
-    return textResult(result);
-  });
-
+  server.tool(
+    "listVaults",
+    "List vaults the current principal can access; IDs survive display-name changes.",
+    {},
+    async () => {
+      requireScope("vault:read");
+      if (ctx.listVaults) return textResult({ vaults: await ctx.listVaults() });
+      const vault = await ctx.vault();
+      return textResult({
+        vaults: vault
+          ? [{ vaultId: vault.ref.vaultId ?? vault.ref.databaseName, displayName: vault.ref.databaseName }]
+          : [],
+      });
+    },
+  );
+  server.tool(
+    "listFiles",
+    "List notes and binary attachments in one vault.",
+    { vaultId: z.string().optional() },
+    async ({ vaultId }) => {
+      const vault = await readyVault("vault:read", vaultId);
+      if (!vault.listFiles) throw new Error("Attachment operations are unavailable");
+      return textResult({ files: await vault.listFiles() });
+    },
+  );
+  server.tool(
+    "readAttachment",
+    "Read the original binary attachment as base64 (maximum 10 MiB).",
+    {
+      vaultId: z.string().optional(),
+      path: z.string().min(1),
+    },
+    async ({ vaultId, path }) => {
+      const vault = await readyVault("vault:read", vaultId);
+      if (!vault.readAttachment) throw new Error("Attachment operations are unavailable");
+      return textResult((await vault.readAttachment(path)) ?? { error: "NOT_FOUND", path });
+    },
+  );
+  server.tool(
+    "uploadAttachment",
+    "Create or replace a binary attachment without changing its vault path. Requires vault:write and the previous contentHash when overwriting. Maximum 10 MiB decoded.",
+    {
+      vaultId: z.string().optional(),
+      path: z.string().min(1),
+      base64: z.string().max(Math.ceil(REQUEST_LIMITS.maxAttachmentBytes / 3) * 4),
+      contentType: z.string().max(200).optional(),
+      expectedContentHash: z.string().optional(),
+    },
+    async ({ vaultId, path, base64, contentType, expectedContentHash }) => {
+      const vault = await readyVault("vault:write", vaultId);
+      if (!vault.readAttachment || !vault.writeAttachment) throw new Error("Attachment operations are unavailable");
+      const current = await vault.readAttachment(path);
+      if (current && !expectedContentHash) return textResult({ error: "HASH_REQUIRED", path });
+      const result = await vault.writeAttachment(
+        path,
+        base64,
+        current ? expectedContentHash! : await hashText(""),
+        contentType,
+      );
+      return textResult(result);
+    },
+  );
 }

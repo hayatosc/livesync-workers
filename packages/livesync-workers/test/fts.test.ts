@@ -1,17 +1,6 @@
 import { describe, expect, it } from "vitest";
-import {
-  buildIndex,
-  DEFAULT_SHARD_COUNT,
-  type FtsDocInput,
-} from "../src/search/fts/build.js";
-import {
-  decodeShard,
-  encodeShard,
-  gunzip,
-  gzip,
-  shardForTerm,
-  type Posting,
-} from "../src/search/fts/codec.js";
+import { buildIndex, DEFAULT_SHARD_COUNT, type FtsDocInput } from "../src/search/fts/build.js";
+import { decodeShard, encodeShard, gunzip, gzip, shardForTerm, type Posting } from "../src/search/fts/codec.js";
 import { PostingsBuilder } from "../src/search/fts/postings.js";
 import { normalizeText, tokenize } from "../src/search/fts/tokenize.js";
 import { extractSnippet, searchIndex } from "../src/search/fts/search.js";
@@ -76,7 +65,13 @@ describe("buildIndex term cap", () => {
 describe("codec", () => {
   it("round-trips shard postings through encode/gzip", async () => {
     const postings = new Map<string, Posting[]>([
-      ["会議", [{ doc: 0, positions: [0, 5, 130000] }, { doc: 7, positions: [42] }]],
+      [
+        "会議",
+        [
+          { doc: 0, positions: [0, 5, 130000] },
+          { doc: 7, positions: [42] },
+        ],
+      ],
       ["z", [{ doc: 3, positions: [1] }]],
     ]);
     const decoded = decodeShard(await gunzip(await gzip(encodeShard(postings))));
@@ -101,9 +96,7 @@ describe("codec", () => {
       }
     }
     for (let shard = 0; shard < shardCount; shard += 1) {
-      const expected = encodeShard(
-        [...byTerm].filter(([term]) => shardForTerm(term, shardCount) === shard),
-      );
+      const expected = encodeShard([...byTerm].filter(([term]) => shardForTerm(term, shardCount) === shard));
       expect(encodeShard(builder.shardEntries(shard))).toEqual(expected);
     }
     expect(builder.termCount).toBe(byTerm.size);
@@ -212,7 +205,8 @@ describe("extractSnippet", () => {
 });
 
 describe("mergeShard", () => {
-  const shardName = (shard: number, format: 1 | 2) => `shard-${String(shard).padStart(3, "0")}.bin${format === 1 ? ".gz" : ""}`;
+  const shardName = (shard: number, format: 1 | 2) =>
+    `shard-${String(shard).padStart(3, "0")}.bin${format === 1 ? ".gz" : ""}`;
   async function decodeBucketed(data: Uint8Array, offsets: Uint32Array) {
     const { decodeBucket, decodePostings } = await import("../src/search/fts/codec.js");
     const result = new Map<string, Posting[]>();
@@ -246,8 +240,18 @@ describe("mergeShard", () => {
     for (let shard = 0; shard < DEFAULT_SHARD_COUNT; shard += 1) {
       const merged = await mergeShard(
         [
-          { format: 2, data: builtA.files.get(shardName(shard, 2))!, offsets: indexA[shard]!, remap: Int32Array.from([0, -1, 1]) },
-          { format: 2, data: builtB.files.get(shardName(shard, 2))!, offsets: indexB[shard]!, remap: Int32Array.from([-1, 2]) },
+          {
+            format: 2,
+            data: builtA.files.get(shardName(shard, 2))!,
+            offsets: indexA[shard]!,
+            remap: Int32Array.from([0, -1, 1]),
+          },
+          {
+            format: 2,
+            data: builtB.files.get(shardName(shard, 2))!,
+            offsets: indexB[shard]!,
+            remap: Int32Array.from([-1, 2]),
+          },
         ],
         DEFAULT_BUCKET_COUNT,
       );
@@ -282,13 +286,21 @@ describe("mergeShard", () => {
   it("skips missing inputs and terms that lose every doc", async () => {
     const { mergeShard } = await import("../src/search/fts/merge.js");
     const { decodeSegmentIndex, DEFAULT_BUCKET_COUNT } = await import("../src/search/fts/codec.js");
-    const built = await buildIndex([{ path: "x.md", content: "abc def" }, { path: "y.md", content: "def" }]);
+    const built = await buildIndex([
+      { path: "x.md", content: "abc def" },
+      { path: "y.md", content: "def" },
+    ]);
     const index = decodeSegmentIndex(built.files.get("index.bin")!, DEFAULT_SHARD_COUNT, DEFAULT_BUCKET_COUNT);
     const shard = shardForTerm("abc", DEFAULT_SHARD_COUNT);
     const merged = await mergeShard(
       [
         { format: 2, data: null, remap: Int32Array.from([]) },
-        { format: 2, data: built.files.get(shardName(shard, 2))!, offsets: index[shard]!, remap: Int32Array.from([-1, 0]) },
+        {
+          format: 2,
+          data: built.files.get(shardName(shard, 2))!,
+          offsets: index[shard]!,
+          remap: Int32Array.from([-1, 0]),
+        },
       ],
       DEFAULT_BUCKET_COUNT,
     );

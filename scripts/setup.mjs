@@ -25,7 +25,8 @@ function cf(args, { allowExisting = true } = {}) {
 }
 
 // Dimensions must match the embedding model (embeddinggemma-300m → 768).
-for (const indexName of indexNames) cf(["vectorize", "create", "--name", indexName, "--config-dimensions", "768", "--config-metric", "cosine"]);
+for (const indexName of indexNames)
+  cf(["vectorize", "create", "--name", indexName, "--config-dimensions", "768", "--config-metric", "cosine"]);
 for (const bucketName of bucketNames) cf(["r2", "buckets", "create", "--name", bucketName]);
 
 console.log(`

@@ -6,9 +6,7 @@ import { WRITE_CHUNK_CODE_UNITS, WRITE_CHUNK_HASH_SALT, WRITE_CHUNK_PREFIX } fro
 
 function isExcludedByFolders(path: string, excludedFolders: string[]): boolean {
   const normalized = path.replace(/^\/+|\/+$/g, "");
-  return excludedFolders.some(
-    (folder) => normalized === folder || normalized.startsWith(`${folder}/`),
-  );
+  return excludedFolders.some((folder) => normalized === folder || normalized.startsWith(`${folder}/`));
 }
 
 export function isIndexableMarkdownPath(path: string, policy: VaultPolicy): boolean {
@@ -38,7 +36,7 @@ export function docIsDeleted(doc: DocBody): boolean {
 /** Split note content into LiveSync chunk pieces (surrogate-pair safe). */
 export function splitNoteContentForChunks(content: string): string[] {
   const pieces: string[] = [];
-  for (let start = 0; start < content.length;) {
+  for (let start = 0; start < content.length; ) {
     let end = Math.min(start + WRITE_CHUNK_CODE_UNITS, content.length);
     const lastCodeUnit = content.charCodeAt(end - 1);
     if (end < content.length && lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) {

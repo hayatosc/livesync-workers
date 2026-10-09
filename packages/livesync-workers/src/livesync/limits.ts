@@ -41,12 +41,16 @@ export async function readBoundedText(request: Request, maximum = REQUEST_LIMITS
       const needed = length + value.byteLength;
       if (needed > bytes.byteLength) {
         const grown = new Uint8Array(Math.min(maximum, Math.max(needed, bytes.byteLength * 2)));
-        grown.set(bytes.subarray(0, length)); bytes = grown;
+        grown.set(bytes.subarray(0, length));
+        bytes = grown;
       }
-      bytes.set(value, length); length = needed;
+      bytes.set(value, length);
+      length = needed;
     }
     return new TextDecoder().decode(bytes.subarray(0, length));
-  } finally { reader.releaseLock(); }
+  } finally {
+    reader.releaseLock();
+  }
 }
 const parsed = new WeakMap<Request, Record<string, unknown>>();
 export async function readBoundedJson(request: Request): Promise<Record<string, unknown>> {
@@ -61,13 +65,22 @@ export async function readBoundedJson(request: Request): Promise<Record<string, 
 export function parseJsonObject(text: string): Record<string, unknown> {
   if (!text) return {};
   let body: unknown;
-  try { body = JSON.parse(text); } catch { throw new BadRequestError("Request body is not valid JSON"); }
-  if (!body || typeof body !== "object" || Array.isArray(body)) throw new BadRequestError("Request body must be a JSON object");
+  try {
+    body = JSON.parse(text);
+  } catch {
+    throw new BadRequestError("Request body is not valid JSON");
+  }
+  if (!body || typeof body !== "object" || Array.isArray(body))
+    throw new BadRequestError("Request body must be a JSON object");
   return body as Record<string, unknown>;
 }
 /** Percent-decode a path segment, answering 400 for malformed escapes. */
 export function decodePathSegment(segment: string): string {
-  try { return decodeURIComponent(segment); } catch { throw new BadRequestError("Malformed percent-encoding in path"); }
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    throw new BadRequestError("Malformed percent-encoding in path");
+  }
 }
 export function assertDocumentSize(document: unknown): void {
   if (new TextEncoder().encode(JSON.stringify(document) ?? "").byteLength > REQUEST_LIMITS.maxDocumentBytes) {

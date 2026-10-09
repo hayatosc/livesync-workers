@@ -19,8 +19,8 @@ function normalizeDirectory(path: string): string {
 }
 
 export function normalizeExcludedFolders(paths: string[]): string[] {
-  return [...new Set(paths.map(normalizeDirectory).filter(Boolean))].sort(
-    (a, b) => a.localeCompare(b, "ja", { numeric: true }),
+  return [...new Set(paths.map(normalizeDirectory).filter(Boolean))].sort((a, b) =>
+    a.localeCompare(b, "ja", { numeric: true }),
   );
 }
 
@@ -47,10 +47,7 @@ function compactDate(date: string): string {
   return date.replaceAll("-", "");
 }
 
-function dailyNotePathFromSettings(
-  settings: DailyNoteSettings | undefined,
-  date: string,
-): string | null {
+function dailyNotePathFromSettings(settings: DailyNoteSettings | undefined, date: string): string | null {
   if (!settings?.format) return null;
   const [year, month, day] = date.split("-");
   if (!year || !month || !day) return null;
@@ -61,18 +58,12 @@ function dailyNotePathFromSettings(
     .replace(/YY/g, year.slice(-2))
     .replace(/MM/g, month)
     .replace(/DD/g, day);
-  const path = normalizeDirectory(
-    [settings.folder, fileName].filter(Boolean).join("/"),
-  );
+  const path = normalizeDirectory([settings.folder, fileName].filter(Boolean).join("/"));
   if (!path) return null;
   return path.endsWith(".md") ? path : `${path}.md`;
 }
 
-export function inferDailyNotePath(
-  paths: string[],
-  date: string,
-  settings?: DailyNoteSettings,
-): string {
+export function inferDailyNotePath(paths: string[], date: string, settings?: DailyNoteSettings): string {
   const configuredPath = dailyNotePathFromSettings(settings, date);
   if (configuredPath) return configuredPath;
 
@@ -85,16 +76,11 @@ export function inferDailyNotePath(
 
   const folder = dailyNoteFolder(sample.path);
   const sampleName = dailyNoteFileName(sample.path);
-  const fileName = /^\d{8}\.md$/.test(sampleName)
-    ? `${compactDate(date)}.md`
-    : `${date}.md`;
+  const fileName = /^\d{8}\.md$/.test(sampleName) ? `${compactDate(date)}.md` : `${date}.md`;
   return folder ? `${folder}/${fileName}` : fileName;
 }
 
-export function listVaultDirectory(
-  paths: string[],
-  directory = "",
-): VaultDirectoryEntry[] {
+export function listVaultDirectory(paths: string[], directory = ""): VaultDirectoryEntry[] {
   const dir = normalizeDirectory(directory);
   const prefix = dir ? `${dir}/` : "";
   const entries = new Map<string, VaultDirectoryEntry>();
@@ -116,24 +102,17 @@ export function listVaultDirectory(
   }
 
   return [...entries.values()].sort(
-    (a, b) =>
-      a.type.localeCompare(b.type) ||
-      a.name.localeCompare(b.name, "ja", { numeric: true }),
+    (a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name, "ja", { numeric: true }),
   );
 }
 
-export function listDailyNotePaths(
-  paths: string[],
-  limit = 20,
-): DailyNotePath[] {
+export function listDailyNotePaths(paths: string[], limit = 20): DailyNotePath[] {
   return paths
     .flatMap((path) => {
       if (!path.endsWith(".md")) return [];
       const date = dailyNoteDateKey(path);
       return date ? [{ date, path }] : [];
     })
-    .sort(
-      (a, b) => b.date.localeCompare(a.date) || a.path.localeCompare(b.path),
-    )
+    .sort((a, b) => b.date.localeCompare(a.date) || a.path.localeCompare(b.path))
     .slice(0, limit);
 }

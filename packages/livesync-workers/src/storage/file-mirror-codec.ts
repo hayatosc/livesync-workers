@@ -15,7 +15,12 @@ export function decodeBytes(text: string): Uint8Array {
 }
 
 /** Calls consume at most 16K code units; concatenation is confined to one decoder piece. */
-export function decodeMirrorPiece(type: "plain" | "newnote", input: string, state: MirrorDecoderState, final = false): Uint8Array {
+export function decodeMirrorPiece(
+  type: "plain" | "newnote",
+  input: string,
+  state: MirrorDecoderState,
+  final = false,
+): Uint8Array {
   if (type === "plain") {
     let text = state.carry + input;
     state.carry = "";
@@ -26,7 +31,7 @@ export function decodeMirrorPiece(type: "plain" | "newnote", input: string, stat
     return new TextEncoder().encode(text);
   }
   const clean = input.replace(/[\t\n\f\r ]/g, "");
-  if (/[^A-Za-z0-9+/=]/.test(clean) || state.padded && clean.length) throw new Error("INVALID_ENCODING");
+  if (/[^A-Za-z0-9+/=]/.test(clean) || (state.padded && clean.length)) throw new Error("INVALID_ENCODING");
   let text = state.carry + clean;
   state.carry = "";
   if (text.includes("=")) {
@@ -36,11 +41,12 @@ export function decodeMirrorPiece(type: "plain" | "newnote", input: string, stat
       state.carry = text.slice(end);
       text = text.slice(0, end);
     } else {
-      if (text.length % 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)$/.test(text)) throw new Error("INVALID_ENCODING");
+      if (text.length % 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)$/.test(text))
+        throw new Error("INVALID_ENCODING");
       state.padded = true;
     }
   } else if (!final) {
-    const end = text.length - text.length % 4;
+    const end = text.length - (text.length % 4);
     state.carry = text.slice(end);
     text = text.slice(0, end);
   } else if (text.length % 4 === 1) throw new Error("INVALID_ENCODING");

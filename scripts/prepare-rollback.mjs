@@ -21,21 +21,32 @@ const configCommit = String(run("git", ["rev-parse", "HEAD"])).trim();
 const archive = run("git", ["archive", "--format=tar", sourceCommit]);
 const local = path.join(workspace, ".local");
 await mkdir(local, { recursive: true });
-if (await realpath(local) !== local) throw new Error("Rollback output must stay inside this workspace");
+if ((await realpath(local)) !== local) throw new Error("Rollback output must stay inside this workspace");
 const destination = await mkdtemp(path.join(local, `rollback-${sourceCommit.slice(0, 12)}-`));
 run("tar", ["-xf", "-", "-C", destination], { input: archive });
 
 // Keep the known-good implementation, but retain the current exports lifecycle
 // and the cf toolchain needed to deploy it. Ignored credentials are not copied.
-const overlays = ["cloudflare.config.ts", "wrangler.config.ts", "package.json",
-  "pnpm-lock.yaml", "pnpm-workspace.yaml", ".node-version", "AGENTS.md", "scripts/prepare-rollback.mjs"];
+const overlays = [
+  "cloudflare.config.ts",
+  "wrangler.config.ts",
+  "package.json",
+  "pnpm-lock.yaml",
+  "pnpm-workspace.yaml",
+  ".node-version",
+  "AGENTS.md",
+  "scripts/prepare-rollback.mjs",
+];
 const overlayHashes = {};
 for (const file of overlays) {
   const bytes = await readFile(path.join(workspace, file));
   await writeFile(path.join(destination, file), bytes);
   overlayHashes[file] = createHash("sha256").update(bytes).digest("hex");
 }
-await writeFile(path.join(destination, "ROLLBACK_BUILD.json"), JSON.stringify({ sourceCommit, configCommit, overlayHashes }, null, 2) + "\n");
+await writeFile(
+  path.join(destination, "ROLLBACK_BUILD.json"),
+  JSON.stringify({ sourceCommit, configCommit, overlayHashes }, null, 2) + "\n",
+);
 console.log(JSON.stringify({ destination, sourceCommit, configCommit }));
 console.log("Prepared source only; nothing was deployed. In that directory, run:");
 console.log("  pnpm install --frozen-lockfile\n  pnpm build\n  pnpm exec cf deploy --dry-run");

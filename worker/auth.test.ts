@@ -5,9 +5,7 @@ const origin = "https://vault.example";
 
 describe("safeRedirectTarget", () => {
   it("keeps same-origin paths with their query", () => {
-    expect(safeRedirectTarget("/authorize?client_id=x&state=y", origin)).toBe(
-      "/authorize?client_id=x&state=y",
-    );
+    expect(safeRedirectTarget("/authorize?client_id=x&state=y", origin)).toBe("/authorize?client_id=x&state=y");
     expect(safeRedirectTarget("/", origin)).toBe("/");
   });
 

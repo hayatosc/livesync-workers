@@ -5,15 +5,23 @@ import { withMcpSessionIsolation } from "../src/mcp/sessions.js";
 type Props = { userId: string; scope: string[] };
 
 function setup() {
-  const objects = new Map<string, {
-    name: string; props?: Props; initialized: unknown; destroy: ReturnType<typeof vi.fn>;
-    setName(name: string, props?: Props): Promise<void>;
-    getInitializeRequest(): Promise<unknown>;
-    setInitializeRequest(value: unknown): Promise<void>;
-    fetch(): Promise<{ webSocket: { accept(): void; close(): void; addEventListener(): void } }>;
-  }>();
+  const objects = new Map<
+    string,
+    {
+      name: string;
+      props?: Props;
+      initialized: unknown;
+      destroy: ReturnType<typeof vi.fn>;
+      setName(name: string, props?: Props): Promise<void>;
+      getInitializeRequest(): Promise<unknown>;
+      setInitializeRequest(value: unknown): Promise<void>;
+      fetch(): Promise<{ webSocket: { accept(): void; close(): void; addEventListener(): void } }>;
+    }
+  >();
   const namespace = {
-    newUniqueId() { return { toString: () => "session-1" }; },
+    newUniqueId() {
+      return { toString: () => "session-1" };
+    },
     idFromName(name: string) {
       expect(this).toBe(namespace);
       return name;
@@ -22,15 +30,23 @@ function setup() {
       expect(this).toBe(namespace);
       if (!objects.has(name)) {
         objects.set(name, {
-          name, initialized: null, destroy: vi.fn(async () => {}),
+          name,
+          initialized: null,
+          destroy: vi.fn(async () => {}),
           async setName(name, props) {
             expect(name).toBe(this.name);
             // Match PartyServer: props initialize a warm object only once.
             this.props ??= props;
           },
-          async getInitializeRequest() { return this.initialized; },
-          async setInitializeRequest(value) { this.initialized = value; },
-          async fetch() { return { webSocket: { accept() {}, close() {}, addEventListener() {} } }; },
+          async getInitializeRequest() {
+            return this.initialized;
+          },
+          async setInitializeRequest(value) {
+            this.initialized = value;
+          },
+          async fetch() {
+            return { webSocket: { accept() {}, close() {}, addEventListener() {} } };
+          },
         });
       }
       return objects.get(name)!;
@@ -44,15 +60,36 @@ function setup() {
     const headers = new Headers({ Accept: "application/json, text/event-stream", "Content-Type": "application/json" });
     if (sessionId) headers.set("mcp-session-id", sessionId);
     const request = new Request("https://vault.example/mcp", {
-      method, headers,
-      ...(method === "POST" ? { body: JSON.stringify({
-        jsonrpc: "2.0", id: 1, method: sessionId ? "tools/list" : "initialize",
-        ...(sessionId ? {} : { params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1" } } }),
-      }) } : {}),
+      method,
+      headers,
+      ...(method === "POST"
+        ? {
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              method: sessionId ? "tools/list" : "initialize",
+              ...(sessionId
+                ? {}
+                : {
+                    params: {
+                      protocolVersion: "2025-11-25",
+                      capabilities: {},
+                      clientInfo: { name: "test", version: "1" },
+                    },
+                  }),
+            }),
+          }
+        : {}),
     });
-    const response = await handler.fetch(request as Parameters<typeof handler.fetch>[0], { MCP_OBJECT: namespace as unknown as DurableObjectNamespace }, {
-      props, waitUntil() {}, passThroughOnException() {},
-    } as unknown as ExecutionContext);
+    const response = await handler.fetch(
+      request as Parameters<typeof handler.fetch>[0],
+      { MCP_OBJECT: namespace as unknown as DurableObjectNamespace },
+      {
+        props,
+        waitUntil() {},
+        passThroughOnException() {},
+      } as unknown as ExecutionContext,
+    );
     await response.body?.cancel();
     return response;
   }

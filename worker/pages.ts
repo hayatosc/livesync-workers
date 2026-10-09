@@ -36,20 +36,27 @@ export type StatusPageData = {
 export function statusPage(env: Env, data: StatusPageData): Response {
   let configurationError = false;
   let ref = { databaseName: "unavailable", passwordSecret: "unavailable" };
-  try { ref = setupVaultConfig(env); } catch (error) { configurationError = true; data.indexError ??= error instanceof Error ? error.message : String(error); }
+  try {
+    ref = setupVaultConfig(env);
+  } catch (error) {
+    configurationError = true;
+    data.indexError ??= error instanceof Error ? error.message : String(error);
+  }
   const missing = Object.entries(data.configured)
     .filter(([, ok]) => !ok)
     .map(
-      ([key]) =>
-        ({ livesync: "LIVESYNC_PASSWORD", admin: "ADMIN_PASSWORD", session: "SESSION_SECRET" })[
-          key
-        ] ?? key,
+      ([key]) => ({ livesync: "LIVESYNC_PASSWORD", admin: "ADMIN_PASSWORD", session: "SESSION_SECRET" })[key] ?? key,
     );
-  const warn = (configurationError ? `<div class="card" style="border-color:#f59e0b"><h2>Vault configuration unavailable</h2><p>Check the vault registry and admin access settings.</p></div>` : "") + (
-    missing.length > 0
+  const warn =
+    (configurationError
+      ? `<div class="card" style="border-color:#f59e0b"><h2>Vault configuration unavailable</h2><p>Check the vault registry and admin access settings.</p></div>`
+      : "") +
+    (missing.length > 0
       ? `<div class="card" style="border-color:#f59e0b"><h2>Setup incomplete</h2><p>Missing (or placeholder) secrets: <code>${missing
           .map(escapeHtml)
-          .join("</code>, <code>")}</code>.</p><p class="muted">Add them in the Cloudflare dashboard under Settings → Variables and Secrets (or deploy with <code>cf deploy --secrets-file .dev.vars</code>), then reload.</p></div>`
+          .join(
+            "</code>, <code>",
+          )}</code>.</p><p class="muted">Add them in the Cloudflare dashboard under Settings → Variables and Secrets (or deploy with <code>cf deploy --secrets-file .dev.vars</code>), then reload.</p></div>`
       : "");
   const indexHtml = data.admin
     ? data.indexError

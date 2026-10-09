@@ -11,10 +11,14 @@ const encoder = new TextEncoder();
 export class PostingTree<T> {
   private cache = new Map<string, Node<T>>();
   private io = limitConcurrency(4);
-  constructor(private readonly bucket: R2Bucket, readonly prefix: string) {}
+  constructor(
+    private readonly bucket: R2Bucket,
+    readonly prefix: string,
+  ) {}
   private async load(ref: TreeRef): Promise<Node<T>> {
     if (!ref.r2.startsWith(this.prefix)) throw new Error("Cross-vault posting reference");
-    const cached = this.cache.get(ref.r2); if (cached) return cached;
+    const cached = this.cache.get(ref.r2);
+    if (cached) return cached;
     const { node, size } = await this.io(async () => {
       const object = await this.bucket.get(ref.r2);
       if (!object) throw new Error("Missing shared posting page");
@@ -37,8 +41,8 @@ export class PostingTree<T> {
   async get(root: TreeRef | null, key: string): Promise<T | null> {
     if (!root || key < root.first || key > root.last) return null;
     const node = await this.load(root);
-    if ("entries" in node) return node.entries.find(entry => entry.key === key)?.value ?? null;
-    const child = node.children.find(ref => key >= ref.first && key <= ref.last);
+    if ("entries" in node) return node.entries.find((entry) => entry.key === key)?.value ?? null;
+    const child = node.children.find((ref) => key >= ref.first && key <= ref.last);
     return child ? this.get(child, key) : null;
   }
   async *range(root: TreeRef | null, start = "", end?: string): AsyncGenerator<Entry<T>> {
@@ -56,36 +60,54 @@ export class PostingTree<T> {
     else for (const child of node.children) await this.references(child, protect, live);
   }
   private async leaves(entries: Entry<T>[]): Promise<TreeRef[]> {
-    const pages: Entry<T>[][] = []; let page: Entry<T>[] = []; let bytes = 0;
+    const pages: Entry<T>[][] = [];
+    let page: Entry<T>[] = [];
+    let bytes = 0;
     for (const entry of entries) {
       const size = encoder.encode(JSON.stringify(entry)).byteLength;
-      if (page.length && (page.length >= POSTING_PAGE_ROWS || bytes + size > PAGE_BYTES)) { pages.push(page); page = []; bytes = 0; }
-      page.push(entry); bytes += size;
+      if (page.length && (page.length >= POSTING_PAGE_ROWS || bytes + size > PAGE_BYTES)) {
+        pages.push(page);
+        page = [];
+        bytes = 0;
+      }
+      page.push(entry);
+      bytes += size;
     }
     if (page.length) pages.push(page);
-    return this.savePages(pages.map(entries => ({ entries })));
+    return this.savePages(pages.map((entries) => ({ entries })));
   }
   private async savePages(nodes: Node<T>[]): Promise<TreeRef[]> {
     const refs: TreeRef[] = [];
     // Every started immutable upload settles before an error returns to the publisher.
     for (let offset = 0; offset < nodes.length; offset += 4) {
-      const settled = await Promise.allSettled(nodes.slice(offset, offset + 4).map(node => this.save(node)));
-      for (const result of settled) { if (result.status === "rejected") throw result.reason; refs.push(result.value); }
+      const settled = await Promise.allSettled(nodes.slice(offset, offset + 4).map((node) => this.save(node)));
+      for (const result of settled) {
+        if (result.status === "rejected") throw result.reason;
+        refs.push(result.value);
+      }
     }
     return refs;
   }
   private async branches(children: TreeRef[]): Promise<TreeRef[]> {
     const nodes: Node<T>[] = [];
-    for (let offset = 0; offset < children.length; offset += FANOUT) nodes.push({ children: children.slice(offset, offset + FANOUT) });
+    for (let offset = 0; offset < children.length; offset += FANOUT)
+      nodes.push({ children: children.slice(offset, offset + FANOUT) });
     return this.savePages(nodes);
   }
   private async update(root: TreeRef | null, changes: Entry<T | null>[]): Promise<TreeRef[]> {
     if (!changes.length) return root ? [root] : [];
     const node = root ? await this.load(root) : { entries: [] };
     if ("entries" in node) {
-      const entries = new Map(node.entries.map(entry => [entry.key, entry.value]));
-      for (const change of changes) { if (change.value === null) entries.delete(change.key); else entries.set(change.key, change.value); }
-      return this.leaves([...entries].map(([key,value]) => ({key,value})).sort((a,b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+      const entries = new Map(node.entries.map((entry) => [entry.key, entry.value]));
+      for (const change of changes) {
+        if (change.value === null) entries.delete(change.key);
+        else entries.set(change.key, change.value);
+      }
+      return this.leaves(
+        [...entries]
+          .map(([key, value]) => ({ key, value }))
+          .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
+      );
     }
     const groups = node.children.map(() => [] as Entry<T | null>[]);
     for (const change of changes) {
@@ -93,12 +115,18 @@ export class PostingTree<T> {
       while (index + 1 < node.children.length && node.children[index + 1]!.first <= change.key) index++;
       groups[index]!.push(change);
     }
-    const children = await mapBatches(node.children.map((child, index) => ({ child, changes: groups[index]! })), 4,
-      ({ child, changes }) => this.update(child, changes));
+    const children = await mapBatches(
+      node.children.map((child, index) => ({ child, changes: groups[index]! })),
+      4,
+      ({ child, changes }) => this.update(child, changes),
+    );
     return this.branches(children.flat());
   }
   async apply(root: TreeRef | null, changes: Map<string, T | null>): Promise<TreeRef | null> {
-    let refs = await this.update(root, [...changes].map(([key,value]) => ({key,value})).sort((a,b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    let refs = await this.update(
+      root,
+      [...changes].map(([key, value]) => ({ key, value })).sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
+    );
     while (refs.length > 1) refs = await this.branches(refs);
     return refs[0] ?? null;
   }

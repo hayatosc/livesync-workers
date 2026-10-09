@@ -9,7 +9,7 @@ export function splitRevisionBody(body: string): string[] | null {
   if (enc.encode(body).byteLength <= inlineRevisionBodyMaxBytes) return null;
 
   const chunks: string[] = [];
-  for (let start = 0; start < body.length;) {
+  for (let start = 0; start < body.length; ) {
     let end = Math.min(start + revisionBodyChunkCodeUnits, body.length);
     const lastCodeUnit = body.charCodeAt(end - 1);
     if (end < body.length && lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) {
@@ -59,9 +59,7 @@ export function stableJson(value: unknown): string {
 
 export async function sha1Hex(text: string): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-1", enc.encode(text));
-  return [...new Uint8Array(digest)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export async function newRevision(doc: DocBody, parentRev: string | null): Promise<string> {
@@ -87,9 +85,7 @@ export function cloneBody(row: RevRow): DocBody {
  */
 export function ancestorsFromRevisions(doc: DocBody): string[] {
   const rev = typeof doc._rev === "string" ? parseRev(doc._rev) : null;
-  const revisions = doc._revisions as
-    | { start?: unknown; ids?: unknown }
-    | undefined;
+  const revisions = doc._revisions as { start?: unknown; ids?: unknown } | undefined;
   if (!rev || !revisions || !Array.isArray(revisions.ids)) return [];
   const ids = revisions.ids.filter((id): id is string => typeof id === "string");
   const ancestors: string[] = [];

@@ -154,23 +154,43 @@ export function matchesSelector(doc: DocBody, selector: Selector | null): boolea
 }
 
 /** Unknown fields need the body; SQL NULL does not distinguish missing, null or a non-scalar value. */
-export function matchesMetadata(row: RevRow, metadata: RevisionMetadata | null, selector: Selector): boolean | undefined {
+export function matchesMetadata(
+  row: RevRow,
+  metadata: RevisionMetadata | null,
+  selector: Selector,
+): boolean | undefined {
   if (!selector || Object.keys(selector).length === 0) return true;
   let unknown = false;
   for (const [field, condition] of Object.entries(selector)) {
     let matched: boolean | undefined;
     if (field === "$and" || field === "$or") {
       if (!Array.isArray(condition)) return false;
-      const parts = condition.map(item => matchesMetadata(row, metadata, item as Selector));
-      matched = field === "$and"
-        ? parts.includes(false) ? false : parts.includes(undefined) ? undefined : true
-        : parts.includes(true) ? true : parts.includes(undefined) ? undefined : false;
+      const parts = condition.map((item) => matchesMetadata(row, metadata, item as Selector));
+      matched =
+        field === "$and"
+          ? parts.includes(false)
+            ? false
+            : parts.includes(undefined)
+              ? undefined
+              : true
+          : parts.includes(true)
+            ? true
+            : parts.includes(undefined)
+              ? undefined
+              : false;
     } else {
-      const value = field === "_id" ? row.id : field === "_rev" ? row.rev
-        : field === "_deleted" && row.deleted ? true
-        : field === "deleted" && metadata?.soft_deleted ? true
-        : field === "type" || field === "path" || field === "size" || field === "mtime" ? metadata?.[field]
-        : undefined;
+      const value =
+        field === "_id"
+          ? row.id
+          : field === "_rev"
+            ? row.rev
+            : field === "_deleted" && row.deleted
+              ? true
+              : field === "deleted" && metadata?.soft_deleted
+                ? true
+                : field === "type" || field === "path" || field === "size" || field === "mtime"
+                  ? metadata?.[field]
+                  : undefined;
       matched = value == null ? undefined : matchesCondition(value, condition);
     }
     if (matched === false) return false;
