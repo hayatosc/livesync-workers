@@ -115,7 +115,7 @@ GUI のジョブでは、失敗時のスクリーンショットも保存しま�
 一時的な Vault、profile、資格情報は保存しません。
 各実行の結果と対象の commit は [Actions の一覧](https://github.com/hayatosc/livesync-workers/actions)で確認できます。
 
-Ubuntu 22.04 の runner は 2027 年 4 月に退役する予定なので、それまでに後継の runner でも標準の sandbox が動くことを確かめて移行する必要があります。
+Ubuntu 22.04 の runner は 2027 年 4 月に退役する予定なので、それまでに後継の runner でも標準の sandbox が動くことを確かめて移行する必要があります（[残課題](backlog.md)）。
 release 専用の Publish workflow は、PR では実行しません。
 
 ## 性能測定
