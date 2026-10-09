@@ -1,6 +1,7 @@
-# Secrets. Leave the values empty here; set real ones with `wrangler secret put NAME`
-# (or in the Deploy to Cloudflare form, which lists these entries as required fields).
-# The username is the LIVESYNC_USERNAME variable in wrangler.jsonc (default: obsidian).
+# Secrets. Copy this file to .dev.vars, fill in the values, and upload them with
+# `pnpm exec cf deploy --secrets-file .dev.vars` (or add them in the Cloudflare
+# dashboard under Settings → Variables and Secrets). Never commit .dev.vars.
+# The username is the LIVESYNC_USERNAME variable in cloudflare.config.ts (default: obsidian).
 
 # Password the Obsidian LiveSync plugin logs in with. Long and random is best.
 LIVESYNC_PASSWORD=
@@ -13,7 +14,5 @@ SESSION_SECRET=
 
 # Optional: a static bearer token for MCP clients that cannot do OAuth.
 # It grants vault:read only; widen it with the MCP_STATIC_TOKEN_SCOPES variable.
-# Kept commented out because every active entry in this file becomes a required
-# field in the Deploy to Cloudflare form. Uncomment it for local dev, or add the
-# secret with `wrangler secret put MCP_STATIC_TOKEN` / in the dashboard.
+# Uncomment and fill it in only if you need it.
 # MCP_STATIC_TOKEN=

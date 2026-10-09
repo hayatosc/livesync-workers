@@ -6,6 +6,7 @@
 pnpm install --frozen-lockfile
 pnpm build
 pnpm typecheck
+pnpm lint
 pnpm test
 ```
 
@@ -97,8 +98,11 @@ CLI と GUI は、それぞれ次の 7 ケースを検証します。
 
 ## GitHub Actions
 
-[CI](../.github/workflows/ci.yml) は、build、型検査、全テスト、`.mjs` の構文、main との差分の空白を検査します。
-lint と formatter は設定していないので、空白の検査をそれらの代わりとは扱いません。
+[CI](../.github/workflows/ci.yml) は、build、型検査、全テスト、`.mjs` の構文、main との差分の空白、[Biome](https://biomejs.dev/) による整形と lint を検査します。
+Biome の設定は `biome.json` にあります。
+`pnpm lint` は書き換えずに検査だけを行い、`pnpm format` は整形と安全な自動修正を適用します。
+整形だけのコミットは `.git-blame-ignore-revs` に記録しています。
+ローカルの `git blame` で除外するには、`git config blame.ignoreRevsFile .git-blame-ignore-revs` を設定します。
 
 [LiveSync E2E](../.github/workflows/e2e.yml) は、draft を含む PR で、CLI と GUI を別々のジョブとして実行します。
 CLI は Ubuntu 24.04、GUI は Ubuntu 22.04 の hosted VM で動きます。
@@ -111,7 +115,7 @@ GUI のジョブでは、失敗時のスクリーンショットも保存しま�
 一時的な Vault、profile、資格情報は保存しません。
 各実行の結果と対象の commit は [Actions の一覧](https://github.com/hayatosc/livesync-workers/actions)で確認できます。
 
-Ubuntu 22.04 の runner は 2027 年 4 月に退役する予定なので、それまでに後継の runner でも標準の sandbox が動くことを確かめて移行する必要があります。
+Ubuntu 22.04 の runner は 2027 年 4 月に退役する予定なので、それまでに後継の runner でも標準の sandbox が動くことを確かめて移行する必要があります（[残課題](backlog.md)）。
 release 専用の Publish workflow は、PR では実行しません。
 
 ## 性能測定

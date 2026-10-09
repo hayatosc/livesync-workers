@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 // provider's own PKCE parsing (challenge optional, method defaulting to plain).
 vi.mock("@cloudflare/workers-oauth-provider", () => ({
   OAuthProvider: class {
+    // biome-ignore lint/suspicious/noExplicitAny: mirrors the untyped options of the mocked provider.
     constructor(private readonly options: Record<string, any>) {}
     fetch(request: Request, env: Record<string, unknown>, ctx: unknown) {
       const options = this.options;
@@ -100,10 +101,7 @@ const ctx = {
   passThroughOnException() {},
 } as unknown as ExecutionContext;
 
-async function authorize(
-  params: Record<string, string>,
-  principal?: { id: string; scopes?: string[] },
-) {
+async function authorize(params: Record<string, string>, principal?: { id: string; scopes?: string[] }) {
   const env = { OAUTH_KV: fakeKv() };
   return provider(principal).fetch(new Request(authorizeUrl(params)), env, ctx);
 }
@@ -191,10 +189,13 @@ describe("OAuth consent per-principal scopes", () => {
   });
 
   it("only offers requested scopes that the principal may hold", async () => {
-    const response = await authorize({ ...pkce, scope: "vault:read memory:read" }, {
-      id: "u",
-      scopes: ["vault:write"],
-    });
+    const response = await authorize(
+      { ...pkce, scope: "vault:read memory:read" },
+      {
+        id: "u",
+        scopes: ["vault:write"],
+      },
+    );
     const html = await response.text();
     expect(html).toContain('value="vault:read"');
     expect(html).not.toContain('value="memory:read"');
@@ -208,7 +209,9 @@ describe("OAuth consent page hardening", () => {
   });
 
   it("shows the full target for app-scheme redirect URIs", async () => {
-    const html = await (await authorize({ ...pkce, redirect_uri: "cursor://anysphere.cursor-mcp/oauth/callback" })).text();
+    const html = await (
+      await authorize({ ...pkce, redirect_uri: "cursor://anysphere.cursor-mcp/oauth/callback" })
+    ).text();
     expect(html).toContain("<code>cursor://anysphere.cursor-mcp/oauth/callback</code>");
   });
 

@@ -1,197 +1,185 @@
-# Resumable original-file mirror
+# 再開できる元ファイルのミラー
 
-Implemented in the Worker source. This document describes the code's contract;
-it does not indicate a production deployment or a measured memory guarantee.
+Worker のソースに実装済みです。
+この文書はコードの契約を説明するもので、本番へのデプロイや、測定したメモリの保証を示すものではありません。
 
-## Storage and size contract
+## 保存とサイズの契約
 
-The authoritative content remains in `content/v1/`. The derived originals retain
-Obsidian's folder structure under `files/v1/<tenant>/<vault>/`. No full-file R2
-staging prefix, Queue, cron or per-file HTTP request is added.
+正本のコンテンツは引き続き `content/v1/` にあります。
+派生した元ファイルは、Obsidian のフォルダ構成のまま `files/v1/<tenant>/<vault>/` 以下に置きます。
+ファイル全体を R2 にステージングする接頭辞、Queue、cron、ファイルごとの HTTP リクエストは追加しません。
 
-| Item | Bound |
+| 項目 | 上限 |
 | --- | --- |
-| Actual decoded original | 100 MiB inclusive (104,857,600 bytes) |
-| Direct PUT | Complete output at most 8 MiB |
-| Multipart part | 8 MiB; only the final part may be smaller |
-| Source JSON envelope | 4 MiB of streamed UTF-8 input, including revision/history overhead |
-| Source occurrences | 8,192, including repeated children |
-| Serialized manifest descriptors | 4 MiB per job |
-| Unfinished byte cache | 8 MiB per vault, SQLite pages at most 1 MiB |
-| Mirror work per alarm | At most eight paths and 16 MiB of decoded/uploaded work, including retry uploads |
-| R2 operations per mirror slice | 64, including discovery, reads, HEAD, uploads and cleanup |
-| Cooperative time target | Stop starting another path/part after one second; current bounded work may finish later |
-| Change window | Five seconds from the first change, without extension by later changes |
+| 実際にデコードした元ファイル | 100 MiB ちょうどまで（104,857,600 バイト） |
+| 直接の PUT | 出力全体が 8 MiB まで |
+| マルチパートのパート | 8 MiB。最後のパートだけ小さくてよい |
+| ソースの JSON の外枠 | ストリームで読む UTF-8 入力で 4 MiB。リビジョンと履歴の分を含む |
+| ソースの参照 | 8,192 個。同じ子への重複した参照も数える |
+| シリアライズしたマニフェストの記述子 | ジョブごとに 4 MiB |
+| 未完了のバイトのキャッシュ | Vault ごとに 8 MiB。SQLite のページは 1 つ 1 MiB まで |
+| alarm ごとのミラーの処理 | 最大 8 パス、デコードとアップロードの合計 16 MiB。再試行のアップロードを含む |
+| ミラーの 1 区切りの R2 操作 | 64 回。探索、読み取り、HEAD、アップロード、後始末を含む |
+| 協調的な時間の目標 | 1 秒を過ぎたら次のパスやパートを始めない。実行中の上限つきの処理は後で終わってよい |
+| 変更をまとめる期間 | 最初の変更から 5 秒。後続の変更では延長しない |
 
-These are separate from the attachment write API's existing 10 MiB limit. Large
-legacy inline revisions must fit the envelope bound or be split into LiveSync
-children. Actual bytes enforce limits even when declared sizes are missing or
-wrong. A valid declared size above the maximum can fail early; a different
-actual size fails final validation. Invalid encoding, encryption, compression,
-unsafe paths and unsupported structures never replace a previous complete copy.
+これらは、添付の書き込み API の既存の 10 MiB の上限とは別のものです。
+大きな古いインラインのリビジョンは、外枠の上限に収まるか、LiveSync の子に分割されている必要があります。
+宣言されたサイズがない場合や誤っている場合も、実際のバイト数で上限を強制します。
+上限を超える正しいサイズが宣言されていれば早めに失敗し、実際のサイズが異なれば最終検証で失敗します。
+不正な符号化、暗号化、圧縮、安全でないパス、対応していない構造が、以前の完全なコピーを置き換えることはありません。
 
-## Reading, hashes and publication
+## 読み取り、ハッシュ、公開
 
-Capture the root revision and each ordered child's current revision/object key
-under the ordinary DO request lock. Persist the immutable manifest in derived
-SQLite rows; active references are roots for authoritative content GC. Child
-revision changes requeue dependent originals. Root and child generation checks
-cancel work after edits, rename, deletion or winner changes.
+通常の DO のリクエストロックの下で、根のリビジョンと、順序つきの各子の現在のリビジョンとオブジェクトキーを取得します。
+不変のマニフェストは派生の SQLite の行に保存し、実行中の参照は正本コンテンツの GC の根になります。
+子のリビジョンが変わると、それに依存する元ファイルがキューに戻ります。
+根と子の世代の確認により、編集、名前の変更、削除、勝者の変更の後は処理を取り消します。
 
-Read one bounded JSON envelope at a time, allocating from the R2 object's size
-and rejecting oversized metadata before reading. Actual streamed bytes are still
-checked against the buffer bound. Carry base64 quartets/padding or a
-trailing UTF-16 high surrogate across source/string boundaries; preserve UTF-8,
-Unicode and newlines as `TextEncoder` does. Decoder pieces are at most 16K code
-units, producing at most 48 KiB. Never concatenate a complete file or decode a
-complete attachment into memory. Assemble one 8 MiB part, then upload it directly
-to the final key's multipart upload. Copy decoded bytes directly into the part;
-only an unconsumed remainder crossing a part/budget boundary is base64 encoded
-for the persisted cursor.
+上限つきの JSON の外枠を 1 つずつ読みます。
+R2 オブジェクトのサイズから領域を確保し、大きすぎるメタデータは読む前に拒否します。
+実際にストリームで読んだバイト数も、バッファの上限と照合します。
+base64 の 4 文字組やパディング、末尾の UTF-16 の上位サロゲートは、ソースや文字列の境界をまたいで持ち越します。
+UTF-8、Unicode、改行は `TextEncoder` と同じように保ちます。
+デコーダに渡す断片は 16K コード単位までで、出力は 48 KiB までです。
+ファイル全体を連結したり、添付全体をメモリ上でデコードしたりはしません。
+8 MiB のパートを 1 つ組み立て、最終的なキーのマルチパートアップロードへ直接送ります。
+デコードしたバイトは、そのままパートにコピーします。
+パートや予算の境界をまたいで使われなかった残りだけを、永続化するカーソルのために base64 で符号化します。
 
-SHA-256 advances over the decoded bytes in the same pass. The pinned JavaScript
-`@stablelib/sha256` 2.0.1 implementation uses its public
-[saveState/restoreState API](https://www.stablelib.com/classes/_stablelib_sha256.SHA256.html).
-Saved state includes partial-block bytes and a format version. Incompatible
-state restarts the job. Dynamic Wasm compilation is unavailable in Workers and
-is not required by this implementation.
+SHA-256 は、同じパスでデコードしたバイトに対して計算を進めます。
+固定した JavaScript 実装 `@stablelib/sha256` 2.0.1 の、公開されている [saveState/restoreState API](https://www.stablelib.com/classes/_stablelib_sha256.SHA256.html) を使います。
+保存する状態には、ブロックの途中のバイトと形式の版を含みます。
+互換性のない状態の場合は、ジョブを最初からやり直します。
+Workers では Wasm の動的なコンパイルを使えませんが、この実装には必要ありません。
 
-Persist upload ID, opaque Workers part ETags, per-part MD5, source cursor,
-actual length and SHA checkpoint. Acknowledged parts do not reread their source
-prefix. A lost part acknowledgement retries identical bytes with the same part
-number. Workers binding part ETags are completion tokens, not portable MD5
-values: Miniflare deliberately returns random tokens. Check the completed
-object's size and multipart ETag against the locally computed MD5 aggregate.
-The final [multipart ETag](https://developers.cloudflare.com/r2/objects/upload-objects/#etags)
-is distinct from the original's SHA-256. A checksum failure after completion
-cannot undo the provider's publication; it prevents successful acknowledgement
-and triggers a retry. Small PUTs supply SHA-256 for R2's server-side validation.
+アップロード ID、Workers が返す不透明なパートの ETag、パートごとの MD5、ソースのカーソル、実際の長さ、SHA の途中状態を保存します。
+確認済みのパートについては、ソースの先頭部分を読み直しません。
+パートの確認応答が失われた場合は、同じパート番号で同じバイト列を再送します。
+Workers の binding が返すパートの ETag は完了処理のためのトークンで、移植可能な MD5 の値ではありません。
+Miniflare は意図的にランダムなトークンを返します。
+完了したオブジェクトのサイズとマルチパートの ETag は、ローカルで計算した MD5 の集約値と照合します。
+最終的な[マルチパートの ETag](https://developers.cloudflare.com/r2/objects/upload-objects/#etags) は、元ファイルの SHA-256 とは別物です。
+完了後にチェックサムが一致しなくても、提供側での公開は取り消せません。
+その場合は確認済みとして扱わず、再試行します。
+小さな PUT では、R2 のサーバー側の検証のために SHA-256 を渡します。
 
-Source reads and part uploads release the ordinary request lock. Immediately
-before direct PUT or multipart completion, take that lock, validate the epoch
-and all input revisions, and hold it through publication and SQL acknowledgement.
-This final R2 call can delay a sync request. Maintenance, purge, rebuild and GC
-acquire the maintenance lock before the request lock. An epoch guard prevents
-writes to derived job state after canonical recovery has reset the mirror.
+ソースの読み取りとパートのアップロードの間は、通常のリクエストロックを手放します。
+直接の PUT やマルチパートの完了の直前にロックを取り、エポックとすべての入力リビジョンを検証し、公開と SQL での確認が終わるまで保持します。
+この最後の R2 呼び出しで、同期のリクエストが待たされることがあります。
+保守、purge、再構築、GC は、リクエストロックより先に保守ロックを取ります。
+エポックの検査により、正本からの復元でミラーがリセットされた後に、派生したジョブの状態へ書き込むことを防ぎます。
 
-Files retain their previous complete object until publication succeeds. The
-vault as a whole remains eventually consistent, not an atomic folder snapshot.
+公開が成功するまで、各ファイルは以前の完全なオブジェクトを保ちます。
+Vault 全体は結果整合で、フォルダの不可分なスナップショットではありません。
 
-## Partial progress and recovery
+## 途中経過と復元
 
-Ordinary successful PUTs/parts do not persist their bytes in SQLite. Only a
-forced budget yield or failed upload saves the unfinished part in local pages.
-Keep complete pages immutable while appending, and remove them after the part
-acknowledgement. If a small file overtakes an active large job but must yield or
-fails, discard its partial local job rather than allocate a second byte cache.
-It can retry from its bounded source later. The source manifest and hash/cursor
-state are separate from this unfinished-byte cache.
+通常どおり成功した PUT やパートのバイト列は、SQLite に保存しません。
+予算による中断やアップロードの失敗のときだけ、未完了のパートをローカルのページに保存します。
+追記の間も完成したページは変更せず、パートが確認されたら削除します。
+小さなファイルが実行中の大きなジョブを追い越した後で中断や失敗をした場合は、2 つ目のバイトキャッシュを確保せず、その部分的なジョブを破棄します。
+上限つきのソースから、後で再試行できます。
+ソースのマニフェストとハッシュやカーソルの状態は、この未完了のバイトのキャッシュとは別に保存します。
 
-All `file_mirror_*` tables bypass canonical SQL journaling and are excluded from
-checkpoint table selection. Their loss does not lose authoritative content.
-Hash state, decoder carry and unacknowledged bytes survive DO reconstruction.
-A process crash may replay one unacknowledged bounded unit. A small PUT lost to
-a process crash can be safely repeated; a caught ambiguous PUT retains its
-completed digest and is reconciled by HEAD. Incomplete upload creation lost
-before its ID is persisted can leave an orphan until R2 lifecycle cleanup.
+すべての `file_mirror_*` テーブルは正本の SQL ジャーナルを通らず、チェックポイントの対象テーブルからも除外します。
+これらを失っても、正本のコンテンツは失われません。
+ハッシュの状態、デコーダの持ち越し、未確認のバイトは、DO の再構築の後も残ります。
+プロセスがクラッシュした場合、確認されていない上限つきの単位を 1 つ再実行することがあります。
+クラッシュで失われた小さな PUT は、安全に繰り返せます。
+例外として捕捉した、結果が曖昧な PUT は、完了したダイジェストを保持し、HEAD で照合します。
+アップロードの作成がその ID の保存前に失われると、R2 のライフサイクルで掃除されるまで孤立したアップロードが残ることがあります。
 
-Before completion, durably save the final digest. After a lost completion
-acknowledgement, HEAD verifies job ID, source fingerprint, size and aggregate
-ETag, then acknowledges the saved digest without reuploading. An expired or
-externally aborted upload restarts from canonical sources. Known abandoned
-uploads are aborted in bounded maintenance batches. Jobs restart after 24 hours
-without progress or six days of total age; R2's default incomplete multipart
-lifecycle aborts uploads after seven days.
+完了の前に、最終的なダイジェストを永続化します。
+完了の確認応答が失われた場合は、HEAD でジョブ ID、ソースの指紋、サイズ、集約した ETag を検証し、再アップロードせずに保存済みのダイジェストを確認済みとします。
+期限切れや外部から中止されたアップロードは、正本のソースからやり直します。
+放棄されたことが分かっているアップロードは、上限つきの保守バッチで中止します。
+24 時間進捗がないか、全体で 6 日経ったジョブはやり直します。
+R2 の既定のライフサイクルは、未完了のマルチパートアップロードを 7 日後に中止します。
 
-A root/ordered-child source fingerprint allows unchanged requeued files to skip
-data decoding/upload. After a full SQLite recovery or explicit rebuild, HEAD
-can adopt an existing matching format-2 copy. This confirms source identity and
-known size, not a fresh byte audit; a missing digest remains unknown in derived
-state. A byte audit would require streaming the output separately. No automatic
-extra read or re-export is performed just to refill digests.
+根と順序つきの子から作るソースの指紋により、変更のないファイルがキューに戻っても、デコードとアップロードを省略できます。
+SQLite を完全に復元した後や明示的な再構築の後は、HEAD で、一致する既存の形式 2 のコピーを採用できます。
+これはソースの同一性と既知のサイズの確認で、バイト列を改めて監査するものではありません。
+ダイジェストがなければ、派生状態では不明のままです。
+バイト列を監査するには、出力を別にストリームで読む必要があります。
+ダイジェストを埋めるためだけに、自動で追加の読み取りや再書き出しを行うことはありません。
 
-Small PUT metadata includes `contentHash`. Multipart metadata cannot receive a
-late SHA-256 via [complete(parts)](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/#r2multipartupload-definition),
-so it includes `mirrorFormat`, `mirrorJobId`, `sourceFingerprint`, `sourceRev`
-and optional `mtime`, while SHA-256 remains in DO derived state. Existing
-replication, search and attachment APIs continue using authoritative data.
+小さな PUT のメタデータには `contentHash` を含めます。
+マルチパートのメタデータには、[complete(parts)](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/#r2multipartupload-definition) の時点で SHA-256 を後から加えられません。
+そのため `mirrorFormat`、`mirrorJobId`、`sourceFingerprint`、`sourceRev`、任意の `mtime` を含め、SHA-256 は DO の派生状態に保持します。
+既存のレプリケーション、検索、添付の API は、引き続き正本のデータを使います。
 
-## Scheduling and diagnostics
+## スケジュールと診断
 
-Checkpoint/search work runs first in the existing alarm. The mirror processes
-at most two parts for a path in a pass, rotates the path cursor and permits
-bounded small jobs to overtake the one active large job. Four mirror calls are
-reserved from further source GETs for publication/progress operations. The
-64-call mirror ceiling does not imply a 64-call total for search/checkpoint work.
+既存の alarm の中で、チェックポイントと検索の処理を先に実行します。
+ミラーは 1 回のパスで 1 つのパスにつき最大 2 パートを処理し、パスのカーソルを順に回します。
+上限つきの小さなジョブは、実行中の大きなジョブ 1 つを追い越せます。
+ミラーの呼び出しのうち 4 回は、公開と進捗の操作のために確保し、ソースの GET には使いません。
+ミラーの 64 回の上限は、検索やチェックポイントの処理を含めた合計が 64 回という意味ではありません。
 
-Permanent error strings include `FILE_TOO_LARGE`, `SOURCE_TOO_LARGE`,
-`MANIFEST_TOO_LARGE`, `SIZE_MISMATCH`, `INVALID_ENCODING` and
-`UNSUPPORTED_CONTENT`. Missing chunks wait for changes. Transient errors persist
-a full-jitter exponential retry deadline: base five seconds, capped at fifteen
-minutes. No alarm sleeps for backoff. A retry before its deadline does not count
-as runnable work, so reads preserve its alarm and unrelated edits retain the
-five-second batching window. New committed source changes clear the delay.
-The implementation does not interpret provider Retry-After values.
+恒久的なエラーの文字列には、`FILE_TOO_LARGE`、`SOURCE_TOO_LARGE`、`MANIFEST_TOO_LARGE`、`SIZE_MISMATCH`、`INVALID_ENCODING`、`UNSUPPORTED_CONTENT` があります。
+欠けているチャンクは、変更が届くまで待ちます。
+一時的なエラーは、フルジッターの指数バックオフによる再試行の期限を永続化します。
+基準は 5 秒で、上限は 15 分です。
+バックオフのために alarm を眠らせることはありません。
+期限前の再試行は実行可能な処理として数えないので、読み取りはその alarm を保ち、関係のない編集も 5 秒のまとめる期間を保ちます。
+ソースに新しい変更が確定すると、待ち時間は解除されます。
+提供側の Retry-After の値は解釈しません。
 
-Existing `indexStatus`/`vaultStatus` mirror counters also expose `stale` and
-`active` (path, phase, decoded/uploaded bytes and target revision). `saved` means
-the current desired source fingerprint was acknowledged. A previously saved
-pending/error path is stale. Unknown pre-recovery copies are not counted as
-acknowledged stale copies. Detailed errors remain in `file_mirror_state`.
-On the format upgrade, files blocked by the previous mirror-size limit are
-requeued automatically; permanent unrelated errors remain blocked.
+既存の `indexStatus` と `vaultStatus` のミラーの数には、`stale` と `active`（パス、段階、デコード済みとアップロード済みのバイト数、対象のリビジョン）もあります。
+`saved` は、現在望まれているソースの指紋が確認済みであることを表します。
+以前に保存されたパスが pending か error になっている場合は stale です。
+復元前の不明なコピーは、確認済みの stale なコピーとしては数えません。
+詳しいエラーは `file_mirror_state` に残ります。
+形式の更新では、以前のミラーのサイズ上限で止まっていたファイルを自動でキューに戻します。
+関係のない恒久的なエラーは止まったままです。
 
-## R2 and DO costs
+## R2 と DO の費用
 
-For P = ceil(file size / 8 MiB) and C source GETs, the successful large-file base
-cost is P uploadPart + create/complete + C reads. Add discovery, HEAD, root
-reads, partial-source rereads and retries separately. A successful 100 MiB export
-has 13 parts, one create and one complete. Direct small PUT uses one write.
+P = ceil(ファイルサイズ / 8 MiB)、C をソースの GET の回数とすると、大きなファイルが成功したときの基本の費用は、P 回の uploadPart と作成・完了、C 回の読み取りです。
+探索、HEAD、根の読み取り、部分的なソースの読み直し、再試行は別に加算します。
+100 MiB の書き出しが成功すると、13 パートと、作成と完了が 1 回ずつです。
+小さな直接の PUT は、書き込み 1 回です。
 
-| Strategy | Class A operations | Class B operations |
+| 方式 | Class A の操作 | Class B の操作 |
 | --- | --- | --- |
-| Direct multipart (selected) | P + 2 | C |
-| Full R2 staging then publication | 2P + 2 | C + P |
-| Hash first, reread then publish | P + 2 | 2C |
+| 直接のマルチパート（採用） | P + 2 | C |
+| R2 全体へのステージング後に公開 | 2P + 2 | C + P |
+| 先にハッシュを計算し、読み直して公開 | P + 2 | 2C |
 
-A single streamed whole-file PUT has fewer operations, but cannot checkpoint its
-open request across alarms or keep the fragmented-source call budget. Retries
-would reread the entire file. Direct multipart avoids staging and a deliberate
-full second source pass; interruptions can reread the current envelope.
+ファイル全体を 1 回の PUT でストリームすれば操作の回数は減ります。
+ただし、開いたリクエストを alarm をまたいでチェックポイントすることも、断片化したソースの呼び出し予算を守ることもできません。
+再試行のたびにファイル全体を読み直すことにもなります。
+直接のマルチパートは、ステージングと、意図的なソースの 2 回目の全体読み取りを避けます。
+中断した場合は、現在の外枠を読み直すことがあります。
 
-[R2 Standard rates](https://developers.cloudflare.com/r2/pricing/) checked on
-2026-10-09 are $4.50/million Class A and $0.36/million Class B. At P=13 and C=2,000,
-proportional operation costs are $0.00078750 direct, $0.00085068 staged and
-$0.00150750 two-pass, before free usage, billing-unit rounding, storage and
-Workers/DO costs. Direct saves about 7.4% of R2 operation cost versus staging in
-this example. Source GETs still dominate; this is not an invoice prediction.
+2026-10-09 に確認した [R2 Standard の料金](https://developers.cloudflare.com/r2/pricing/)は、Class A が 100 万回あたり $4.50、Class B が 100 万回あたり $0.36 です。
+P=13、C=2,000 のとき、操作の比例費用は、直接が $0.00078750、ステージングが $0.00085068、2 回読みが $0.00150750 です。
+これは無料枠、課金単位の丸め、保存容量、Workers と DO の費用を含みません。
+この例では、直接の方式はステージングより R2 の操作費用を約 7.4% 節約します。
+費用の大部分はソースの GET で、請求額の予測ではありません。
 
-[DO SQLite](https://developers.cloudflare.com/durable-objects/platform/pricing/)
-cache pages, manifests, progress and deletes incur metered rows and storage.
-The cache is not free staging. DO active duration includes I/O waiting and bills
-allocated memory. Measure actual source calls, retries, cache rows, alarm count
-and duration before claiming a workload's total cost reduction.
+[DO の SQLite](https://developers.cloudflare.com/durable-objects/platform/pricing/) のキャッシュページ、マニフェスト、進捗、削除は、計量される行と保存容量になります。
+キャッシュは無料のステージングではありません。
+DO の稼働時間には I/O の待ち時間も含まれ、割り当てたメモリに対して課金されます。
+ワークロード全体の費用削減を主張する前に、実際のソースの呼び出し、再試行、キャッシュの行、alarm の回数と時間を測定してください。
 
-## Validation and qualification
+## 検証と適格性
 
-Workers tests cover exact streamed SHA-256 for 0 bytes, 1/8/20/50/100 MiB, 8 MiB + 1 byte and
-10 MiB + 1 byte, including repeated source references. They reject 100 MiB+1 byte
-and wrong declared sizes while preserving the old copy. They also cover missing
-chunks/eden, UTF-8 paths, source boundaries, concurrent edits, purge, rebuild,
-byte/call budgets, small-file progress and reconstruction after lost part and
-completion acknowledgements. Known SHA-256 vectors and decoder boundary tests
-run separately. Cache rows are asserted absent from canonical commits and
-checkpoint dirty tracking.
+Workers のテストは、0 バイト、1/8/20/50/100 MiB、8 MiB + 1 バイト、10 MiB + 1 バイトについて、ストリームで計算した SHA-256 が正確に一致することを、同じソースへの重複した参照を含めて確認します。
+100 MiB + 1 バイトと誤った宣言サイズを拒否し、古いコピーを保つことも確認します。
+欠けたチャンクと eden、UTF-8 のパス、ソースの境界、同時の編集、purge、再構築、バイトと呼び出しの予算、小さなファイルの進捗、パートと完了の確認応答が失われた後の再構築も対象です。
+既知の SHA-256 のテストベクトルとデコーダの境界のテストは、別に実行します。
+キャッシュの行が正本のコミットとチェックポイントの変更追跡に含まれないことも確認します。
 
-[Workers' 128 MB limit](https://developers.cloudflare.com/workers/platform/limits/#memory)
-is shared per isolate, not a per-file allowance. Bounded arrays/reads do not
-prove a heap ceiling: JSON strings, parsed descriptors, GC and runtime buffering
-also consume memory. The 100 MiB functional tests are not a peak-memory
-measurement. No synchronous heap circuit breaker is claimed.
+[Workers の 128 MB の上限](https://developers.cloudflare.com/workers/platform/limits/#memory)は isolate 単位で共有され、ファイルごとの割り当てではありません。
+配列や読み取りに上限があっても、ヒープの上限を証明することにはなりません。
+JSON 文字列、解析した記述子、GC、ランタイムのバッファもメモリを使います。
+100 MiB の機能テストは、ピークメモリの測定ではありません。
+同期的なヒープのサーキットブレーカーがあるとは主張しません。
 
-Production qualification should measure a 100 MiB chunked file with two vault
-exports, ordinary bulk sync and checkpoint/search work, recording baseline,
-peak, runtime version, operation counts and duration. Engineering targets remain
-at most 32 MiB extra live memory for one job and below 96 MiB total isolate use.
-These targets have not been measured here. Production deployment and bucket
-lifecycle verification are separate from this source implementation.
+本番での適格性の確認では、2 つの Vault の書き出し、通常の一括同期、チェックポイントと検索の処理を伴う状態で、チャンク化した 100 MiB のファイルを測定してください。
+基準値、ピーク、ランタイムの版、操作の回数、時間を記録します。
+技術的な目標は、1 ジョブあたりの追加の常駐メモリが 32 MiB 以下、isolate 全体で 96 MiB 未満です。
+これらの目標は、ここでは測定していません。
+本番へのデプロイと、バケットのライフサイクルの確認は、このソースの実装とは別の作業です。

@@ -1,23 +1,23 @@
 # Cloudflare CLI
 
-This project uses `cf` for development, deployment, resource setup, types, and
-persisted observability queries. Node.js 24 or later is required by the project.
-The pinned versions are `cf@1.0.0-beta.12` and `wrangler@4.136.0`; Wrangler remains
-the build implementation invoked by `cf`, rather than the operator-facing CLI.
+このプロジェクトは、開発、デプロイ、資源の準備、型の生成、永続化されたログの調査に `cf` を使います。
+Node.js 24 以降が必要です。
+固定している版は `cf@1.0.0-beta.12` と `wrangler@4.136.0` です。
+Wrangler は `cf` が内部で呼び出すビルドの実装として残っているだけで、運用者が直接使う CLI ではありません。
 
-`cloudflare.config.ts` is the deployment configuration. It targets the existing
-account, OAuth KV namespace, R2 buckets, and live SQLite Durable Object classes.
-Declare optional variables in its `worker.env` block: `cf` does not support
-Wrangler's `keep_vars`. The legacy `wrangler.jsonc` is retained for existing
-Deploy to Cloudflare and test integrations.
+デプロイの設定は `cloudflare.config.ts` です。
+既存のアカウント、OAuth の KV namespace、R2 バケット、稼働中の SQLite DO クラスを参照しています。
+任意の変数も `worker.env` に宣言してください。
+`cf` は Wrangler の `keep_vars` に対応していません。
+旧 `wrangler.jsonc` は、誤って `wrangler deploy` を実行して古い `migrations` の設定を再デプロイすることがないように削除しました。
+Workers 統合テストは、専用の `test/workers/wrangler.jsonc` を使います。
 
-Before the first exports deployment, prepare an exports-compatible rollback
-build using [the upgrade instructions](upgrading.md#初回-exports-デプロイ前の切り戻し準備).
-Cloudflare cannot roll back across that lifecycle change to a pre-exports version;
-subsequent deployments must retain exports. The legacy `wrangler.jsonc` is not a
-rollback configuration after that transition.
+最初の exports のデプロイの前に、[更新手順](upgrading.md#初回-exports-デプロイ前の切り戻し準備)に従って、exports に対応した切り戻し用のビルドを用意してください。
+このライフサイクルの変更をまたいで、exports 以前の版へ Cloudflare の機能で切り戻すことはできません。
+以降のデプロイでも exports を維持する必要があります。
+Git 履歴から旧 `wrangler.jsonc` を戻して、切り戻し用の設定として使わないでください。
 
-## Commands
+## コマンド
 
 ```sh
 pnpm exec cf auth login
@@ -29,23 +29,23 @@ pnpm exec cf deploy --dry-run
 pnpm run deploy
 ```
 
-`cf` has its own OAuth credentials. A Wrangler login does not authenticate it.
-The setup dry run prints planned resource requests without creating resources.
-Deployment builds the library first, then lets `cf` build and deploy the Worker.
-Existing secrets are declared with `bindings.secret()` and need not be uploaded
-again. For a first deployment, fill `.dev.vars` from `.dev.vars.example`, build
-the library, and use `pnpm exec cf deploy --secrets-file .dev.vars`.
+`cf` は独自の OAuth の認証情報を持ちます。
+Wrangler にログインしても、`cf` の認証にはなりません。
+setup の dry run は、作成予定の資源を表示するだけで、資源は作りません。
+既存の secret は `bindings.secret()` で宣言しているので、アップロードし直す必要はありません。
+`pnpm run deploy` は、ライブラリをビルドしてから、`cf` に Worker のビルドとデプロイを任せます。
+初回のデプロイでは、`.dev.vars.example` をもとに `.dev.vars` を用意し、ライブラリをビルドしてから `pnpm exec cf deploy --secrets-file .dev.vars` を実行します。
 
-## Persisted logs
+## 永続化されたログ
 
-Discover the current API surface with `cf cli search` and command help:
+現在の API は、`cf cli search` とコマンドのヘルプで調べます。
 
 ```sh
 pnpm exec cf cli search "query workers observability telemetry logs"
 pnpm exec cf observability telemetry query --help
 ```
 
-For the investigation on October 7, create a local query JSON file:
+10 月 7 日の調査では、次のようなクエリの JSON をローカルに作りました。
 
 ```json
 {
@@ -73,29 +73,22 @@ pnpm exec cf r2 buckets metrics list
 pnpm exec cf workers versions get latest --worker-id livesync-workers
 ```
 
-Adjust the millisecond timestamps for each investigation. Keep analysis focused
-on method, path, status, CPU time, wall time, execution model, and trace ID.
-Match stateless requests to Durable Object events by trace ID; do not add both
-wall times together. Durable Object event lifetime can extend beyond the HTTP
-response, so the stateless request provides the response latency measurement.
+調査ごとに、ミリ秒のタイムスタンプを調整してください。
+分析では、メソッド、パス、ステータス、CPU 時間、wall time、実行モデル、trace ID に絞ります。
+ステートレスな Worker のリクエストと DO のイベントは、trace ID で対応づけます。
+両者の wall time は足し合わせません。
+DO のイベントは HTTP の応答より長く続くことがあるので、応答の遅延はステートレスなリクエストの値で測ります。
 
-After deployment, check `$workers.scriptVersion.id` on both the stateless Worker
-and the VaultDO events. A new Worker can still call an older Durable Object
-during rollout; a successful upload or a 100% deployment record alone does not
-prove that a performance probe exercised the new vault implementation. See
-[code update propagation](https://developers.cloudflare.com/durable-objects/platform/known-issues/#code-updates).
+デプロイの後は、ステートレスな Worker と VaultDO の両方のイベントで `$workers.scriptVersion.id` を確認してください。
+ロールアウト中は、新しい Worker が古い DO を呼ぶことがあります。
+アップロードの成功や 100% のデプロイ記録だけでは、性能の測定が新しい Vault の実装を通ったことの証明になりません。
+[コード更新の伝播](https://developers.cloudflare.com/durable-objects/platform/known-issues/#code-updates)を参照してください。
 
-The vault emits aggregate `LiveSync filtered changes`, `LiveSync bulk preparation`
-and `LiveSync maintenance timings` logs. These separate selector scan/body
-fallback counts, bulk preparation time, and index preparation/publication time
-without recording note contents or credentials.
+Vault は、集計したログ `LiveSync filtered changes`、`LiveSync bulk preparation`、`LiveSync maintenance timings` を出力します。
+これらは、セレクタの走査と本文へのフォールバックの回数、一括処理の準備時間、索引の準備と公開の時間を分けて記録し、ノートの内容や認証情報は含みません。
 
-A broad events query can fill its 1,000-event limit with informational logs.
-Query warnings and errors separately by adding a `$metadata.level` equality
-filter (`warn` or `error`) alongside the script filter, so failures are not
-silently omitted from the diagnostic sample. Maintenance logs also report
-`publicationBatchSize`, which decreases after an invocation API-limit failure.
+広いイベントのクエリは、情報レベルのログで 1,000 件の上限が埋まることがあります。
+失敗が診断用の標本から黙って漏れないように、スクリプトのフィルタに `$metadata.level` の一致条件（`warn` または `error`）を加えて、警告とエラーを別に問い合わせてください。
+保守のログには、呼び出し回数の上限による失敗の後に小さくなる `publicationBatchSize` も含まれます。
 
-References: [migration](https://developers.cloudflare.com/cf/wrangler/migrate/),
-[authentication](https://developers.cloudflare.com/cf/get-started/),
-[timing metrics](https://developers.cloudflare.com/workers/observability/metrics-and-analytics/).
+参考：[移行](https://developers.cloudflare.com/cf/wrangler/migrate/)、[認証](https://developers.cloudflare.com/cf/get-started/)、[時間の指標](https://developers.cloudflare.com/workers/observability/metrics-and-analytics/)

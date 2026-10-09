@@ -1,5 +1,7 @@
 export * from "./types.js";
-export { LiveSyncVaultDO, splitRevisionBody, splitNoteContentForChunks } from "./durable/livesync-db.js";
+export { LiveSyncVaultDO } from "./durable/livesync-db.js";
+export { splitRevisionBody } from "./durable/revisions.js";
+export { splitNoteContentForChunks } from "./durable/notes.js";
 export { handleLiveSyncRequest, vaultStub, type LiveSyncHandlerOptions } from "./livesync/handler.js";
 export { INTERNAL_SECRET_HEADER } from "./livesync/http.js";
 export {
@@ -27,7 +29,7 @@ export {
   DEFAULT_WORKERS_AI_EMBEDDING_MODEL,
   DEFAULT_EMBEDDING_DIMENSIONS,
 } from "./search/embedder.js";
-export { type VectorSearchHit } from "./search/vector-index.js";
+export type { VectorSearchHit } from "./search/vector-index.js";
 export * from "./credentials.js";
 
 export { SegmenterFullTextIndex, analyzeWords, SEGMENTER_ANALYZER } from "./search/segmenter-index.js";

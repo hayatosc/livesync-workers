@@ -132,15 +132,15 @@ describe("LiveSync internal note access", () => {
       noteDoc("gone.md", "1-g", "gone.md", ["h:a"], { deleted: true }),
     ]);
 
-    await expect(
-      json(await internalOp(durableObject, { op: "listMarkdownPaths" })),
-    ).resolves.toEqual({ paths: ["notes/hello.md"] });
-    await expect(
-      json(await internalOp(durableObject, { op: "readNote", path: "notes/hello.md" })),
-    ).resolves.toEqual({ content: "# Hello\nworld" });
-    await expect(
-      json(await internalOp(durableObject, { op: "readNote", path: "gone.md" })),
-    ).resolves.toEqual({ content: null });
+    await expect(json(await internalOp(durableObject, { op: "listMarkdownPaths" }))).resolves.toEqual({
+      paths: ["notes/hello.md"],
+    });
+    await expect(json(await internalOp(durableObject, { op: "readNote", path: "notes/hello.md" }))).resolves.toEqual({
+      content: "# Hello\nworld",
+    });
+    await expect(json(await internalOp(durableObject, { op: "readNote", path: "gone.md" }))).resolves.toEqual({
+      content: null,
+    });
   });
 
   it("hides chunked logical deletions from lists, batch reads, and semantic hit validation", async () => {
@@ -151,24 +151,37 @@ describe("LiveSync internal note access", () => {
       noteDoc("data.md", "1-a", "data.md", [], { deleted: true, data: content }),
       noteDoc("children.md", "1-b", "children.md", ["h:private"], { deleted: true, padding: content }),
     ]);
-    expect(storage.sql.exec("SELECT COUNT(*) AS count FROM revs WHERE body_chunked = 1").one())
-      .toEqual({ count: 2 });
-    await expect(json(await internalOp(durableObject, { op: "listMarkdownPaths" })))
-      .resolves.toEqual({ paths: [] });
-    await expect(json(await internalOp(durableObject, { op: "listNoteStats" })))
-      .resolves.toEqual({ files: [] });
-    await expect(json(await internalOp(durableObject, { op: "readNotes", paths: ["data.md", "children.md"] })))
-      .resolves.toEqual({ contents: { "data.md": null, "children.md": null } });
+    expect(storage.sql.exec("SELECT COUNT(*) AS count FROM revs WHERE body_chunked = 1").one()).toEqual({ count: 2 });
+    await expect(json(await internalOp(durableObject, { op: "listMarkdownPaths" }))).resolves.toEqual({ paths: [] });
+    await expect(json(await internalOp(durableObject, { op: "listNoteStats" }))).resolves.toEqual({ files: [] });
+    await expect(
+      json(await internalOp(durableObject, { op: "readNotes", paths: ["data.md", "children.md"] })),
+    ).resolves.toEqual({ contents: { "data.md": null, "children.md": null } });
     env.VAULT_DB = {
       idFromName: (name: string) => name,
       get: () => ({ fetch: (request: Request) => durableObject.fetch(request) }),
     } as unknown as DurableObjectNamespace;
-    env.VECTORIZE.query.mockResolvedValue({ matches: [
-      { score: 1, metadata: { origin: "vault", path: "data.md", hash: await hashText(content), preview: "private preview" } },
-      { score: 1, metadata: { origin: "vault", path: "children.md", hash: await hashText("private child body"), preview: "private preview" } },
-    ] });
+    env.VECTORIZE.query.mockResolvedValue({
+      matches: [
+        {
+          score: 1,
+          metadata: { origin: "vault", path: "data.md", hash: await hashText(content), preview: "private preview" },
+        },
+        {
+          score: 1,
+          metadata: {
+            origin: "vault",
+            path: "children.md",
+            hash: await hashText("private child body"),
+            preview: "private preview",
+          },
+        },
+      ],
+    });
     const vault = createVault(testBindings(env), {
-      ref: { tenantId: "user-1", databaseName: "vault" }, policy: env.policy, internalSecret: "test-secret",
+      ref: { tenantId: "user-1", databaseName: "vault" },
+      policy: env.policy,
+      internalSecret: "test-secret",
     });
     expect(await vault.search("private", 5)).toEqual([]);
   });
@@ -188,8 +201,9 @@ describe("LiveSync internal note access", () => {
       }
       return cursor;
     });
-    await expect(json(await internalOp(durableObject, { op: "readNotes", paths: ["wanted.md"] })))
-      .resolves.toEqual({ contents: { "wanted.md": "wanted" } });
+    await expect(json(await internalOp(durableObject, { op: "readNotes", paths: ["wanted.md"] }))).resolves.toEqual({
+      contents: { "wanted.md": "wanted" },
+    });
     expect(returnedIds).toEqual(["wanted.md"]);
   });
 
@@ -202,9 +216,7 @@ describe("LiveSync internal note access", () => {
       noteDoc("i:.obsidian/plugins/x/readme.md", "1-p", "i:.obsidian/plugins/x/readme.md", ["h:a"]),
     ]);
 
-    await expect(
-      json(await internalOp(durableObject, { op: "listNoteStats" })),
-    ).resolves.toEqual({
+    await expect(json(await internalOp(durableObject, { op: "listNoteStats" }))).resolves.toEqual({
       files: [{ path: "notes/hello.md", mtime: 2, size: 10 }],
     });
   });
@@ -222,12 +234,10 @@ describe("LiveSync internal note access", () => {
 
   it("returns null content while chunks are still missing", async () => {
     const { durableObject } = await created();
-    await replicate(durableObject, [
-      noteDoc("pending.md", "1-p", "pending.md", ["h:missing"]),
-    ]);
-    await expect(
-      json(await internalOp(durableObject, { op: "readNote", path: "pending.md" })),
-    ).resolves.toEqual({ content: null });
+    await replicate(durableObject, [noteDoc("pending.md", "1-p", "pending.md", ["h:missing"])]);
+    await expect(json(await internalOp(durableObject, { op: "readNote", path: "pending.md" }))).resolves.toEqual({
+      content: null,
+    });
   });
 
   it("rejects internal ops without the shared secret", async () => {
@@ -310,17 +320,14 @@ describe("LiveSync writeNote", () => {
     expect(doc._rev.startsWith("2-")).toBe(true);
     expect(doc.ctime).toBe(42);
     expect(doc.children[0]).not.toBe("h:old");
-    await expect(
-      json(await internalOp(durableObject, { op: "readNote", path: "Notes/Note.md" })),
-    ).resolves.toEqual({ content: "new body" });
+    await expect(json(await internalOp(durableObject, { op: "readNote", path: "Notes/Note.md" }))).resolves.toEqual({
+      content: "new body",
+    });
   });
 
   it("returns CONFLICT when the base hash does not match", async () => {
     const { durableObject } = await created();
-    await replicate(durableObject, [
-      leafDoc("h:old", "old body"),
-      noteDoc("n.md", "1-n", "n.md", ["h:old"]),
-    ]);
+    await replicate(durableObject, [leafDoc("h:old", "old body"), noteDoc("n.md", "1-n", "n.md", ["h:old"])]);
     const response = await internalOp(durableObject, {
       op: "writeNote",
       path: "n.md",
@@ -336,20 +343,27 @@ describe("LiveSync writeNote", () => {
     await replicate(durableObject, [noteDoc("Daily/today.md", "1-n", "Daily/today.md", ["h:late"])]);
     for (const expectedBaseHash of [await hashText(""), ""]) {
       const response = await internalOp(durableObject, {
-        op: "writeNote", path: "Daily/today.md", content: "appended", expectedBaseHash,
+        op: "writeNote",
+        path: "Daily/today.md",
+        content: "appended",
+        expectedBaseHash,
       });
       expect(response.status).toBe(409);
     }
     await replicate(durableObject, [leafDoc("h:late", "original body")]);
-    await expect(json(await internalOp(durableObject, { op: "readNote", path: "Daily/today.md" })))
-      .resolves.toEqual({ content: "original body" });
+    await expect(json(await internalOp(durableObject, { op: "readNote", path: "Daily/today.md" }))).resolves.toEqual({
+      content: "original body",
+    });
   });
 
   it("recreates a logically deleted note as a child of its deleted revision", async () => {
     const { durableObject } = await created();
     await replicate(durableObject, [noteDoc("Notes/Note.md", "1-n", "Notes/Note.md", [], { deleted: true })]);
     const response = await internalOp(durableObject, {
-      op: "writeNote", path: "Notes/Note.md", content: "revived", expectedBaseHash: await hashText(""),
+      op: "writeNote",
+      path: "Notes/Note.md",
+      content: "revived",
+      expectedBaseHash: await hashText(""),
     });
     expect(response.status).toBe(200);
     const note = await json<{ _rev: string; _conflicts?: string[] }>(
@@ -357,8 +371,9 @@ describe("LiveSync writeNote", () => {
     );
     expect(note._rev).toMatch(/^2-/);
     expect(note._conflicts).toBeUndefined();
-    await expect(json(await internalOp(durableObject, { op: "readNote", path: "Notes/Note.md" })))
-      .resolves.toEqual({ content: "revived" });
+    await expect(json(await internalOp(durableObject, { op: "readNote", path: "Notes/Note.md" }))).resolves.toEqual({
+      content: "revived",
+    });
   });
 
   it("follows the vault's lower-cased id convention for new notes", async () => {
@@ -420,9 +435,12 @@ describe("LiveSync Vectorize indexing", () => {
       heading: "Heading",
       preview: "## Heading\nbody",
     });
-    await expect(
-      json(await internalOp(durableObject, { op: "indexStatus" })),
-    ).resolves.toMatchObject({ indexed: 1, pending: 0, indexedSeq: 5, currentSeq: 5 });
+    await expect(json(await internalOp(durableObject, { op: "indexStatus" }))).resolves.toMatchObject({
+      indexed: 1,
+      pending: 0,
+      indexedSeq: 5,
+      currentSeq: 5,
+    });
   });
 
   it("skips unchanged notes, removes deleted ones, and retries notes missing chunks", async () => {
@@ -435,9 +453,10 @@ describe("LiveSync Vectorize indexing", () => {
     ]);
     await durableObject.alarm();
     expect(upserted.map((vector) => vector.metadata?.path)).toEqual(["a.md"]);
-    await expect(
-      json(await internalOp(durableObject, { op: "indexStatus" })),
-    ).resolves.toMatchObject({ indexed: 1, pending: 1 });
+    await expect(json(await internalOp(durableObject, { op: "indexStatus" }))).resolves.toMatchObject({
+      indexed: 1,
+      pending: 1,
+    });
 
     // Chunk arrives later: the pending note gets indexed, a.md is untouched.
     await replicate(durableObject, [leafDoc("h:late", "late content")]);
@@ -451,20 +470,21 @@ describe("LiveSync Vectorize indexing", () => {
     ]);
     await durableObject.alarm();
     expect(deletedIds).toHaveLength(1);
-    await expect(
-      json(await internalOp(durableObject, { op: "indexStatus" })),
-    ).resolves.toMatchObject({ indexed: 1, pending: 0 });
+    await expect(json(await internalOp(durableObject, { op: "indexStatus" }))).resolves.toMatchObject({
+      indexed: 1,
+      pending: 0,
+    });
   });
-
 
   it("indexes a note whose chunk arrives after the periodic retries gave up", async () => {
     const context = await created();
     const { durableObject, upserted, storage } = context;
     await replicate(durableObject, [noteDoc("late.md", "1-l", "late.md", ["h:late"])]);
     for (let attempt = 0; attempt < 25; attempt += 1) await durableObject.alarm();
-    await expect(
-      json(await internalOp(durableObject, { op: "indexStatus" })),
-    ).resolves.toMatchObject({ indexed: 0, pending: 1 });
+    await expect(json(await internalOp(durableObject, { op: "indexStatus" }))).resolves.toMatchObject({
+      indexed: 0,
+      pending: 1,
+    });
     // Past the cap the alarm stops re-arming the periodic retry.
     storage.setAlarm.mockClear();
     await durableObject.alarm();
@@ -474,9 +494,10 @@ describe("LiveSync Vectorize indexing", () => {
     await replicate(durableObject, [leafDoc("h:late", "late content")]);
     await durableObject.alarm();
     expect(upserted.map((vector) => vector.metadata?.path)).toEqual(["late.md"]);
-    await expect(
-      json(await internalOp(durableObject, { op: "indexStatus" })),
-    ).resolves.toMatchObject({ indexed: 1, pending: 0 });
+    await expect(json(await internalOp(durableObject, { op: "indexStatus" }))).resolves.toMatchObject({
+      indexed: 1,
+      pending: 0,
+    });
   });
 
   it("re-scans everything on reindex and drops newly excluded folders", async () => {
@@ -487,26 +508,27 @@ describe("LiveSync Vectorize indexing", () => {
       noteDoc("Archive/a.md", "1-a", "Archive/a.md", ["h:a"]),
     ]);
     await durableObject.alarm();
-    await expect(
-      json(await internalOp(durableObject, { op: "indexStatus" })),
-    ).resolves.toMatchObject({ indexed: 1 });
+    await expect(json(await internalOp(durableObject, { op: "indexStatus" }))).resolves.toMatchObject({ indexed: 1 });
 
     context.env.policy = { ...context.env.policy, excludedFolders: ["Archive"] };
     await internalOp(durableObject, { op: "reindex" });
     await durableObject.alarm();
     expect(deletedIds).toHaveLength(1);
-    await expect(
-      json(await internalOp(durableObject, { op: "indexStatus" })),
-    ).resolves.toMatchObject({ indexed: 0 });
+    await expect(json(await internalOp(durableObject, { op: "indexStatus" }))).resolves.toMatchObject({ indexed: 0 });
   });
 
   it("re-embeds unchanged long lines from index version 2, including their tails, only once", async () => {
     const { durableObject, storage, env } = await created();
-    const content = "x".repeat(5_000) + "tailneedle";
+    const content = `${"x".repeat(5_000)}tailneedle`;
     await replicate(durableObject, [noteDoc("long.md", "1-a", "long.md", [], { data: content })]);
     // Model the old completed index: identical content hash, but only one truncated vector.
-    storage.sql.exec(`INSERT INTO index_state (path, doc_id, hash, chunks, pending, attempts)
-      VALUES (?, ?, ?, 1, 0, 0)`, "long.md", "long.md", await hashText(content));
+    storage.sql.exec(
+      `INSERT INTO index_state (path, doc_id, hash, chunks, pending, attempts)
+      VALUES (?, ?, ?, 1, 0, 0)`,
+      "long.md",
+      "long.md",
+      await hashText(content),
+    );
     storage.sql.exec(`INSERT INTO meta (key, value) VALUES ('index_version', '2')
       ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
     storage.sql.exec(`INSERT INTO meta (key, value) VALUES ('indexed_seq', '1')
@@ -517,8 +539,7 @@ describe("LiveSync Vectorize indexing", () => {
     expect(inputs).toHaveLength(2);
     expect(inputs.some((text) => text.includes("tailneedle"))).toBe(true);
     expect(inputs.every((text) => text.length <= 4_000)).toBe(true);
-    expect(storage.sql.exec("SELECT value FROM meta WHERE key = 'index_version'").one())
-      .toEqual({ value: "4" });
+    expect(storage.sql.exec("SELECT value FROM meta WHERE key = 'index_version'").one()).toEqual({ value: "4" });
     await durableObject.alarm();
     expect(env.AI.run).toHaveBeenCalledTimes(1);
   });
@@ -526,10 +547,7 @@ describe("LiveSync Vectorize indexing", () => {
   it("re-embeds every note once when the index version changes", async () => {
     const context = await created();
     const { durableObject, storage, env } = context;
-    await replicate(durableObject, [
-      leafDoc("h:a", "content"),
-      noteDoc("a.md", "1-a", "a.md", ["h:a"]),
-    ]);
+    await replicate(durableObject, [leafDoc("h:a", "content"), noteDoc("a.md", "1-a", "a.md", ["h:a"])]);
     await durableObject.alarm();
     expect(vi.mocked(env.AI.run)).toHaveBeenCalledTimes(1);
 
@@ -541,9 +559,10 @@ describe("LiveSync Vectorize indexing", () => {
     storage.sql.exec(`UPDATE meta SET value = '1' WHERE key = 'index_version'`);
     await durableObject.alarm();
     expect(vi.mocked(env.AI.run)).toHaveBeenCalledTimes(2);
-    await expect(
-      json(await internalOp(durableObject, { op: "indexStatus" })),
-    ).resolves.toMatchObject({ indexed: 1, pending: 0 });
+    await expect(json(await internalOp(durableObject, { op: "indexStatus" }))).resolves.toMatchObject({
+      indexed: 1,
+      pending: 0,
+    });
   });
 
   it("runs the FTS rebuild once the vault is quiet and records the generation", async () => {
@@ -585,10 +604,13 @@ describe("LiveSync Vectorize indexing", () => {
     expect(status.fts.rebuildAt).toBeNull();
     expect(status.fts.generation).toBeNull();
     const markers = () =>
-      vi.mocked(env.FTS_BUCKET.put).mock.calls
-        .filter(([key]) => String(key).endsWith("/debug.json"))
+      vi
+        .mocked(env.FTS_BUCKET.put)
+        .mock.calls.filter(([key]) => String(key).endsWith("/debug.json"))
         .map(([, body]) => JSON.parse(String(body)) as { phase: string });
-    expect(vi.mocked(env.FTS_BUCKET.put).mock.calls.some(([key]) => String(key).endsWith("/manifest.json"))).toBe(false);
+    expect(vi.mocked(env.FTS_BUCKET.put).mock.calls.some(([key]) => String(key).endsWith("/manifest.json"))).toBe(
+      false,
+    );
     expect(markers().at(-1)).toMatchObject({ phase: "too-large" });
     const markerCount = markers().length;
 
@@ -619,7 +641,9 @@ describe("LiveSync Vectorize indexing", () => {
     expect(status.fts.generation).toBeNull();
     const markers = vi.mocked(env.FTS_BUCKET.put).mock.calls.filter(([key]) => String(key).endsWith("/debug.json"));
     expect(JSON.parse(String(markers.at(-1)![1]))).toMatchObject({ phase: "failed", attempts: 3 });
-    expect(vi.mocked(env.FTS_BUCKET.put).mock.calls.some(([key]) => String(key).endsWith("/manifest.json"))).toBe(false);
+    expect(vi.mocked(env.FTS_BUCKET.put).mock.calls.some(([key]) => String(key).endsWith("/manifest.json"))).toBe(
+      false,
+    );
   });
 
   it("tracks notes and builds the full-text index without a vector index", async () => {
@@ -655,7 +679,9 @@ describe("LiveSync Vectorize indexing", () => {
     context.env.FTS_BUCKET = bucket;
     const { durableObject, storage } = context;
     const ref = { tenantId: "user-1", databaseName: "vault" };
-    type Status = { fts: { generation: string | null; rebuildAt: number | null; error: string | null; pending: number } };
+    type Status = {
+      fts: { generation: string | null; rebuildAt: number | null; error: string | null; pending: number };
+    };
     const status = async () => json<Status>(await internalOp(durableObject, { op: "indexStatus" }));
     // Pull the debounced pass forward to "now".
     const makeDue = () => storage.sql.exec(`UPDATE meta SET value = '0' WHERE key = 'fts_rebuild_at'`);
@@ -729,7 +755,12 @@ describe("LiveSync Vectorize indexing", () => {
     await durableObject.alarm();
     const settled = (await readFtsManifest(bucket, ref))!;
     expect(settled.segments.map((s) => s.id)).toEqual([rebuilt.segments[2]!.id]);
-    expect(settled.retired.map((r) => r.id).sort()).toEqual(rebuilt.segments.slice(0, 2).map((s) => s.id).sort());
+    expect(settled.retired.map((r) => r.id).sort()).toEqual(
+      rebuilt.segments
+        .slice(0, 2)
+        .map((s) => s.id)
+        .sort(),
+    );
     await durableObject.alarm();
     expect(await status()).toMatchObject({ fts: { pending: 0, rebuildAt: null, error: null } });
     expect(storage.sql.exec(`SELECT value FROM meta WHERE key = 'fts_rebuild_epoch'`).toArray()).toEqual([]);
@@ -754,7 +785,11 @@ describe("LiveSync Vectorize indexing", () => {
     const result = await ftsSearch(bucket, ref, "会議", 5);
     expect(result.status === "ready" && result.hits.map((hit) => [hit.path, hit.hash])).toEqual([["a.md", "bogus"]]);
     const live = await json<{ hits: Array<{ path: string }> }>(
-      await internalOp(durableObject, { op: "resolveFtsHits", candidates: [{ path: "a.md", hash: "bogus" }], limit: 5 }),
+      await internalOp(durableObject, {
+        op: "resolveFtsHits",
+        candidates: [{ path: "a.md", hash: "bogus" }],
+        limit: 5,
+      }),
     );
     expect(live.hits).toEqual([]);
   });
@@ -947,7 +982,10 @@ describe("LiveSync Vectorize indexing", () => {
     storage.sql.exec(`DELETE FROM meta WHERE key = 'fts_rebuild_at'`);
 
     // The upgraded object arms a pass; the first request schedules its alarm.
-    const upgraded = new TestVaultDO({ storage, id: { name: "user-1:vault" } } as unknown as DurableObjectState, context.env);
+    const upgraded = new TestVaultDO(
+      { storage, id: { name: "user-1:vault" } } as unknown as DurableObjectState,
+      context.env,
+    );
     vi.mocked(storage.setAlarm).mockClear();
     (upgraded as unknown as { lastIndexScheduleAt: number }).lastIndexScheduleAt = 0;
     await upgraded.fetch(new Request("https://db/_changes?since=0"));
@@ -978,13 +1016,16 @@ describe("LiveSync Vectorize indexing", () => {
       { path: "changed.md", hash: await hashText("old private body") },
     ];
     await replicate(durableObject, [
-      noteDoc("gone.md", "2-c", "gone.md", [], { data: "deleted private body", deleted: true,
-        _revisions: { start: 2, ids: ["c", "a"] } }),
-      noteDoc("changed.md", "2-d", "changed.md", [], { data: "new body",
-        _revisions: { start: 2, ids: ["d", "b"] } }),
+      noteDoc("gone.md", "2-c", "gone.md", [], {
+        data: "deleted private body",
+        deleted: true,
+        _revisions: { start: 2, ids: ["c", "a"] },
+      }),
+      noteDoc("changed.md", "2-d", "changed.md", [], { data: "new body", _revisions: { start: 2, ids: ["d", "b"] } }),
     ]);
-    await expect(json(await internalOp(durableObject, { op: "resolveFtsHits", candidates, limit: 10 })))
-      .resolves.toEqual({ hits: [] });
+    await expect(
+      json(await internalOp(durableObject, { op: "resolveFtsHits", candidates, limit: 10 })),
+    ).resolves.toEqual({ hits: [] });
   });
 
   it("purge waits for an indexing pass paused in embedding and removes its output", async () => {
@@ -992,8 +1033,12 @@ describe("LiveSync Vectorize indexing", () => {
     await replicate(durableObject, [leafDoc("h:a", "private body"), noteDoc("secret.md", "1-a", "secret.md", ["h:a"])]);
     let resume!: () => void;
     let entered!: () => void;
-    const paused = new Promise<void>((resolve) => { entered = resolve; });
-    const gate = new Promise<void>((resolve) => { resume = resolve; });
+    const paused = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
     env.AI.run.mockImplementationOnce(async (_model: string, input: { text: string[] }) => {
       entered();
       await gate;
@@ -1001,9 +1046,12 @@ describe("LiveSync Vectorize indexing", () => {
     });
     const indexing = durableObject.alarm();
     await paused;
-    const purging = durableObject.fetch(new Request("https://db/internal/purge", {
-      method: "POST", headers: { "X-LiveSync-Internal": "test-secret" },
-    }));
+    const purging = durableObject.fetch(
+      new Request("https://db/internal/purge", {
+        method: "POST",
+        headers: { "X-LiveSync-Internal": "test-secret" },
+      }),
+    );
     resume();
     await indexing;
     expect((await purging).status).toBe(200);
@@ -1024,19 +1072,28 @@ describe("LiveSync Vectorize indexing", () => {
     env.VECTORIZE.deleteByIds.mockImplementation(async (ids: string[]) => {
       for (const id of ids) vectors.delete(id);
     });
-    const content = Array.from({ length: 60 }, (_, index) => `## Section ${index}\n${"body ".repeat(100)}`).join("\n\n");
+    const content = Array.from({ length: 60 }, (_, index) => `## Section ${index}\n${"body ".repeat(100)}`).join(
+      "\n\n",
+    );
     await replicate(durableObject, [noteDoc("a.md", "1-a", "a.md", [], { data: content })]);
     await durableObject.alarm();
     expect(vectors.size).toBe(50);
-    expect(storage.sql.exec("SELECT hash, chunks, pending FROM index_state WHERE path = 'a.md'").one())
-      .toMatchObject({ hash: null, chunks: 60, pending: 1 });
-    await replicate(durableObject, [noteDoc("a.md", "2-b", "a.md", [], {
-      data: "short body", _revisions: { start: 2, ids: ["b", "a"] },
-    })]);
+    expect(storage.sql.exec("SELECT hash, chunks, pending FROM index_state WHERE path = 'a.md'").one()).toMatchObject({
+      hash: null,
+      chunks: 60,
+      pending: 1,
+    });
+    await replicate(durableObject, [
+      noteDoc("a.md", "2-b", "a.md", [], {
+        data: "short body",
+        _revisions: { start: 2, ids: ["b", "a"] },
+      }),
+    ]);
     await durableObject.alarm();
     expect(vectors.size).toBe(1);
-    await replicate(durableObject, [{ _id: "a.md", _rev: "3-d", _deleted: true,
-      _revisions: { start: 3, ids: ["d", "b", "a"] } }]);
+    await replicate(durableObject, [
+      { _id: "a.md", _rev: "3-d", _deleted: true, _revisions: { start: 3, ids: ["d", "b", "a"] } },
+    ]);
     await durableObject.alarm();
     expect(vectors.size).toBe(0);
   });
@@ -1044,10 +1101,7 @@ describe("LiveSync Vectorize indexing", () => {
   it("purge removes indexed vectors", async () => {
     const context = await created();
     const { durableObject, deletedIds } = context;
-    await replicate(durableObject, [
-      leafDoc("h:a", "content"),
-      noteDoc("a.md", "1-a", "a.md", ["h:a"]),
-    ]);
+    await replicate(durableObject, [leafDoc("h:a", "content"), noteDoc("a.md", "1-a", "a.md", ["h:a"])]);
     await durableObject.alarm();
     await durableObject.fetch(
       new Request("https://db/internal/purge", {
@@ -1061,10 +1115,7 @@ describe("LiveSync Vectorize indexing", () => {
   it("purge fails and keeps the data when the FTS index cannot be deleted", async () => {
     const context = await created();
     const { durableObject, env } = context;
-    await replicate(durableObject, [
-      leafDoc("h:a", "content"),
-      noteDoc("a.md", "1-a", "a.md", ["h:a"]),
-    ]);
+    await replicate(durableObject, [leafDoc("h:a", "content"), noteDoc("a.md", "1-a", "a.md", ["h:a"])]);
     const list = vi.mocked(env.FTS_BUCKET.list);
     list.mockRejectedValue(new Error("R2 unavailable"));
     const res = await durableObject.fetch(
@@ -1090,7 +1141,7 @@ describe("LiveSync indexing catch-up", () => {
     await replicate(durableObject, [leafDoc("h:a", "content"), noteDoc("a.md", "1-a", "a.md", ["h:a"])]);
     vi.mocked(storage.setAlarm).mockClear();
     vi.mocked(storage.getAlarm).mockResolvedValueOnce(null);
-        (durableObject as unknown as { lastIndexScheduleAt: number }).lastIndexScheduleAt = 0;
+    (durableObject as unknown as { lastIndexScheduleAt: number }).lastIndexScheduleAt = 0;
 
     await durableObject.fetch(new Request("https://db/_changes?since=0"));
     expect(storage.setAlarm).toHaveBeenCalled();

@@ -17,7 +17,11 @@ export type TestEnv = {
   /** false leaves vectorize/embedder out of the bindings (semantic search off). */
   semanticSearch?: boolean;
   AI: { run: ReturnType<typeof vi.fn> };
-  VECTORIZE: { upsert: ReturnType<typeof vi.fn>; deleteByIds: ReturnType<typeof vi.fn>; query: ReturnType<typeof vi.fn> };
+  VECTORIZE: {
+    upsert: ReturnType<typeof vi.fn>;
+    deleteByIds: ReturnType<typeof vi.fn>;
+    query: ReturnType<typeof vi.fn>;
+  };
   FTS_BUCKET: R2Bucket;
   VAULT_DB: DurableObjectNamespace;
   upserted: VectorizeVector[];
@@ -43,7 +47,12 @@ export function testEnv(overrides: Partial<TestEnv> = {}): TestEnv {
       }),
       query: vi.fn(async () => ({ matches: [] })),
     },
-    FTS_BUCKET: { put: vi.fn(async () => null), get: vi.fn(async () => null), list: vi.fn(async () => ({ objects: [], truncated: false })), delete: vi.fn(async () => {}) } as unknown as R2Bucket,
+    FTS_BUCKET: {
+      put: vi.fn(async () => null),
+      get: vi.fn(async () => null),
+      list: vi.fn(async () => ({ objects: [], truncated: false })),
+      delete: vi.fn(async () => {}),
+    } as unknown as R2Bucket,
     VAULT_DB: {} as DurableObjectNamespace,
     upserted,
     deletedIds,

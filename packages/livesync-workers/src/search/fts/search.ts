@@ -8,12 +8,7 @@ import {
   shardForTerm,
   type Posting,
 } from "./codec.js";
-import {
-  normalizeText,
-  termCharLength,
-  tokenize,
-  type Token,
-} from "./tokenize.js";
+import { normalizeText, termCharLength, tokenize, type Token } from "./tokenize.js";
 import { DOCS_FILE_NAME, INDEX_FILE_NAME, shardFileName, type FtsDocMeta } from "./build.js";
 
 /** Fetch a segment-relative file ("shard-003.bin.gz"); null if missing. */
@@ -177,9 +172,7 @@ export async function searchSegment(
   const phraseMatches: Array<Map<number, number[]>> = [];
   for (const phrase of phrases) {
     const ordered = [...phrase.tokens].sort(
-      (a, b) =>
-        postingsSize(termPostings.get(a.term) ?? []) -
-        postingsSize(termPostings.get(b.term) ?? []),
+      (a, b) => postingsSize(termPostings.get(a.term) ?? []) - postingsSize(termPostings.get(b.term) ?? []),
     );
     const matches = new Map<number, number[]>();
     if (ordered.some((token) => (termPostings.get(token.term) ?? []).length === 0)) {
@@ -195,9 +188,7 @@ export async function searchSegment(
     });
     const rarest = ordered[0]!;
     for (const [doc, rarestPositions] of positionsByDoc[0]!) {
-      let bases: number[] | null = rarestPositions.map(
-        (pos) => pos - (rarest.pos - phrase.basePos),
-      );
+      let bases: number[] | null = rarestPositions.map((pos) => pos - (rarest.pos - phrase.basePos));
       for (let t = 1; t < ordered.length && bases.length > 0; t += 1) {
         const positions = positionsByDoc[t]!.get(doc);
         if (!positions) {
@@ -208,7 +199,11 @@ export async function searchSegment(
         const rel = ordered[t]!.pos - phrase.basePos;
         bases = bases.filter((base) => set.has(base + rel));
       }
-      if (bases && bases.length > 0) matches.set(doc, bases.sort((a, b) => a - b));
+      if (bases && bases.length > 0)
+        matches.set(
+          doc,
+          bases.sort((a, b) => a - b),
+        );
     }
     phraseMatches.push(matches);
   }
@@ -331,7 +326,10 @@ export function rankHits(segments: SegmentSearchResult[], options: RankOptions =
   const limit = options.limit ?? 20;
   const k1 = options.k1 ?? 1.2;
   const b = options.b ?? 0.75;
-  const n = Math.max(1, segments.reduce((sum, s) => sum + s.docCount, 0));
+  const n = Math.max(
+    1,
+    segments.reduce((sum, s) => sum + s.docCount, 0),
+  );
   const avgdl = Math.max(1, segments.reduce((sum, s) => sum + s.totalChars, 0) / n);
   const phraseCount = segments[0]?.df.length ?? 0;
   const idf: number[] = [];
@@ -390,11 +388,7 @@ export type Snippet = { before: string; match: string; after: string };
  * position refers to normalized code points. Positions can drift if the doc
  * changed after the segment was built; the slice is best-effort.
  */
-export function extractSnippet(
-  content: string,
-  match: SearchMatch,
-  context = 40,
-): Snippet {
+export function extractSnippet(content: string, match: SearchMatch, context = 40): Snippet {
   const { chars, orig } = normalizeText(content);
   const at = (index: number): number => {
     if (index <= 0) return 0;

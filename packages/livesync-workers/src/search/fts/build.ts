@@ -129,10 +129,7 @@ export async function buildIndex(
     files.set(shardFileName(shard), bucketed.data);
   }
   if (format === 2) files.set(INDEX_FILE_NAME, encodeSegmentIndex(shards, bucketCount));
-  files.set(
-    DOCS_FILE_NAME,
-    await gzip(new TextEncoder().encode(JSON.stringify({ docs }))),
-  );
+  files.set(DOCS_FILE_NAME, await gzip(new TextEncoder().encode(JSON.stringify({ docs }))));
 
   return {
     files,

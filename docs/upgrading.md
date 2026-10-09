@@ -6,7 +6,7 @@ upstream の変更とこのフォークの差分を確認し、検証した comm
 
 ## 更新の前に
 
-1. 現在の Worker の commit と、`cloudflare.config.ts` の資源名、ID、変数、DO の export 宣言を記録する。旧 Wrangler 環境では `wrangler.jsonc` の migration 履歴も記録する。
+1. 現在の Worker の commit と、`cloudflare.config.ts` の資源名、ID、変数、DO の export 宣言を記録する。旧 Wrangler 方式の migration 履歴は、削除済みの `wrangler.jsonc`（Git 履歴）で確認する。
 2. コンテンツの正本、旧 DO、旧索引を保全し、[保存、復元、移行](r2-operations.md)で復元と切り戻しの条件を確認する。
 3. 更新候補で、`pnpm install --frozen-lockfile`、build、型検査、全テスト、[CLI と GUI の E2E](testing.md) を実行する。
 4. binding、secret、migration、解析器の版に変更がないかを確認する。既存の DO の migration は削除も並べ替えもしない。
@@ -54,6 +54,8 @@ pnpm run deploy
 ```
 
 Cloudflare Workers Builds などの自動 deploy を使っている場合は、production branch への push が deploy を起こす設定かどうかを確認してください。
+リポジトリのルートの `wrangler.jsonc` は削除したので、`wrangler deploy` を実行するビルド設定は失敗します。
+自動 deploy を使う場合は、`pnpm run deploy` 相当の手順に切り替えてください。
 このリポジトリの GitHub Actions は PR の検査と release 時の npm 公開だけで、Worker を本番に deploy する workflow はありません。
 必要な secret は Cloudflare 側で設定し、Git には保存しません。
 

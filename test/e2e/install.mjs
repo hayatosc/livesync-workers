@@ -10,15 +10,19 @@ import { resolve, join } from 'node:path';
 const exec = promisify(execFile);
 if (process.platform !== 'linux' || process.arch !== 'x64') throw new Error('Pinned installers support Linux x64 only');
 const lock = JSON.parse(await readFile(new URL('./plugin-lock.json', import.meta.url), 'utf8'));
-async function hash(path) { const digest = createHash('sha256'); for await (const bytes of createReadStream(path)) digest.update(bytes); return digest.digest('hex'); }
+async function hash(path) {
+  const digest = createHash('sha256');
+  for await (const bytes of createReadStream(path)) digest.update(bytes);
+  return digest.digest('hex');
+}
 async function download(asset, directory, name) {
   await mkdir(directory, { recursive: true });
   const path = join(directory, name);
-  if (await hash(path).catch(() => null) !== asset.sha256) {
+  if ((await hash(path).catch(() => null)) !== asset.sha256) {
     const response = await fetch(asset.url, { signal: AbortSignal.timeout(180_000) });
     if (!response.ok) throw new Error(`Official installer download failed (${response.status})`);
     await pipeline(Readable.fromWeb(response.body), createWriteStream(path));
-    if (await hash(path) !== asset.sha256) throw new Error(`Installer checksum mismatch: ${name}`);
+    if ((await hash(path)) !== asset.sha256) throw new Error(`Installer checksum mismatch: ${name}`);
   }
   return path;
 }
@@ -29,4 +33,6 @@ await exec(appImage, ['--appimage-extract'], { cwd: obsidianRoot, maxBuffer: 8 *
 const xRoot = resolve('.local/e2e/xserver');
 const deb = await download(lock.xvfb, xRoot, 'xvfb.deb');
 await exec('dpkg-deb', ['-x', deb, join(xRoot, 'root')]);
-console.log('Installed official Obsidian 1.13.7 and Debian Xvfb into .local/e2e. No sandbox flags or root permissions changed.');
+console.log(
+  'Installed official Obsidian 1.13.7 and Debian Xvfb into .local/e2e. No sandbox flags or root permissions changed.',
+);

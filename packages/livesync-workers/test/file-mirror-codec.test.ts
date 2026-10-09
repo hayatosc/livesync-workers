@@ -5,13 +5,17 @@ import { MirrorHash } from "../src/storage/file-mirror-hash.js";
 it("decodes base64 and surrogate pairs across arbitrary source boundaries", () => {
   const decode = (type: "plain" | "newnote", pieces: string[]) => {
     const state = { carry: "", padded: false };
-    return Uint8Array.from(pieces.flatMap(piece => Array.from(decodeMirrorPiece(type, piece, state)))
-      .concat(Array.from(decodeMirrorPiece(type, "", state, true))));
+    return Uint8Array.from(
+      pieces
+        .flatMap((piece) => Array.from(decodeMirrorPiece(type, piece, state)))
+        .concat(Array.from(decodeMirrorPiece(type, "", state, true))),
+    );
   };
   for (const value of ["YQ==", "YWJjZA==", "YWJjZA", "YWJjZGU=", " YW\nJj\tZA==\r ", ""]) {
     for (let offset = 0; offset <= value.length; offset++) {
-      expect(decode("newnote", [value.slice(0, offset), value.slice(offset)]))
-        .toEqual(Uint8Array.from(atob(value), char => char.charCodeAt(0)));
+      expect(decode("newnote", [value.slice(0, offset), value.slice(offset)])).toEqual(
+        Uint8Array.from(atob(value), (char) => char.charCodeAt(0)),
+      );
     }
   }
   for (const text of ["日本語 😀\r\n", "\ud800x\udfff", "\ud800"]) {

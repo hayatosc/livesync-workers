@@ -21,7 +21,8 @@ describe("Workers Intl.Segmenter positional index", () => {
     expect(tokens.map((word) => word.term)).toContain("foo_bar");
     expect(tokens.map((word) => word.term)).toContain("café");
     expect(tokens.find((word) => word.term === "café")?.end).toBe(text.indexOf(" 東京"));
-    for (const token of tokens) expect(text.slice(token.start, token.end).normalize("NFKC").toLowerCase()).toBe(token.term);
+    for (const token of tokens)
+      expect(text.slice(token.start, token.end).normalize("NFKC").toLowerCase()).toBe(token.term);
     expect(tokens.map((word) => word.position)).toEqual(tokens.map((_, i) => i));
   });
   it("ANDs words, matches quoted phrases by consecutive positions, ranks fields and keeps original highlights", async () => {
@@ -57,21 +58,43 @@ it("rebuilds derived search from the recovered DO and rejects stale/deleted hits
   const ref = { tenantId: "search-recovery", vaultId: "stable", databaseName: "display" };
   const stub = bindings.VAULT_DB.get(bindings.VAULT_DB.idFromName(vaultObjectName(ref)));
   await stub.fetch("https://db/", { method: "PUT" });
-  const vault = createVault({ vaultDb: bindings.VAULT_DB, contentBucket: bindings.CONTENT, bucket: bindings.SEARCH, fullText: index }, {
-    ref, policy: DEFAULT_VAULT_POLICY, internalSecret: "integration-secret",
-  });
+  const vault = createVault(
+    { vaultDb: bindings.VAULT_DB, contentBucket: bindings.CONTENT, bucket: bindings.SEARCH, fullText: index },
+    {
+      ref,
+      policy: DEFAULT_VAULT_POLICY,
+      internalSecret: "integration-secret",
+    },
+  );
   await vault.writeNote("Projects/one.md", "# 東京 API\n検索の本文", await hashText(""));
   await vault.writeNote("Other/two.md", "東京の本文", await hashText(""));
-  await runInDurableObject(stub, async (instance: PersistentVaultDO) => { await instance.alarm(); });
-  expect((await vault.grep("東京", 10, "Projects"))).toMatchObject({ status: "ready", hits: [{ path: "Projects/one.md" }] });
-  const note = await (await stub.fetch("https://db/Projects%2Fone.md")).json() as { _rev: string };
+  await runInDurableObject(stub, async (instance: PersistentVaultDO) => {
+    await instance.alarm();
+  });
+  expect(await vault.grep("東京", 10, "Projects")).toMatchObject({
+    status: "ready",
+    hits: [{ path: "Projects/one.md" }],
+  });
+  const note = (await (await stub.fetch("https://db/Projects%2Fone.md")).json()) as { _rev: string };
   await stub.fetch(`https://db/Projects%2Fone.md?rev=${note._rev}`, { method: "DELETE" });
   expect(await vault.grep("API", 10)).toMatchObject({ status: "ready", hits: [] });
   await runInDurableObject(stub, async (_instance, state) => {
-    for (const table of ["docs", "revs", "rev_metadata", "local_docs", "changes", "rev_body_chunks", "meta", "index_state"]) state.storage.sql.exec(`DELETE FROM ${table}`);
+    for (const table of [
+      "docs",
+      "revs",
+      "rev_metadata",
+      "local_docs",
+      "changes",
+      "rev_body_chunks",
+      "meta",
+      "index_state",
+    ])
+      state.storage.sql.exec(`DELETE FROM ${table}`);
   });
   expect(await vault.exists()).toBe(true);
-  await runInDurableObject(stub, async (instance: PersistentVaultDO) => { await instance.alarm(); });
+  await runInDurableObject(stub, async (instance: PersistentVaultDO) => {
+    await instance.alarm();
+  });
   expect(await vault.grep("API", 10)).toMatchObject({ status: "ready", hits: [] });
   expect(await vault.grep("東京", 10)).toMatchObject({ status: "ready", hits: [{ path: "Other/two.md" }] });
 });
@@ -80,11 +103,16 @@ it("retains unchanged notes when an old index version starts a new generation", 
   const ref = { tenantId: "index-upgrade", vaultId: "stable", databaseName: "display" };
   const stub = bindings.VAULT_DB.get(bindings.VAULT_DB.idFromName(vaultObjectName(ref)));
   await stub.fetch("https://db/", { method: "PUT" });
-  const vault = createVault({ vaultDb: bindings.VAULT_DB, contentBucket: bindings.CONTENT, bucket: bindings.SEARCH, fullText: index }, { ref, policy: DEFAULT_VAULT_POLICY, internalSecret: "integration-secret" });
+  const vault = createVault(
+    { vaultDb: bindings.VAULT_DB, contentBucket: bindings.CONTENT, bucket: bindings.SEARCH, fullText: index },
+    { ref, policy: DEFAULT_VAULT_POLICY, internalSecret: "integration-secret" },
+  );
   await vault.writeNote("existing.md", "東京 API", await hashText(""));
   await runInDurableObject(stub, async (instance: PersistentVaultDO, state) => {
     await instance.alarm();
-    expect(state.storage.sql.exec<{ fts_hash: string }>("SELECT fts_hash FROM index_state").one().fts_hash).toBeTruthy();
+    expect(
+      state.storage.sql.exec<{ fts_hash: string }>("SELECT fts_hash FROM index_state").one().fts_hash,
+    ).toBeTruthy();
     state.storage.sql.exec("UPDATE meta SET value = 'old' WHERE key = 'index_version'");
     await instance.alarm();
   });
@@ -99,5 +127,5 @@ it("does not restart a rebuild generation already in progress", async () => {
   await writer.close();
   expect(await index.beginRebuild(ref)).toBe(false);
   await index.completeRebuild(ref);
-  expect((await index.search(ref, "東京", 10)).hits.map(hit => hit.path)).toEqual(["one.md"]);
+  expect((await index.search(ref, "東京", 10)).hits.map((hit) => hit.path)).toEqual(["one.md"]);
 });

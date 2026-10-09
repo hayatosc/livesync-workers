@@ -9,10 +9,13 @@ export async function downloadPlugin() {
     const path = join(directory, name);
     let data = await readFile(path).catch(() => null);
     if (!data || createHash('sha256').update(data).digest('hex') !== checksum) {
-      const response = await fetch(`https://github.com/${lock.repository}/releases/download/${lock.version}/${name}`, { signal: AbortSignal.timeout(60_000) });
+      const response = await fetch(`https://github.com/${lock.repository}/releases/download/${lock.version}/${name}`, {
+        signal: AbortSignal.timeout(60_000),
+      });
       if (!response.ok) throw new Error(`Official plugin download failed (${response.status})`);
       data = Buffer.from(await response.arrayBuffer());
-      if (createHash('sha256').update(data).digest('hex') !== checksum) throw new Error(`Plugin checksum mismatch: ${name}`);
+      if (createHash('sha256').update(data).digest('hex') !== checksum)
+        throw new Error(`Plugin checksum mismatch: ${name}`);
       await writeFile(path, data);
     }
   }

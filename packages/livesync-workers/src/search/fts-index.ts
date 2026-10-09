@@ -139,10 +139,7 @@ export async function markFtsPhase(
     .catch((error) => console.warn("FTS debug marker write failed", error));
 }
 
-export async function readFtsPhase(
-  bucket: R2Bucket,
-  ref: VaultRef,
-): Promise<Record<string, unknown> | null> {
+export async function readFtsPhase(bucket: R2Bucket, ref: VaultRef): Promise<Record<string, unknown> | null> {
   const object = await bucket.get(`${basePrefix(ref)}/debug.json`);
   if (!object) return null;
   try {
@@ -224,12 +221,7 @@ async function sweep(bucket: R2Bucket, ref: VaultRef, manifest: FtsManifest, now
   return { ...manifest, retired };
 }
 
-async function putSegment(
-  bucket: R2Bucket,
-  ref: VaultRef,
-  id: string,
-  files: Map<string, Uint8Array>,
-): Promise<void> {
+async function putSegment(bucket: R2Bucket, ref: VaultRef, id: string, files: Map<string, Uint8Array>): Promise<void> {
   const base = basePrefix(ref);
   for (const [name, body] of files) {
     await bucket.put(`${base}/${id}/${name}`, body);
@@ -586,10 +578,7 @@ export async function ftsSearch(
   const base = basePrefix(ref);
   const cache = options.cache;
 
-  const fetchBytes = async (
-    key: string,
-    range?: { offset: number; length: number },
-  ): Promise<Uint8Array | null> => {
+  const fetchBytes = async (key: string, range?: { offset: number; length: number }): Promise<Uint8Array | null> => {
     const cacheKey = range ? `${key}@${range.offset}+${range.length}` : key;
     if (cache) {
       const cached = await cache.match(cacheKey).catch(() => null);

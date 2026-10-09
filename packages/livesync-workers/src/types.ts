@@ -96,6 +96,7 @@ export interface FullTextIndex {
   readonly sourceHashes?: boolean;
   /** A layout change requests a fresh derived index without re-embedding vectors. */
   readonly indexVersion?: string;
+  // biome-ignore lint/suspicious/noConfusingVoidType: implementations may resolve with nothing or a boolean.
   beginRebuild?(ref: VaultRef): Promise<void | boolean>;
   completeRebuild?(ref: VaultRef): Promise<void>;
   /** Called lazily once per indexing pass that has something to write. */
@@ -112,7 +113,12 @@ export interface FullTextIndex {
     docCount: number;
   }>;
   /** Optional bounded ranking/filtering without requesting the entire corpus of hits. */
-  searchWithOptions?(ref: VaultRef, query: string, limit: number, options: FullTextSearchOptions): ReturnType<FullTextIndex["search"]>;
+  searchWithOptions?(
+    ref: VaultRef,
+    query: string,
+    limit: number,
+    options: FullTextSearchOptions,
+  ): ReturnType<FullTextIndex["search"]>;
   /** Drop everything indexed for the vault (the vault is being deleted). */
   deleteVault(ref: VaultRef): Promise<void>;
 }
@@ -136,7 +142,7 @@ export type VectorIsolation = "namespace" | "metadata";
  * `DurableObjectNamespace<YourVaultDO>`, which a plain `DurableObjectNamespace`
  * does not accept.
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// biome-ignore lint/suspicious/noExplicitAny: accepts namespaces of any Durable Object class.
 export type AnyDurableObjectNamespace = DurableObjectNamespace<any>;
 
 export interface VaultBindings {
@@ -207,7 +213,9 @@ export function parseVaultObjectName(name: string): VaultRef | null {
       const tenantId = decodeURIComponent(parts[1]!);
       const vaultId = decodeURIComponent(parts[2]!);
       return tenantId && vaultId ? { tenantId, vaultId, databaseName: vaultId } : null;
-    } catch { return null; }
+    } catch {
+      return null;
+    }
   }
   const index = name.indexOf(":");
   if (index <= 0) return null;

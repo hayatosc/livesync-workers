@@ -45,7 +45,7 @@ const mcpHandler = withMcpSessionIsolation<Env>(
 const TOO_MANY_ATTEMPTS = "Too many failed attempts from your network. Try again in 15 minutes.";
 
 const appHandler: ExportedHandler<Env> = {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
 
     if (url.pathname === "/livesync" || url.pathname.startsWith("/livesync/")) {
@@ -82,7 +82,13 @@ const appHandler: ExportedHandler<Env> = {
     if (url.pathname === "/" && request.method === "GET") {
       const admin = await isAdmin(request, env);
       const configured = {
-        livesync: (() => { try { return !!setupVaultPassword(env); } catch { return false; } })(),
+        livesync: (() => {
+          try {
+            return !!setupVaultPassword(env);
+          } catch {
+            return false;
+          }
+        })(),
         admin: !!secretValue(env, "ADMIN_PASSWORD"),
         session: !!secretValue(env, "SESSION_SECRET"),
       };
@@ -130,8 +136,7 @@ const appHandler: ExportedHandler<Env> = {
 const oauthProvider = createVaultOAuthProvider<Env>({
   apiHandler: mcpHandler as unknown as ExportedHandler<Env>,
   defaultHandler: appHandler,
-  authenticate: async (request, env) =>
-    (await isAdmin(request, env)) ? { id: "admin", label: "admin" } : null,
+  authenticate: async (request, env) => ((await isAdmin(request, env)) ? { id: "admin", label: "admin" } : null),
   loginRedirect: (request, _env, next) =>
     Response.redirect(`${new URL(request.url).origin}/login?next=${encodeURIComponent(next)}`, 302),
   scopes: VAULT_SCOPES.map((name) => ({
@@ -158,11 +163,7 @@ export default {
         };
         return mcpHandler.fetch(request, env, withProps as unknown as ExecutionContext);
       }
-      return await oauthProvider.fetch(
-        request,
-        env as Parameters<typeof oauthProvider.fetch>[1],
-        ctx,
-      );
+      return await oauthProvider.fetch(request, env as Parameters<typeof oauthProvider.fetch>[1], ctx);
     } catch (error) {
       if (error instanceof ConfigError) {
         return new Response(`Configuration error: ${error.message}`, { status: 500 });

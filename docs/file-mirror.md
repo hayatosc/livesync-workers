@@ -1,7 +1,6 @@
-# Original files in R2
+# R2 上の元ファイル
 
-The Worker automatically saves the latest reconstructable files in
-`CONTENT_BUCKET`, using their original vault-relative paths:
+Worker は、復元できる最新のファイルを、Vault 内の元の相対パスのまま `CONTENT_BUCKET` に自動で保存します。
 
 ```text
 files/v1/<encoded-owner>/<encoded-vaultId>/
@@ -11,107 +10,103 @@ files/v1/<encoded-owner>/<encoded-vaultId>/
   .obsidian/settings.json
 ```
 
-The owner and immutable vault ID are URL-encoded. File paths retain their
-original spelling, case, Unicode characters and folder structure. LiveSync's
-`i:` prefix for internal files is removed. Markdown and other `plain` files
-contain UTF-8 text; `newnote` attachments contain decoded binary bytes, rather
-than JSON or base64. Relative attachment links remain unchanged.
+所有者と不変の Vault ID は URL エンコードします。
+ファイルパスは、元の綴り、大文字と小文字、Unicode 文字、フォルダ構成を保ちます。
+内部ファイルを表す LiveSync の `i:` 接頭辞は取り除きます。
+Markdown などの `plain` ファイルは UTF-8 テキストとして、`newnote` の添付は JSON や base64 ではなくデコードしたバイト列として保存します。
+添付への相対リンクは変更しません。
 
-These objects are **derived copies of the latest winning revisions**. The
-revision objects, commit chain and head under `content/v1/` remain authoritative
-for replication and recovery. Conflicting revisions and historical versions
-remain there; the file mirror contains only the current winner for each path.
-Content GC does not collect the separate `files/v1/` prefix.
+これらのオブジェクトは、**最新の勝者リビジョンから派生したコピー**です。
+レプリケーションと復元の正本は、引き続き `content/v1/` 以下のリビジョンオブジェクト、コミット列、head です。
+競合するリビジョンと過去の版も `content/v1/` に残り、ファイルのミラーにはパスごとの現在の勝者だけが入ります。
+コンテンツの GC は、別の接頭辞である `files/v1/` を回収しません。
 
-## Updates and recovery
+## 更新と復元
 
-DO alarms discover and export files in bounded batches. Once caught up, the
-mirror collects changes for five seconds from the first committed change. Later
-edits do not extend this deadline, and only the latest complete winner for each
-path is exported. Search indexing and authoritative sync commits keep their own
-timing. Initial backfills and queued batches continue without this delay.
+DO の alarm が、書き出すファイルを上限つきのバッチで見つけて書き出します。
+追いついた後は、最初に確定した変更から 5 秒間の変更をまとめます。
+後続の編集でこの期限は延びず、パスごとに最新の完全な勝者だけを書き出します。
+検索索引と、正本の同期コミットは、それぞれ独自のタイミングで動きます。
+初回のバックフィルと、キューに積まれたバッチは、この待ち時間なしで続けます。
 
-Each pass visits at most eight files, handles at most 16 MiB of content and
-issues at most 64 mirror R2 operations, starting no further file after one
-second. Reads and uploads may finish after
-that time budget; files are decoded one part at a time. Checkpoint and search
-work run first. Remaining files stay queued for the next alarm. Creating or editing a file queues a replacement, and
-deletion removes its copy. A changed path removes the old copy and writes the
-new one. Existing vaults are backfilled on their next
-access. A file whose chunks have not arrived waits until the missing chunks are
-received. While an update is incomplete, its last complete copy can remain.
+1 回のパスで扱うのは、最大 8 ファイル、内容 16 MiB、ミラーの R2 操作 64 回までです。
+1 秒を過ぎた後は、新しいファイルを始めません。
+読み取りとアップロードは、この時間予算を過ぎてから終わることがあります。
+ファイルは 1 パートずつデコードします。
+チェックポイントと検索の処理を先に実行します。
+残ったファイルは、次の alarm までキューに残ります。
+ファイルを作成または編集すると置き換えがキューに積まれ、削除するとそのコピーも消えます。
+パスが変わった場合は、古いコピーを消して新しいコピーを書きます。
+既存の Vault は、次にアクセスされたときにバックフィルされます。
+チャンクが届いていないファイルは、欠けているチャンクが届くまで待ちます。
+更新が完了するまでは、最後の完全なコピーが残ることがあります。
 
-Source reads and multipart part uploads release the normal request lock, so
-replication can proceed during those calls. Final PUT/completion holds the lock
-after validating the source revisions, preventing a stale job from publishing
-after a newer committed edit. An edit cancels old multipart work. Upload
-failures are retried without rejecting an already committed sync write or
-preventing search/checkpoint maintenance. Each copy is eventually consistent;
-the folder as a whole is not an atomic snapshot of the vault.
+ソースの読み取りとマルチパートのパートのアップロードの間は、通常のリクエストロックを手放すので、その間もレプリケーションは進みます。
+最後の PUT または完了処理では、ソースのリビジョンを検証した後にロックを保持します。
+これにより、新しい編集が確定した後で、古いジョブが書き出すことを防ぎます。
+編集があると、古いマルチパートの処理は取り消されます。
+アップロードの失敗は再試行し、確定済みの同期書き込みを拒否したり、検索やチェックポイントの保守を止めたりはしません。
+各コピーは結果整合で、フォルダ全体は Vault の不可分なスナップショットではありません。
 
-After rebuilding SQLite from the R2 journal, the mirror scans existing copy keys
-and current documents. It replaces missing or stale copies and removes keys for
-files no longer present. Purging a vault removes its mirrored files while
-preserving other vaults' copies and the existing recovery history.
+R2 のジャーナルから SQLite を再構築した後、ミラーは既存のコピーのキーと現在の文書を走査します。
+欠けているコピーや古いコピーを置き換え、もう存在しないファイルのキーを削除します。
+Vault を purge すると、その Vault のミラーしたファイルを削除します。
+他の Vault のコピーと、既存の復元用の履歴は残します。
 
-`vaultStatus` and `indexStatus` include `index.fileMirror` or `fileMirror`, with:
+`vaultStatus` と `indexStatus` は、`index.fileMirror` または `fileMirror` に次の項目を含みます。
 
-- `prefix`: the vault's file prefix.
-- `saved`: files successfully exported.
-- `pending`: queued files, missing chunks, and retryable storage failures.
-- `errors`: unsupported files and retryable storage failures.
-- `rebuilding`: whether the initial R2/current-document scan is incomplete.
-- `stale`: pending/error paths retaining a previously acknowledged copy.
-- `active`: a resumable job's path, phase, decoded/uploaded bytes and target revision, or `null`.
+- `prefix`：その Vault のファイルの接頭辞
+- `saved`：書き出しに成功したファイル数
+- `pending`：キューにあるファイル、チャンクが欠けているファイル、再試行できる保存失敗
+- `errors`：対応していないファイルと、再試行できる保存失敗
+- `rebuilding`：R2 と現在の文書の初回走査が終わっていないかどうか
+- `stale`：pending または error のうち、以前に確認済みのコピーが残っているパス
+- `active`：再開できるジョブのパス、段階、デコード済みとアップロード済みのバイト数、対象のリビジョン。なければ `null`
 
-The counters describe work discovered so far; additional files can be found in
-later scan batches. During an edit, a previous copy may still exist even though
-the file is counted as pending. Detailed per-file errors are stored in the DO's
-derived `file_mirror_state` table.
+これらの数は、それまでに見つかった処理を表します。
+後の走査バッチで、さらにファイルが見つかることがあります。
+編集中は、ファイルが pending に数えられていても、以前のコピーが残っていることがあります。
+ファイルごとの詳しいエラーは、DO の派生テーブル `file_mirror_state` に保存します。
 
-An authenticated host can request a fresh scan with the internal
-`POST /internal/op` operation `{"op":"filesRebuild"}`. It requires the same
-internal secret and trusted vault identity as other internal operations, and
-returns `{"ok":true,"pending":true}`. It is not a public LiveSync endpoint.
-This also recreates copies manually removed from R2.
+認証済みのホストは、内部の `POST /internal/op` で `{"op":"filesRebuild"}` を送ると、走査をやり直させることができます。
+ほかの内部操作と同じ内部 secret と、信頼された Vault の識別子が必要で、`{"ok":true,"pending":true}` を返します。
+公開の LiveSync エンドポイントではありません。
+R2 から手で削除したコピーも、これで作り直されます。
 
-## Supported files and limits
+## 対応するファイルと上限
 
-The mirror supports the unencrypted, uncompressed `plain` and base64 `newnote`
-documents used by the generated connection settings. Encrypted chunks, encrypted
-inline chunks, compressed data and unsupported binary encodings are not exported
-as if they were original content. They are reported as errors. There is no
-server-side decryption or decompression.
+ミラーが対応するのは、Worker が生成する接続設定で使う、暗号化も圧縮もしていない `plain` と base64 の `newnote` の文書です。
+暗号化されたチャンク、暗号化されたインラインチャンク、圧縮されたデータ、対応していないバイナリの符号化は、元の内容として書き出さずにエラーとして報告します。
+サーバー側での復号や展開は行いません。
 
-Each exported file is limited to **100 MiB of actual decoded bytes**. The
-attachment write API retains its separate 10 MiB limit. Files up to 8 MiB use a
-single PUT; larger files use resumable 8 MiB multipart parts. A revision's JSON
-envelope must fit 4 MiB; legacy whole-file inline revisions exceeding this must
-be split into LiveSync chunks. At most 8,192 source occurrences and 4 MiB of
-manifest descriptors are accepted. Incorrect declared sizes are rejected.
+書き出す各ファイルの上限は、**実際にデコードしたバイト数で 100 MiB** です。
+添付の書き込み API には、これとは別に 10 MiB の上限があります。
+8 MiB 以下のファイルは 1 回の PUT で、それより大きいファイルは再開できる 8 MiB のマルチパートで書き出します。
+リビジョンの JSON の外枠は 4 MiB に収まる必要があります。
+これを超える、ファイル全体をインラインで持つ古いリビジョンは、LiveSync のチャンクに分割する必要があります。
+ソースの参照は 8,192 個まで、マニフェストの記述子は 4 MiB までを受け付けます。
+宣言されたサイズが実際と異なる場合は拒否します。
 
-Invalid paths and keys exceeding R2's
-[1,024-byte key limit](https://developers.cloudflare.com/r2/platform/limits/)
-are rejected. Validation failures retain an older complete copy and leave the
-authoritative revision data intact. Storage errors use persisted jittered
-exponential backoff, up to fifteen minutes; a new source revision requeues them.
+不正なパスと、R2 の [キー長の上限（1,024 バイト）](https://developers.cloudflare.com/r2/platform/limits/) を超えるキーは拒否します。
+検証に失敗しても、以前の完全なコピーと、正本のリビジョンデータはそのまま残ります。
+保存のエラーは、永続化したジッターつきの指数バックオフで、最大 15 分の間隔で再試行します。
+ソースのリビジョンが新しくなると、すぐにキューに戻ります。
 
-Objects have a content type, `mirrorFormat: "2"`, a source fingerprint/revision
-and an optional `mtime` custom metadata field. Small direct PUTs also have a
-SHA-256 `contentHash`. Multipart objects omit `contentHash`: their actual output
-SHA-256 is retained in the derived DO state, avoiding a second source pass or a
-full R2 staging copy. After complete SQLite recovery, an existing matching
-format-2 copy can be adopted with digest unknown. Unknown extensions use
-`application/octet-stream`. See the [large-file implementation specification](file-mirror-large-files.md)
-for recovery, budgets, cost accounting and qualification limits.
+オブジェクトには、content type、`mirrorFormat: "2"`、ソースの指紋とリビジョン、任意の `mtime` をカスタムメタデータとしてつけます。
+小さな直接の PUT には、SHA-256 の `contentHash` もつけます。
+マルチパートのオブジェクトには `contentHash` をつけません。
+実際の出力の SHA-256 は DO の派生状態に保存し、ソースの 2 回目の読み取りや、R2 上での全体のステージングを避けます。
+SQLite を完全に復元した後は、一致する既存の形式 2 のコピーを、ダイジェスト不明のまま採用することがあります。
+不明な拡張子には `application/octet-stream` を使います。
+復元、予算、費用の計算、検証の限界は、[大きなファイルの実装仕様](file-mirror-large-files.md)を参照してください。
 
-Original timestamps are metadata; the R2 upload timestamp reflects the copy's
-upload time.
+元のタイムスタンプはメタデータとして保存します。
+R2 のアップロード時刻は、コピーをアップロードした時刻です。
 
-The mirror uses the existing private content bucket and adds storage and R2
-operations. It does not enable public bucket access or introduce a file download
-endpoint. Bucket credentials grant access to these plain file copies, including
-synced hidden files. Keep the bucket private as for the authoritative data.
+ミラーは既存の非公開のコンテンツバケットを使い、保存容量と R2 の操作が増えます。
+バケットの公開アクセスを有効にしたり、ファイルのダウンロード用エンドポイントを追加したりはしません。
+バケットの認証情報があれば、同期された隠しファイルを含め、これらの平文のコピーを読めます。
+正本と同じく、バケットは非公開にしてください。
 
-For library hosts, set `VaultBindings.fileMirror: true` alongside `contentBucket`
-to enable the same behavior. Hosts that omit it retain their existing behavior.
+ライブラリとして組み込むホストでは、`contentBucket` とあわせて `VaultBindings.fileMirror: true` を指定すると、同じ動作になります。
+指定しないホストの動作は変わりません。

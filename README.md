@@ -9,12 +9,13 @@ Obsidian の Self-hosted LiveSync 互換 API と MCP サーバーを、Cloudflar
 - [セットアップと設定](docs/setup.md)：必要な binding と secret、LiveSync の接続、複数 Vault、MCP、サインインの保護
 - [Cloudflare CLI](docs/cloudflare-cli.md)：cf CLI での開発、デプロイ、ログ調査
 - [保存、復元、移行](docs/r2-operations.md)：保存の確定点、障害時の再生、GC、旧 SQLite からの移行と切り戻し
-- [Original files in R2](docs/file-mirror.md): automatic latest-file copies, progress, recovery, and limits
+- [R2 上の元ファイル](docs/file-mirror.md)：最新ファイルの自動コピー、進捗、復元、上限
 - [リクエスト上限](docs/request-limits.md)：同期リクエストの上限と、413 が返ったときの対処
 - [テストと CI](docs/testing.md)：Workers 統合テスト、公式 CLI と実 Obsidian の E2E
 - [独自 Worker への組み込み](docs/embedding.md)：独自の認証や Vault 管理を持つホストからの利用
 - [更新手順](docs/upgrading.md)：このフォークの変更を保ったまま更新する方法
 - [性能測定の記録](docs/benchmarks/)：ローカル環境での変更前後の比較
+- [残課題](docs/backlog.md)：期限や前提のある作業
 
 ## 構成
 

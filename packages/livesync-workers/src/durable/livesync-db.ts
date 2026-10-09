@@ -1,4 +1,11 @@
-import { REQUEST_LIMITS, BadRequestError, RequestLimitError, readBoundedJson, assertDocumentSize, assertBulkLimits, decodePathSegment } from "../livesync/limits.js";
+import {
+  REQUEST_LIMITS,
+  BadRequestError,
+  RequestLimitError,
+  assertDocumentSize,
+  assertBulkLimits,
+  decodePathSegment,
+} from "../livesync/limits.js";
 import { R2Journal, contentPrefix, type JournalStatement } from "../storage/r2-journal.js";
 import { R2FileMirror, FileMirrorUnsupported } from "../storage/file-mirror.js";
 import { MirrorSourceReader } from "../storage/file-mirror-source.js";
@@ -6,23 +13,7 @@ import { MIRROR_LIMITS, FileMirrorChanged } from "../storage/file-mirror-upload.
 import { mapBatches, limitConcurrency } from "../storage/concurrency.js";
 import { hashText } from "../search/chunk-md.js";
 import { removeNoteVectors, upsertNoteVectors } from "../search/vector-index.js";
-import {
-  appendFtsSegment,
-  compactFtsSegments,
-  deleteFtsIndex,
-  FTS_SETTLED_PHASES,
-  markFtsPhase,
-  planFtsCompaction,
-  planFtsStaleRewrite,
-  readFtsManifest,
-  readFtsPhase,
-  readFtsSegmentDocs,
-  retireFtsSegments,
-  type CompactionPlan,
-  type FtsManifest,
-  type FtsSegment,
-} from "../search/fts-index.js";
-import type { FtsDocInput } from "../search/fts/build.js";
+import { deleteFtsIndex } from "../search/fts-index.js";
 import {
   CHANGES_IDLE_HEADER,
   DB_NAME_HEADER,
@@ -34,8 +25,6 @@ import {
   secretEquals,
 } from "../livesync/http.js";
 import {
-  isHiddenPath,
-  isReservedPath,
   parseVaultObjectName,
   vaultObjectName,
   type FullTextIndex,
@@ -45,578 +34,85 @@ import {
   type VaultPolicy,
   type VaultRef,
 } from "../types.js";
-
-type DocBody = Record<string, unknown>;
-
-type DocRow = {
-  id: string;
-  winning_rev: string | null;
-  deleted: number;
-  updated_seq: number;
-};
-
-type RevRow = {
-  id: string;
-  rev: string;
-  gen: number;
-  parent_rev: string | null;
-  body: string;
-  body_chunked: number;
-  body_available: number;
-  deleted: number;
-  seq: number;
-  rev_history: string | null;
-};
-
-type LocalDocRow = {
-  id: string;
-  rev: string;
-  body: string;
-};
-
-type ChangeRow = {
-  seq: number;
-  id: string;
-  rev: string;
-  deleted: number;
-  revs?: string[];
-};
-
-type ChangeBatch = {
-  rows: ChangeRow[];
-  lastSeq: number;
-  pending: number;
-};
-
-type RevisionMetadata = {
-  soft_deleted: number;
-  path: string | null;
-  size: number | null;
-  mtime: number | null;
-  type: string | null;
-};
-
-type LiveSyncFileRow = {
-  path: string;
-  size: number | null;
-  mtime: number | null;
-  type: string | null;
-};
-
-type Selector = Record<string, unknown>;
-
-type IndexStateRow = {
-  path: string;
-  doc_id: string | null;
-  hash: string | null;
-  chunks: number;
-  pending: number;
-  attempts: number;
-  /** Content hash last written to the full-text index (null = not there yet). */
-  fts_hash: string | null;
-};
-
-type InternalOp = {
-  execute?: unknown;
-  contentType?: unknown;
-  op: string;
-  path?: unknown;
-  paths?: unknown;
-  content?: unknown;
-  expectedBaseHash?: unknown;
-};
-
-const INDEXED_SEQ_META_KEY = "indexed_seq";
-const INDEX_VERSION_META_KEY = "index_version";
-// Bump to force a one-time full re-embed (e.g. when vector metadata gains new fields).
-const CURRENT_INDEX_VERSION = "4";
-const INDEX_BATCH_SIZE = 32;
-const INDEX_ALARM_DELAY_MS = 1_500;
-const INDEX_RETRY_DELAY_MS = 30_000;
-const INDEX_MAX_ATTEMPTS = 20;
-// Newest segment the built-in full-text index wrote (shown as fts.generation).
-const FTS_GENERATION_META_KEY = "fts_generation";
-// Layout of the built-in index this code writes: "2" = per-note segments,
-// "3" = bucketed shards read by range, "4" = same layout, but the build
-// streams (0.5.x) so a "failed" verdict recorded by an earlier build no
-// longer applies, "5" (0.5.2) clears the verdict a pass that indexed nothing
-// used to earn. The whole-vault generation before them had no version
-// meta. A change clears that verdict and arms a maintenance pass, which
-// rewrites what the new code cannot read efficiently.
-const FTS_INDEX_VERSION_META_KEY = "fts_index_version";
-const CURRENT_FTS_INDEX_VERSION = "5";
-const FTS_REBUILD_AT_META_KEY = "fts_rebuild_at";
-// Why the last pass gave up; cleared by the next successful pass.
-const FTS_ERROR_META_KEY = "fts_error";
-// Every full-text pass writes a segment (~18 R2 objects), so wait for the
-// vault to go quiet before writing one for a burst of edits.
-const FTS_BUILD_DEBOUNCE_MS = 2 * 60_000;
-const FTS_BUILD_RETRY_MS = 60_000;
-// One pass indexes at most this much note text (JS code units, what the
-// tokenizer walks) into one segment. Measured 2026-09: ~10 bytes of heap and
-// ~1.5 s of DO CPU per million code units, so a pass stays well under the
-// 128 MB / 30 s Durable Object limits; a big backlog takes several passes.
-const FTS_SEGMENT_MAX_CODE_UNITS = 2_000_000;
-const FTS_SEGMENT_MAX_DOCS = 4_000;
-// Ceiling on the whole index (sum of segment text); passes stop with an
-// explicit error above it. 50M code units is ~120 MB of Japanese Markdown.
-const FTS_MAX_TOTAL_CODE_UNITS = 50_000_000;
-// One note contributes at most this much text (code units): the built-in
-// index takes the first part of a longer note, an external one skips it.
-// Measured 2026-09: a 2M-code-unit note builds in ~65 MB of heap, so this
-// leaves room for the rest of the segment.
-const FTS_MAX_NOTE_CODE_UNITS = 1_000_000;
-// A pass that dies from a memory reset leaves no SQLite trace (the event's
-// writes roll back), so attempts are counted in the R2 phase marker. After
-// this many interrupted attempts the index is disarmed instead of looping.
-const FTS_MAX_BUILD_ATTEMPTS = 3;
-// Compaction merges the two smallest segments once there are more than this
-// many, as long as the merged text stays under the char bound (one merge per
-// alarm event, no re-tokenizing).
-const FTS_COMPACT_MAX_SEGMENTS = 8;
-const FTS_COMPACT_MAX_MERGED_CHARS = 16_000_000;
-// Segments count replaced/deleted versions until compaction drops them, and
-// the size guard counts them too. A segment is rewritten alone once that
-// dead weight is this large (share of its text, and at least this many
-// code units), so a vault that is edited a lot does not grow into the guard.
-const FTS_STALE_REWRITE_MIN_RATIO = 0.25;
-const FTS_STALE_REWRITE_MIN_CHARS = 250_000;
-// Finding stale text means reading every segment's doc list; skip that while
-// the manifest's doc count is within this factor of the live doc count.
-const FTS_STALE_SCAN_DOC_RATIO = 1.2;
-// Set by ftsRebuild: segments built before this are retired once every note
-// has been re-indexed, and the size guard ignores them meanwhile.
-const FTS_REBUILD_EPOCH_META_KEY = "fts_rebuild_epoch";
-// Most candidates one search asks the vault to check against its current state.
-const FTS_RESOLVE_MAX_CANDIDATES = 500;
-// External full-text index (VaultBindings.fullText): notes already
-// vector-indexed but not yet written there (a fresh setup, or after
-// "ftsRebuild") are backfilled this many per alarm run.
-const FTS_BACKLOG_BATCH_SIZE = 16;
-// Chunk documents written by the server. The hash salt is a persisted format
-// detail (chunk ids are content addressed); keep it stable.
-const WRITE_CHUNK_PREFIX = "h:";
-const WRITE_CHUNK_HASH_SALT = "kuro-chunk";
-const WRITE_CHUNK_CODE_UNITS = 100_000;
+import type {
+  ChangeBatch,
+  ChangeRow,
+  DocBody,
+  DocRow,
+  IndexStateRow,
+  InternalOp,
+  LiveSyncFileRow,
+  LocalDocRow,
+  RevRow,
+  RevisionMetadata,
+  Selector,
+} from "./rows.js";
+import {
+  CURRENT_FTS_INDEX_VERSION,
+  CURRENT_INDEX_VERSION,
+  FTS_BACKLOG_BATCH_SIZE,
+  FTS_BUILD_DEBOUNCE_MS,
+  FTS_ERROR_META_KEY,
+  FTS_GENERATION_META_KEY,
+  FTS_INDEX_VERSION_META_KEY,
+  FTS_MAX_NOTE_CODE_UNITS,
+  FTS_REBUILD_AT_META_KEY,
+  FTS_REBUILD_EPOCH_META_KEY,
+  FTS_RESOLVE_MAX_CANDIDATES,
+  INDEXED_SEQ_META_KEY,
+  INDEX_ALARM_DELAY_MS,
+  INDEX_BATCH_SIZE,
+  INDEX_MAX_ATTEMPTS,
+  INDEX_RETRY_DELAY_MS,
+  INDEX_VERSION_META_KEY,
+} from "./settings.js";
+import {
+  ancestorsFromRevisions,
+  bodyWithRevisions,
+  cloneBody,
+  compareWinning,
+  docIdFromBody,
+  newRevision,
+  parseRev,
+  revisionHistory,
+  revisionMetadata,
+  sha1Hex,
+  splitRevisionBody,
+  stableJson,
+  withoutMeta,
+} from "./revisions.js";
+import {
+  docIsDeleted,
+  isIndexableMarkdownPath,
+  isNoteDoc,
+  isSafeVaultPath,
+  noteDocIdForPath,
+  splitNoteContentForChunks,
+  writeChunkId,
+} from "./notes.js";
+import { allDocsKey, boolParam, normalizeSince, readJsonBody } from "./params.js";
+import { matchesMetadata, matchesSelector } from "./selector.js";
+import { BuiltInFullText } from "./full-text.js";
 
 const enc = new TextEncoder();
-const inlineRevisionBodyMaxBytes = 1_000_000;
-const revisionBodyChunkCodeUnits = 250_000;
 
-export function splitRevisionBody(body: string): string[] | null {
-  if (enc.encode(body).byteLength <= inlineRevisionBodyMaxBytes) return null;
-
-  const chunks: string[] = [];
-  for (let start = 0; start < body.length;) {
-    let end = Math.min(start + revisionBodyChunkCodeUnits, body.length);
-    const lastCodeUnit = body.charCodeAt(end - 1);
-    if (end < body.length && lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) {
-      end -= 1;
-    }
-    chunks.push(body.slice(start, end));
-    start = end;
-  }
-  return chunks;
-}
-
-
-function isExcludedByFolders(path: string, excludedFolders: string[]): boolean {
-  const normalized = path.replace(/^\/+|\/+$/g, "");
-  return excludedFolders.some(
-    (folder) => normalized === folder || normalized.startsWith(`${folder}/`),
-  );
-}
-
-function isIndexableMarkdownPath(path: string, policy: VaultPolicy): boolean {
-  return (
-    path.endsWith(".md") &&
-    !isReservedPath(path, policy.reservedPaths) &&
-    !isExcludedByFolders(path, policy.excludedFolders) &&
-    // "i:" marks files LiveSync's hidden file sync carries (".obsidian/…").
-    !(policy.excludeHiddenPaths && (path.startsWith("i:") || isHiddenPath(path)))
-  );
-}
-
-
-async function readJsonBody(request: Request): Promise<Record<string, unknown>> {
-  return readBoundedJson(request);
-}
-
-function isSafeVaultPath(path: string): boolean {
-  if (!path || path.startsWith("/") || path.includes("\\") || /[\u0000-\u001f\u007f]/.test(path)) return false;
-  const segments = path.split("/");
-  return segments.every((segment) => segment && segment !== "." && segment !== "..");
-}
-
-function isNoteDoc(doc: DocBody): doc is DocBody & { path: string } {
-  return typeof doc.path === "string" && doc.type !== "leaf" && doc.type !== "chunkpack";
-}
-
-function docIsDeleted(doc: DocBody): boolean {
-  return doc._deleted === true || doc.deleted === true;
-}
-
-/** Split note content into LiveSync chunk pieces (surrogate-pair safe). */
-export function splitNoteContentForChunks(content: string): string[] {
-  const pieces: string[] = [];
-  for (let start = 0; start < content.length;) {
-    let end = Math.min(start + WRITE_CHUNK_CODE_UNITS, content.length);
-    const lastCodeUnit = content.charCodeAt(end - 1);
-    if (end < content.length && lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff) {
-      end -= 1;
-    }
-    pieces.push(content.slice(start, end));
-    start = end;
-  }
-  return pieces;
-}
-
-async function writeChunkId(piece: string): Promise<string> {
-  const digest = await hashText(`${WRITE_CHUNK_HASH_SALT}\n${piece.length}\n${piece}`);
-  return `${WRITE_CHUNK_PREFIX}k${digest.slice(0, 40)}`;
-}
-
-/**
- * Derive a LiveSync document id for a path the way the plugin does without
- * path obfuscation: ids starting with "_" are prefixed with "/", and ids are
- * lower-cased when the vault appears to be using case-insensitive ids.
- */
-function noteDocIdForPath(path: string, caseInsensitive: boolean): string {
-  let id = caseInsensitive ? path.toLowerCase() : path;
-  if (id.startsWith("_")) id = `/${id}`;
-  return id;
-}
-
-class FtsTooLargeError extends Error {
-  constructor(
-    readonly codeUnits: number,
-    readonly limit: number,
-  ) {
-    super(`FTS rebuild input exceeds ${limit} code units`);
-  }
-}
-
-function revisionMetadata(doc: DocBody): RevisionMetadata {
-  return {
-    soft_deleted: doc.deleted === true ? 1 : 0,
-    path: typeof doc.path === "string" ? doc.path : null,
-    size: typeof doc.size === "number" ? doc.size : null,
-    mtime: typeof doc.mtime === "number" ? doc.mtime : null,
-    type: typeof doc.type === "string" ? doc.type : null,
-  };
-}
-
-function parseRev(rev: string): { gen: number; hash: string } | null {
-  const match = /^(\d+)-(.+)$/.exec(rev);
-  if (!match) return null;
-  return { gen: Number(match[1]), hash: match[2]! };
-}
-
-function withoutMeta(doc: DocBody): DocBody {
-  const out: DocBody = {};
-  for (const [key, value] of Object.entries(doc)) {
-    if (key !== "_rev" && key !== "_revisions" && key !== "_conflicts") {
-      out[key] = value;
-    }
-  }
-  return out;
-}
-
-function stableJson(value: unknown): string {
-  if (value == null || typeof value !== "object") return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  const obj = value as Record<string, unknown>;
-  return `{${Object.keys(obj)
-    .sort()
-    .map((key) => `${JSON.stringify(key)}:${stableJson(obj[key])}`)
-    .join(",")}}`;
-}
-
-async function sha1Hex(text: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-1", enc.encode(text));
-  return [...new Uint8Array(digest)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-async function newRevision(doc: DocBody, parentRev: string | null): Promise<string> {
-  const parent = parentRev ? parseRev(parentRev) : null;
-  const gen = (parent?.gen ?? 0) + 1;
-  const hash = await sha1Hex(`${stableJson(withoutMeta(doc))}\n${parentRev ?? ""}`);
-  return `${gen}-${hash.slice(0, 32)}`;
-}
-
-function docIdFromBody(doc: DocBody): string | null {
-  return typeof doc._id === "string" && doc._id ? doc._id : null;
-}
-
-function cloneBody(row: RevRow): DocBody {
-  return JSON.parse(row.body) as DocBody;
-}
-
-function normalizeSince(value: unknown, currentSeq: number): number {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && /^\d+$/.test(value)) return Number(value);
-  if (value === "now") return currentSeq;
-  return 0;
-}
-
-
-function boolParam(value: unknown): boolean {
-  return value === true || value === "true";
-}
-
-function allDocsKey(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  if (!value.startsWith('"')) return value;
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return typeof parsed === "string" ? parsed : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Ancestors of a replicated revision, nearest first, from its `_revisions`
- * path (`ids[0]` is the revision itself). Replicators send only leaves, so
- * the generations in between must be recorded from this list or the
- * previously stored ancestor stays a leaf and surfaces as a conflict.
- */
-function ancestorsFromRevisions(doc: DocBody): string[] {
-  const rev = typeof doc._rev === "string" ? parseRev(doc._rev) : null;
-  const revisions = doc._revisions as
-    | { start?: unknown; ids?: unknown }
-    | undefined;
-  if (!rev || !revisions || !Array.isArray(revisions.ids)) return [];
-  const ids = revisions.ids.filter((id): id is string => typeof id === "string");
-  const ancestors: string[] = [];
-  for (let index = 1; index < ids.length && rev.gen - index >= 1; index += 1) {
-    ancestors.push(`${rev.gen - index}-${ids[index]}`);
-  }
-  return ancestors;
-}
-
-function revisionHistory(doc: DocBody, rev: string, parentHistory?: string | null): string {
-  const existing = doc._revisions;
-  if (existing && typeof existing === "object") return JSON.stringify(existing);
-  const parsed = parseRev(rev);
-  if (!parsed) return JSON.stringify({ start: 1, ids: [rev] });
-  if (parentHistory) {
-    try {
-      const parent = JSON.parse(parentHistory) as { ids?: unknown };
-      const parentIds = Array.isArray(parent.ids)
-        ? parent.ids.filter((id): id is string => typeof id === "string")
-        : [];
-      return JSON.stringify({ start: parsed.gen, ids: [parsed.hash, ...parentIds] });
-    } catch {
-      // Fall through to a single-revision history.
-    }
-  }
-  return JSON.stringify({ start: parsed.gen, ids: [parsed.hash] });
-}
-
-function bodyWithRevisions(row: RevRow): DocBody {
-  const body = cloneBody(row);
-  if (row.rev_history) {
-    body._revisions = JSON.parse(row.rev_history);
-  }
-  return body;
-}
-
-function compareWinning(a: RevRow, b: RevRow): number {
-  if (a.deleted !== b.deleted) return a.deleted ? -1 : 1;
-  if (a.gen !== b.gen) return a.gen - b.gen;
-  return compareCodePoints(a.rev, b.rev);
-}
-
-function compareCodePoints(a: string, b: string): number {
-  const aPoints = Array.from(a, (char) => char.codePointAt(0)!);
-  const bPoints = Array.from(b, (char) => char.codePointAt(0)!);
-  const length = Math.min(aPoints.length, bPoints.length);
-  for (let index = 0; index < length; index += 1) {
-    if (aPoints[index] !== bPoints[index]) return aPoints[index]! - bPoints[index]!;
-  }
-  return aPoints.length - bPoints.length;
-}
-
-function getField(doc: DocBody, field: string): unknown {
-  if (field === "_id") return doc._id;
-  if (field === "_rev") return doc._rev;
-  return field.split(".").reduce<unknown>((value, key) => {
-    if (value == null || typeof value !== "object") return undefined;
-    return (value as Record<string, unknown>)[key];
-  }, doc);
-}
-
-function compareValues(a: unknown, b: unknown): number {
-  if (typeof a === "number" && typeof b === "number") return a - b;
-  return compareCodePoints(String(a), String(b));
-}
-
-const MAX_SELECTOR_REGEX_LENGTH = 256;
-
-/**
- * Whether a pattern has the shapes that make backtracking blow up: a
- * quantified group whose contents, at any depth, repeat or alternate
- * ((a+)+, ((a+))+, (a|aa)*), and backreferences. A conservative check, not
- * a proof: chains of plain quantifiers such as a*a*a* still cost polynomial time.
- */
-function hasNestedRepetition(pattern: string): boolean {
-  // One entry per open group: whether its contents repeat or alternate.
-  const groups: boolean[] = [];
-  const isQuantifier = (index: number) => {
-    const c = pattern[index];
-    return c === "*" || c === "+" || c === "?" || (c === "{" && /\d/.test(pattern[index + 1] ?? ""));
-  };
-  let inClass = false;
-  for (let i = 0; i < pattern.length; i++) {
-    const c = pattern[i]!;
-    if (c === "\\") {
-      const next = pattern[i + 1] ?? "";
-      if (!inClass && (/[1-9]/.test(next) || next === "k")) return true;
-      i++;
-    } else if (inClass) {
-      if (c === "]") inClass = false;
-    } else if (c === "[") {
-      inClass = true;
-    } else if (c === "(") {
-      groups.push(false);
-      // Skip the ?: ?= ?! ?<= ?<! ?<name> prefix, whose "?" is not a quantifier.
-      if (pattern[i + 1] === "?") {
-        if (pattern[i + 2] === "<" && pattern[i + 3] !== "=" && pattern[i + 3] !== "!") {
-          const end = pattern.indexOf(">", i);
-          i = end < 0 ? pattern.length : end;
-        } else {
-          i += pattern[i + 2] === "<" ? 3 : 2;
-        }
-      }
-    } else if (c === ")") {
-      const inner = groups.pop() ?? false;
-      const quantified = isQuantifier(i + 1);
-      if (inner && quantified) return true;
-      if (groups.length && (inner || quantified)) groups[groups.length - 1] = true;
-    } else if ((c === "|" || isQuantifier(i)) && groups.length) {
-      groups[groups.length - 1] = true;
-    }
-  }
-  return false;
-}
-
-const selectorRegexCache = new Map<string, RegExp | null>();
-
-/**
- * Compile a Mango $regex once per pattern. Over-long patterns and nested
- * quantifiers never match, so one selector cannot easily pin the vault
- * object's CPU. LiveSync itself does not use $regex.
- */
-function selectorRegex(pattern: string): RegExp | null {
-  if (selectorRegexCache.has(pattern)) return selectorRegexCache.get(pattern)!;
-  let compiled: RegExp | null = null;
-  if (pattern.length <= MAX_SELECTOR_REGEX_LENGTH && !hasNestedRepetition(pattern)) {
-    try {
-      compiled = new RegExp(pattern);
-    } catch {
-      compiled = null;
-    }
-  }
-  if (selectorRegexCache.size >= 64) selectorRegexCache.clear();
-  selectorRegexCache.set(pattern, compiled);
-  return compiled;
-}
-
-function matchesCondition(value: unknown, condition: unknown): boolean {
-  if (condition == null || typeof condition !== "object" || Array.isArray(condition)) {
-    return value === condition;
-  }
-  for (const [op, expected] of Object.entries(condition as Record<string, unknown>)) {
-    switch (op) {
-      case "$eq":
-        if (value !== expected) return false;
-        break;
-      case "$ne":
-        if (value === expected) return false;
-        break;
-      case "$lt":
-        if (compareValues(value, expected) >= 0) return false;
-        break;
-      case "$lte":
-        if (compareValues(value, expected) > 0) return false;
-        break;
-      case "$gt":
-        if (compareValues(value, expected) <= 0) return false;
-        break;
-      case "$gte":
-        if (compareValues(value, expected) < 0) return false;
-        break;
-      case "$exists":
-        if ((value !== undefined) !== Boolean(expected)) return false;
-        break;
-      case "$in":
-        if (!Array.isArray(expected) || !expected.includes(value)) return false;
-        break;
-      case "$nin":
-        if (Array.isArray(expected) && expected.includes(value)) return false;
-        break;
-      case "$regex":
-        if (typeof value !== "string" || typeof expected !== "string") return false;
-        if (!selectorRegex(expected)?.test(value)) return false;
-        break;
-      default:
-        return false;
-    }
-  }
-  return true;
-}
-
-function matchesSelector(doc: DocBody, selector: Selector | null): boolean {
-  if (!selector || Object.keys(selector).length === 0) return true;
-  for (const [field, condition] of Object.entries(selector)) {
-    if (field === "$and") {
-      if (!Array.isArray(condition)) return false;
-      if (!condition.every((item) => matchesSelector(doc, item as Selector))) {
-        return false;
-      }
-      continue;
-    }
-    if (field === "$or") {
-      if (!Array.isArray(condition)) return false;
-      if (!condition.some((item) => matchesSelector(doc, item as Selector))) {
-        return false;
-      }
-      continue;
-    }
-    if (!matchesCondition(getField(doc, field), condition)) return false;
-  }
-  return true;
-}
-
-/** Unknown fields need the body; SQL NULL does not distinguish missing, null or a non-scalar value. */
-function matchesMetadata(row: RevRow, metadata: RevisionMetadata | null, selector: Selector): boolean | undefined {
-  if (!selector || Object.keys(selector).length === 0) return true;
-  let unknown = false;
-  for (const [field, condition] of Object.entries(selector)) {
-    let matched: boolean | undefined;
-    if (field === "$and" || field === "$or") {
-      if (!Array.isArray(condition)) return false;
-      const parts = condition.map(item => matchesMetadata(row, metadata, item as Selector));
-      matched = field === "$and"
-        ? parts.includes(false) ? false : parts.includes(undefined) ? undefined : true
-        : parts.includes(true) ? true : parts.includes(undefined) ? undefined : false;
-    } else {
-      const value = field === "_id" ? row.id : field === "_rev" ? row.rev
-        : field === "_deleted" && row.deleted ? true
-        : field === "deleted" && metadata?.soft_deleted ? true
-        : field === "type" || field === "path" || field === "size" || field === "mtime" ? metadata?.[field]
-        : undefined;
-      matched = value == null ? undefined : matchesCondition(value, condition);
-    }
-    if (matched === false) return false;
-    if (matched === undefined) unknown = true;
-  }
-  return unknown ? undefined : true;
-}
-
+const CHECKPOINT_KEYS: Record<string, string[]> = {
+  meta: ["key"],
+  revs: ["id", "rev"],
+  rev_metadata: ["id", "rev"],
+  docs: ["id"],
+  local_docs: ["id"],
+  changes: ["seq"],
+  index_state: ["path"],
+};
+type CheckpointWork = {
+  phase: "compact" | "scan" | "dirty";
+  startedSeq: number;
+  table: number;
+  cursor: number;
+  references: Array<{ r2: string }>;
+  previous: { r2: string } | null;
+};
 
 /**
  * Durable Object holding one LiveSync database (vault) in SQLite and keeping
@@ -628,19 +124,6 @@ function matchesMetadata(row: RevRow, metadata: RevisionMetadata | null, selecto
  *     protected bindings() { return myBindings(this.env); }
  *   }
  */
-const CHECKPOINT_KEYS: Record<string, string[]> = {
-  meta: ["key"], revs: ["id", "rev"], rev_metadata: ["id", "rev"], docs: ["id"],
-  local_docs: ["id"], changes: ["seq"], index_state: ["path"],
-};
-type CheckpointWork = {
-  phase: "compact" | "scan" | "dirty";
-  startedSeq: number;
-  table: number;
-  cursor: number;
-  references: Array<{ r2: string }>;
-  previous: { r2: string } | null;
-};
-
 export abstract class LiveSyncVaultDO<TEnv = unknown> {
   /** Last successful setAlarm, as a cheap time-based throttle (never a hard gate). */
   private lastIndexScheduleAt = 0;
@@ -656,16 +139,25 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const supplied = request?.headers.get(VAULT_REF_HEADER);
     let ref: VaultRef | undefined;
     if (supplied) {
-      if (!secretEquals(request!.headers.get(INTERNAL_SECRET_HEADER), this.host().internalSecret)) throw new Error("Untrusted vault identity");
+      if (!secretEquals(request!.headers.get(INTERNAL_SECRET_HEADER), this.host().internalSecret))
+        throw new Error("Untrusted vault identity");
       ref = JSON.parse(decodeURIComponent(supplied)) as VaultRef;
-      if (typeof ref.tenantId !== "string" || !ref.tenantId || typeof ref.databaseName !== "string" || !ref.databaseName || (ref.vaultId !== undefined && (typeof ref.vaultId !== "string" || !ref.vaultId))) throw new Error("Invalid vault identity");
+      if (
+        typeof ref.tenantId !== "string" ||
+        !ref.tenantId ||
+        typeof ref.databaseName !== "string" ||
+        !ref.databaseName ||
+        (ref.vaultId !== undefined && (typeof ref.vaultId !== "string" || !ref.vaultId))
+      )
+        throw new Error("Invalid vault identity");
       const name = (this.bindings().objectName ?? vaultObjectName)(ref);
-      if (!this.bindings().vaultDb.idFromName(name).equals(this.ctx.id)) throw new Error("Vault identity does not match this object");
+      if (!this.bindings().vaultDb.idFromName(name).equals(this.ctx.id))
+        throw new Error("Vault identity does not match this object");
       await this.host().loadVaultPolicy(ref);
       this.resolvedVaultRef = ref;
       await this.ctx.storage.put("livesync_vault_identity", ref);
     } else if (!this.resolvedVaultRef) {
-      this.resolvedVaultRef = await this.ctx.storage.get<VaultRef>("livesync_vault_identity") ?? null;
+      this.resolvedVaultRef = (await this.ctx.storage.get<VaultRef>("livesync_vault_identity")) ?? null;
     }
     if (this.bindings().contentBucket && !this.vaultRef()) throw new Error("Persistent vault identity unavailable");
   }
@@ -676,7 +168,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const ref = this.vaultRef();
     if (!ref) throw new Error("R2 storage requires a named vault DO");
     const prefix = contentPrefix(ref.tenantId, ref.vaultId ?? ref.databaseName);
-    if (!this.contentJournal || this.contentJournal.bucket !== bucket || this.contentJournal.prefix !== prefix) this.contentJournal = new R2Journal(bucket, prefix, 3);
+    if (!this.contentJournal || this.contentJournal.bucket !== bucket || this.contentJournal.prefix !== prefix)
+      this.contentJournal = new R2Journal(bucket, prefix, 3);
     return this.contentJournal;
   }
 
@@ -684,13 +177,20 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const bindings = this.bindings();
     const ref = this.vaultRef();
     return bindings.fileMirror && bindings.contentBucket && ref
-      ? new R2FileMirror(this.ctx.storage, bindings.contentBucket, ref) : null;
+      ? new R2FileMirror(this.ctx.storage, bindings.contentBucket, ref)
+      : null;
   }
 
-  private sqlExec<T extends Record<string, SqlStorageValue> = Record<string, SqlStorageValue>>(query: string, ...args: unknown[]): SqlStorageCursor<T> {
+  private sqlExec<T extends Record<string, SqlStorageValue> = Record<string, SqlStorageValue>>(
+    query: string,
+    ...args: unknown[]
+  ): SqlStorageCursor<T> {
     const cursor = this.ctx.storage.sql.exec<T>(query, ...args);
-    if (this.statements && /^(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(query.trim()) &&
-        /\b(meta|docs|revs|rev_metadata|local_docs|changes|rev_body_chunks)\b/.test(query)) {
+    if (
+      this.statements &&
+      /^(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(query.trim()) &&
+      /\b(meta|docs|revs|rev_metadata|local_docs|changes|rev_body_chunks)\b/.test(query)
+    ) {
       this.statements.push({ sql: query, args: args as Array<string | number | null> });
     }
     return cursor;
@@ -699,9 +199,15 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   private async exclusive<T>(operation: () => Promise<T>): Promise<T> {
     const previous = this.writes;
     let release!: () => void;
-    this.writes = new Promise<void>((resolve) => { release = resolve; });
+    this.writes = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     await previous;
-    try { return await operation(); } finally { release(); }
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   private async restoreJournal(force = false): Promise<void> {
@@ -722,13 +228,26 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const clear = () => {
       this.sqlExec("DELETE FROM checkpoint_work");
       this.sqlExec("DELETE FROM checkpoint_dirty");
-      for (const table of ["docs", "revs", "rev_metadata", "local_docs", "changes", "rev_body_chunks", "meta", "index_state"]) this.sqlExec(`DELETE FROM ${table}`);
+      for (const table of [
+        "docs",
+        "revs",
+        "rev_metadata",
+        "local_docs",
+        "changes",
+        "rev_body_chunks",
+        "meta",
+        "index_state",
+      ])
+        this.sqlExec(`DELETE FROM ${table}`);
     };
     let fullReset = !applied;
     if (!applied) this.ctx.storage.transactionSync(clear);
     for await (const batch of journal.replay(head, applied)) {
       this.ctx.storage.transactionSync(() => {
-        if (batch.reset) { clear(); fullReset = true; }
+        if (batch.reset) {
+          clear();
+          fullReset = true;
+        }
         for (const statement of batch.statements) this.sqlExec(statement.sql, ...statement.args);
         if (batch.commit) this.setMeta("r2_applied_head_v3", batch.commit);
       });
@@ -745,27 +264,43 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
 
   private checkpointWork(): CheckpointWork | null {
     const row = this.first<{ state: string }>("SELECT state FROM checkpoint_work WHERE id = 1");
-    return row ? JSON.parse(row.state) as CheckpointWork : null;
+    return row ? (JSON.parse(row.state) as CheckpointWork) : null;
   }
 
   private saveCheckpointWork(work: CheckpointWork): void {
-    this.sqlExec("INSERT INTO checkpoint_work (id,state) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state", JSON.stringify(work));
+    this.sqlExec(
+      "INSERT INTO checkpoint_work (id,state) VALUES (1,?) ON CONFLICT(id) DO UPDATE SET state=excluded.state",
+      JSON.stringify(work),
+    );
   }
 
   private async requestCheckpoint(schedule = true): Promise<void> {
-    if (!this.checkpointWork()) this.saveCheckpointWork({ phase: "compact", startedSeq: this.currentSeq(), table: 0, cursor: 0, references: [], previous: null });
+    if (!this.checkpointWork())
+      this.saveCheckpointWork({
+        phase: "compact",
+        startedSeq: this.currentSeq(),
+        table: 0,
+        cursor: 0,
+        references: [],
+        previous: null,
+      });
     if (schedule) await this.scheduleIndexing(25);
   }
 
   private snapshotRow(table: string, row: Record<string, SqlStorageValue>): JournalStatement {
     const columns = Object.keys(row);
-    return { sql: `INSERT OR REPLACE INTO ${table} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`, args: Object.values(row) as JournalStatement["args"] };
+    return {
+      sql: `INSERT OR REPLACE INTO ${table} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`,
+      args: Object.values(row) as JournalStatement["args"],
+    };
   }
 
   private async checkpointPage(work: CheckpointWork, statements: JournalStatement[]): Promise<void> {
     work.references.push({ r2: await this.journal()!.putBody(JSON.stringify({ statements })) });
     if (work.references.length === 128) {
-      work.previous = { r2: await this.journal()!.putBody(JSON.stringify({ references: work.references, previous: work.previous })) };
+      work.previous = {
+        r2: await this.journal()!.putBody(JSON.stringify({ references: work.references, previous: work.previous })),
+      };
       work.references = [];
     }
   }
@@ -781,26 +316,42 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         this.statements = [];
         canonicalChanged = true;
         // Normalize one legacy history per event, keeping even 2 MB rows bounded.
-        const legacy = this.first<RevRow>(`SELECT id,rev,rev_history FROM revs WHERE rev_history IS NOT NULL AND rev_history NOT LIKE '{"r2":%' LIMIT 1`);
+        const legacy = this.first<RevRow>(
+          `SELECT id,rev,rev_history FROM revs WHERE rev_history IS NOT NULL AND rev_history NOT LIKE '{"r2":%' LIMIT 1`,
+        );
         if (legacy) {
           const r2 = await journal.putBody(legacy.rev_history!);
-          this.sqlExec("UPDATE revs SET rev_history=? WHERE id=? AND rev=?", JSON.stringify({ r2 }), legacy.id, legacy.rev);
+          this.sqlExec(
+            "UPDATE revs SET rev_history=? WHERE id=? AND rev=?",
+            JSON.stringify({ r2 }),
+            legacy.id,
+            legacy.rev,
+          );
         } else {
-          const rows = this.rows<RevRow>(`SELECT r.* FROM revs r WHERE r.seq <= ? AND EXISTS (SELECT 1 FROM revs child WHERE child.id=r.id AND child.parent_rev=r.rev) ORDER BY r.gen,r.id,r.rev LIMIT 32`, work.startedSeq);
-          const groups = new Map<string,RevRow[]>();
-          for (const row of rows) (groups.get(row.id) ?? (groups.set(row.id,[]),groups.get(row.id)!)).push(row);
+          const rows = this.rows<RevRow>(
+            `SELECT r.* FROM revs r WHERE r.seq <= ? AND EXISTS (SELECT 1 FROM revs child WHERE child.id=r.id AND child.parent_rev=r.rev) ORDER BY r.gen,r.id,r.rev LIMIT 32`,
+            work.startedSeq,
+          );
+          const groups = new Map<string, RevRow[]>();
+          for (const row of rows) {
+            const group = groups.get(row.id);
+            if (group) group.push(row);
+            else groups.set(row.id, [row]);
+          }
           const entries = [...groups];
-          for (let i=0; i<entries.length; i+=6) {
-            const results = await Promise.allSettled(entries.slice(i,i+6).map(([id,records]) => this.archiveRows(id,records)));
-            const failure = results.find(result => result.status === "rejected");
+          for (let i = 0; i < entries.length; i += 6) {
+            const results = await Promise.allSettled(
+              entries.slice(i, i + 6).map(([id, records]) => this.archiveRows(id, records)),
+            );
+            const failure = results.find((result) => result.status === "rejected");
             if (failure?.status === "rejected") throw failure.reason;
           }
           for (const row of rows) {
-            this.sqlExec("DELETE FROM rev_metadata WHERE id=? AND rev=?", row.id,row.rev);
-            this.sqlExec("DELETE FROM revs WHERE id=? AND rev=?", row.id,row.rev);
+            this.sqlExec("DELETE FROM rev_metadata WHERE id=? AND rev=?", row.id, row.rev);
+            this.sqlExec("DELETE FROM revs WHERE id=? AND rev=?", row.id, row.rev);
           }
           if (!rows.length) {
-            this.setMeta("monotonic_seq",String(this.currentSeq()));
+            this.setMeta("monotonic_seq", String(this.currentSeq()));
             this.sqlExec("DELETE FROM changes WHERE seq NOT IN (SELECT MAX(seq) FROM changes GROUP BY id)");
             work.phase = "scan";
           }
@@ -808,8 +359,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         const statements = this.statements!;
         this.statements = null;
         if (statements.length) {
-          this.journalHead = await journal.commit(statements,this.journalHead);
-          this.setMeta("r2_applied_head_v3",this.journalHead);
+          this.journalHead = await journal.commit(statements, this.journalHead);
+          this.setMeta("r2_applied_head_v3", this.journalHead);
         }
         this.saveCheckpointWork(work);
         return;
@@ -817,50 +368,67 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       if (work.phase === "scan") {
         const tables = Object.keys(CHECKPOINT_KEYS);
         const table = tables[work.table]!;
-        const rows = this.rows<Record<string, SqlStorageValue>>(`SELECT rowid AS snapshot_rowid,* FROM ${table} WHERE rowid > ? ORDER BY rowid LIMIT 128`,work.cursor);
+        const rows = this.rows<Record<string, SqlStorageValue>>(
+          `SELECT rowid AS snapshot_rowid,* FROM ${table} WHERE rowid > ? ORDER BY rowid LIMIT 128`,
+          work.cursor,
+        );
         const statements: JournalStatement[] = [];
         for (const source of rows) {
           work.cursor = Number(source.snapshot_rowid);
           const { snapshot_rowid: _, ...row } = source;
           if (table === "meta" && ["r2_applied_head_v3", "maintenance_turn"].includes(String(row.key))) continue;
-          statements.push(this.snapshotRow(table,row));
+          statements.push(this.snapshotRow(table, row));
         }
-        if (statements.length) await this.checkpointPage(work,statements);
+        if (statements.length) await this.checkpointPage(work, statements);
         if (rows.length < 128) {
-          work.table++; work.cursor = 0;
+          work.table++;
+          work.cursor = 0;
           if (work.table === tables.length) work.phase = "dirty";
         }
         this.saveCheckpointWork(work);
         return;
       }
-      const dirty = this.rows<{ table_name: string; row_key: string }>("SELECT table_name,row_key FROM checkpoint_dirty ORDER BY table_name,row_key LIMIT 128");
+      const dirty = this.rows<{ table_name: string; row_key: string }>(
+        "SELECT table_name,row_key FROM checkpoint_dirty ORDER BY table_name,row_key LIMIT 128",
+      );
       if (dirty.length) {
-        const statements = dirty.map(({table_name: table,row_key}) => {
+        const statements = dirty.map(({ table_name: table, row_key }) => {
           const keys = CHECKPOINT_KEYS[table]!;
           const args = JSON.parse(row_key) as JournalStatement["args"];
-          const where = keys.map(key => `${key}=?`).join(" AND ");
-          const row = this.first<Record<string,SqlStorageValue>>(`SELECT * FROM ${table} WHERE ${where}`,...args);
-          return row ? this.snapshotRow(table,row) : { sql: `DELETE FROM ${table} WHERE ${where}`,args };
+          const where = keys.map((key) => `${key}=?`).join(" AND ");
+          const row = this.first<Record<string, SqlStorageValue>>(`SELECT * FROM ${table} WHERE ${where}`, ...args);
+          return row ? this.snapshotRow(table, row) : { sql: `DELETE FROM ${table} WHERE ${where}`, args };
         });
-        await this.checkpointPage(work,statements);
+        await this.checkpointPage(work, statements);
         // The cursor/root and consumed changes advance atomically after immutable R2 writes.
         this.ctx.storage.transactionSync(() => {
-          for (const row of dirty) this.sqlExec("DELETE FROM checkpoint_dirty WHERE table_name=? AND row_key=?",row.table_name,row.row_key);
+          for (const row of dirty)
+            this.sqlExec("DELETE FROM checkpoint_dirty WHERE table_name=? AND row_key=?", row.table_name, row.row_key);
           this.saveCheckpointWork(work);
         });
         return;
       }
       // No input can mutate SQLite during this exclusive event. The final overlay
       // records the compaction watermark, and the head CAS publishes that exact state.
-      await this.checkpointPage(work,[{ sql:"INSERT OR REPLACE INTO meta (key,value) VALUES (?,?)",args:["checkpoint_seq",String(work.startedSeq)] }]);
-      const checkpoint = { r2: await journal.putBody(JSON.stringify({ references: work.references,previous:work.previous,ordered:true })), format: 2 as const };
+      await this.checkpointPage(work, [
+        {
+          sql: "INSERT OR REPLACE INTO meta (key,value) VALUES (?,?)",
+          args: ["checkpoint_seq", String(work.startedSeq)],
+        },
+      ]);
+      const checkpoint = {
+        r2: await journal.putBody(
+          JSON.stringify({ references: work.references, previous: work.previous, ordered: true }),
+        ),
+        format: 2 as const,
+      };
       canonicalChanged = true;
-      this.journalHead = await journal.commit([],this.journalHead,checkpoint);
+      this.journalHead = await journal.commit([], this.journalHead, checkpoint);
       this.ctx.storage.transactionSync(() => {
         this.sqlExec("DELETE FROM checkpoint_work");
         this.sqlExec("DELETE FROM checkpoint_dirty");
-        this.setMeta("checkpoint_seq",String(work.startedSeq));
-        this.setMeta("r2_applied_head_v3",this.journalHead!);
+        this.setMeta("checkpoint_seq", String(work.startedSeq));
+        this.setMeta("r2_applied_head_v3", this.journalHead!);
       });
     } catch (error) {
       this.statements = null;
@@ -879,10 +447,16 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     // Preserve 128-record archive pages despite smaller maintenance slices.
     // Replacing an immutable page keeps every older version in the journal.
     if (previous) {
-      const page = JSON.parse(await journal.body(previous.r2)) as { records: RevRow[]; previous: { r2: string } | null };
-      const incoming = new Set(records.map(record => record.rev));
-      const merged = [...records, ...page.records.filter(record => !incoming.has(record.rev))];
-      if (merged.length <= 128) { records = merged; previous = page.previous; }
+      const page = JSON.parse(await journal.body(previous.r2)) as {
+        records: RevRow[];
+        previous: { r2: string } | null;
+      };
+      const incoming = new Set(records.map((record) => record.rev));
+      const merged = [...records, ...page.records.filter((record) => !incoming.has(record.rev))];
+      if (merged.length <= 128) {
+        records = merged;
+        previous = page.previous;
+      }
     }
     const r2 = await journal.putBody(JSON.stringify({ records, previous }));
     this.setMeta(`archive:${id}`, JSON.stringify({ r2 }));
@@ -901,7 +475,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       if (seen.has(key)) throw new Error("Revision archive cycle");
       seen.add(key);
       const page = JSON.parse(await journal.body(key)) as { records: RevRow[]; previous: { r2: string } | null };
-      const row = page.records.find(row => row.rev === rev);
+      const row = page.records.find((row) => row.rev === rev);
       if (row) return row;
       pointer = page.previous ? JSON.stringify(page.previous) : null;
     }
@@ -910,7 +484,13 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
 
   private checkpointProgress() {
     const work = this.checkpointWork();
-    return work ? { phase: work.phase, startedSeq: work.startedSeq, dirtyKeys: this.first<{ count: number }>("SELECT COUNT(*) AS count FROM checkpoint_dirty")!.count } : null;
+    return work
+      ? {
+          phase: work.phase,
+          startedSeq: work.startedSeq,
+          dirtyKeys: this.first<{ count: number }>("SELECT COUNT(*) AS count FROM checkpoint_dirty")!.count,
+        }
+      : null;
   }
 
   private capacity() {
@@ -919,7 +499,13 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const usedBytes = bytes;
     const limitBytes = this.bindings().sqliteMaxBytes ?? 900_000_000;
     const headroomBytes = this.bindings().sqliteHeadroomBytes ?? 100_000_000;
-    return { databaseSize: bytes, usedBytes, limitBytes, headroomBytes, writable: usedBytes < limitBytes - headroomBytes };
+    return {
+      databaseSize: bytes,
+      usedBytes,
+      limitBytes,
+      headroomBytes,
+      writable: usedBytes < limitBytes - headroomBytes,
+    };
   }
 
   private async migrateLegacy(request: Request): Promise<Response> {
@@ -928,10 +514,12 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     if (!bucket || !ref) return couchError(409, "migration_unavailable", "Content bucket and vault identity required");
     const body = await readJsonBody(request);
     const targetVaultId = typeof body.targetVaultId === "string" ? body.targetVaultId : "";
-    if (!targetVaultId || targetVaultId.length > 128) return couchError(400, "bad_request", "Immutable targetVaultId required");
+    if (!targetVaultId || targetVaultId.length > 128)
+      return couchError(400, "bad_request", "Immutable targetVaultId required");
     const journal = new R2Journal(bucket, contentPrefix(ref.tenantId, targetVaultId));
     if ((await journal.head()).commit) return couchError(409, "conflict", "Destination already has persistent data");
-    if (this.first(`SELECT 1 FROM revs WHERE body_chunked = 2 LIMIT 1`)) return couchError(409, "conflict", "Source is already R2-backed; vault IDs are immutable");
+    if (this.first(`SELECT 1 FROM revs WHERE body_chunked = 2 LIMIT 1`))
+      return couchError(409, "conflict", "Source is already R2-backed; vault IDs are immutable");
     const statements: JournalStatement[] = [];
     for (const table of ["meta", "revs", "rev_metadata", "docs", "local_docs", "changes"]) {
       for (const original of this.rows<Record<string, string | number | null>>(`SELECT * FROM ${table}`)) {
@@ -947,7 +535,10 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
           row.body_chunked = 2;
         }
         const columns = Object.keys(row);
-        statements.push({ sql: `INSERT INTO ${table} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`, args: Object.values(row) });
+        statements.push({
+          sql: `INSERT INTO ${table} (${columns.join(",")}) VALUES (${columns.map(() => "?").join(",")})`,
+          args: Object.values(row),
+        });
       }
     }
     const commit = await journal.commit(statements, null);
@@ -959,7 +550,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     await this.resolveVaultIdentity(request);
     const journal = this.journal();
     if (new URL(request.url).pathname === "/internal/migrate-r2" && request.method === "POST") {
-      if (!secretEquals(request.headers.get(INTERNAL_SECRET_HEADER), this.host().internalSecret)) return couchError(403, "forbidden", "Forbidden");
+      if (!secretEquals(request.headers.get(INTERNAL_SECRET_HEADER), this.host().internalSecret))
+        return couchError(403, "forbidden", "Forbidden");
       return this.migrateLegacy(request);
     }
     await this.restoreJournal();
@@ -978,8 +570,11 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         await this.requestCheckpoint();
         blocked = true;
       }
-      const response = blocked ? json({ error: "SQLITE_CAPACITY", capacity: this.capacity() }, { status: 507 }) : await this.route(request);
-      if (journal && !blocked && growth && this.currentSeq() - Number(this.getMeta("checkpoint_seq") ?? 0) >= 4096) await this.requestCheckpoint();
+      const response = blocked
+        ? json({ error: "SQLITE_CAPACITY", capacity: this.capacity() }, { status: 507 })
+        : await this.route(request);
+      if (journal && !blocked && growth && this.currentSeq() - Number(this.getMeta("checkpoint_seq") ?? 0) >= 4096)
+        await this.requestCheckpoint();
       const statements = this.statements;
       mutated = Boolean(statements?.length);
       this.statements = null;
@@ -1003,12 +598,13 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     }
   }
 
-
   /** Keep external index writes and purge ordered without blocking other DO events. */
   private async withMaintenance<T>(operation: () => Promise<T>): Promise<T> {
     const previous = this.maintenance;
     let release!: () => void;
-    this.maintenance = new Promise<void>((resolve) => { release = resolve; });
+    this.maintenance = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     await previous;
     try {
       return await operation();
@@ -1016,6 +612,23 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       release();
     }
   }
+
+  // Closures only: they run after the constructor has assigned ctx and env.
+  private readonly builtInFullText = new BuiltInFullText({
+    vaultRef: () => this.vaultRef(),
+    dbExists: () => this.dbExists(),
+    bindings: () => this.bindings(),
+    externalFullText: () => this.externalFullText(),
+    getMeta: (key) => this.getMeta(key),
+    setMeta: (key, value) => this.setMeta(key, value),
+    sqlExec: (query, ...args) => void this.sqlExec(query, ...args),
+    first: (query, ...args) => this.first(query, ...args),
+    rows: (query, ...args) => this.rows(query, ...args),
+    scheduleIndexing: (delayMs) => this.scheduleIndexing(delayMs),
+    rawWinningRow: (id) => this.rawWinningRow(id),
+    fileContentForRow: (row) => this.fileContentForRow(row),
+    noteMtimeForRow: (row) => this.noteMtimeForRow(row),
+  });
 
   constructor(
     protected readonly ctx: DurableObjectState,
@@ -1095,11 +708,14 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         applied_at TEXT NOT NULL DEFAULT (datetime('now'))
       )
     `);
-    const schemaVersion = sql.exec<{ version: number }>(
-      `SELECT COALESCE(MAX(id), 0) AS version FROM _sql_schema_migrations`,
-    ).one().version;
+    const schemaVersion = sql
+      .exec<{ version: number }>(`SELECT COALESCE(MAX(id), 0) AS version FROM _sql_schema_migrations`)
+      .one().version;
     const revisionColumns = new Set(
-      sql.exec<{ name: string }>(`PRAGMA table_info(revs)`).toArray().map((column) => column.name),
+      sql
+        .exec<{ name: string }>(`PRAGMA table_info(revs)`)
+        .toArray()
+        .map((column) => column.name),
     );
     if (schemaVersion < 1) {
       this.ctx.storage.transactionSync(() => {
@@ -1187,13 +803,16 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         // Winners changed without a new change row; re-scan the search indexes
         // (unchanged notes are skipped by hash, so nothing is re-embedded).
         this.setMeta(INDEXED_SEQ_META_KEY, "0");
-        this.armFtsBuild(0);
+        this.builtInFullText.armFtsBuild(0);
         void this.scheduleIndexing(0);
       }
     }
     if (schemaVersion < 4) {
       const metadataColumns = new Set(
-        sql.exec<{ name: string }>(`PRAGMA table_info(rev_metadata)`).toArray().map((column) => column.name),
+        sql
+          .exec<{ name: string }>(`PRAGMA table_info(rev_metadata)`)
+          .toArray()
+          .map((column) => column.name),
       );
       this.ctx.storage.transactionSync(() => {
         if (!metadataColumns.has("soft_deleted")) {
@@ -1208,8 +827,12 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         const chunked = this.rows<RevRow>(`SELECT r.* FROM revs r
           JOIN rev_metadata m ON m.id = r.id AND m.rev = r.rev WHERE r.body_chunked = 1`);
         for (const row of chunked) {
-          sql.exec(`UPDATE rev_metadata SET soft_deleted = ? WHERE id = ? AND rev = ?`,
-            revisionMetadata(cloneBody(row.body_chunked ? { ...row, body: this.revisionBody(row) } : row)).soft_deleted, row.id, row.rev);
+          sql.exec(
+            `UPDATE rev_metadata SET soft_deleted = ? WHERE id = ? AND rev = ?`,
+            revisionMetadata(cloneBody(row.body_chunked ? { ...row, body: this.revisionBody(row) } : row)).soft_deleted,
+            row.id,
+            row.rev,
+          );
         }
         sql.exec(`INSERT INTO _sql_schema_migrations (id) VALUES (4)`);
       });
@@ -1225,7 +848,10 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       )
     `);
     const indexStateColumns = new Set(
-      sql.exec<{ name: string }>(`PRAGMA table_info(index_state)`).toArray().map((column) => column.name),
+      sql
+        .exec<{ name: string }>(`PRAGMA table_info(index_state)`)
+        .toArray()
+        .map((column) => column.name),
     );
     if (!indexStateColumns.has("fts_hash")) {
       // NULL rows are pending for the full-text index (built-in or external).
@@ -1238,18 +864,23 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       // pass also lets the maintenance step rewrite older segment formats.
       sql.exec(`DELETE FROM meta WHERE key = ?`, FTS_ERROR_META_KEY);
       this.setMeta(FTS_INDEX_VERSION_META_KEY, CURRENT_FTS_INDEX_VERSION);
-      this.armFtsBuild(0);
+      this.builtInFullText.armFtsBuild(0);
     }
     sql.exec("CREATE TABLE IF NOT EXISTS checkpoint_work (id INTEGER PRIMARY KEY CHECK(id = 1), state TEXT NOT NULL)");
-    sql.exec("CREATE TABLE IF NOT EXISTS checkpoint_dirty (table_name TEXT NOT NULL, row_key TEXT NOT NULL, PRIMARY KEY(table_name,row_key))");
+    sql.exec(
+      "CREATE TABLE IF NOT EXISTS checkpoint_dirty (table_name TEXT NOT NULL, row_key TEXT NOT NULL, PRIMARY KEY(table_name,row_key))",
+    );
     for (const [table, keys] of Object.entries(CHECKPOINT_KEYS)) {
       for (const event of ["INSERT", "UPDATE", "DELETE"]) {
         const versions = event === "UPDATE" ? ["OLD", "NEW"] : [event === "DELETE" ? "OLD" : "NEW"];
-        const changes = versions.map(version => {
-          const rowKey = `json_array(${keys.map(key => `${version}.${key}`).join(",")})`;
-          const condition = table === "meta" ? ` AND ${version}.key NOT IN ('r2_applied_head_v3','maintenance_turn')` : "";
-          return `INSERT INTO checkpoint_dirty (table_name,row_key) SELECT '${table}', ${rowKey} WHERE NOT EXISTS (SELECT 1 FROM checkpoint_dirty WHERE table_name='${table}' AND row_key=${rowKey})${condition};`;
-        }).join(" ");
+        const changes = versions
+          .map((version) => {
+            const rowKey = `json_array(${keys.map((key) => `${version}.${key}`).join(",")})`;
+            const condition =
+              table === "meta" ? ` AND ${version}.key NOT IN ('r2_applied_head_v3','maintenance_turn')` : "";
+            return `INSERT INTO checkpoint_dirty (table_name,row_key) SELECT '${table}', ${rowKey} WHERE NOT EXISTS (SELECT 1 FROM checkpoint_dirty WHERE table_name='${table}' AND row_key=${rowKey})${condition};`;
+          })
+          .join(" ");
         sql.exec(`DROP TRIGGER IF EXISTS checkpoint_${table}_${event}`);
         sql.exec(`CREATE TRIGGER checkpoint_${table}_${event} AFTER ${event} ON ${table}
           WHEN EXISTS (SELECT 1 FROM checkpoint_work WHERE json_extract(state,'$.phase') <> 'compact') BEGIN ${changes} END`);
@@ -1274,14 +905,20 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       const operation = () => this.exclusive(() => this.persistentRequest(request));
       // Take locks in the same order as alarms. Ordinary sync writes can proceed
       // during index publication; deletion/rebuild must wait for its writer.
-      const maintenance = request.method === "DELETE" && path === "/" ||
-        request.method === "POST" && path === "/internal/purge" ||
-        request.method === "POST" && path === "/internal/op" && ["reindex", "ftsRebuild", "filesRebuild", "contentGc"].includes(String(body.op));
+      const maintenance =
+        (request.method === "DELETE" && path === "/") ||
+        (request.method === "POST" && path === "/internal/purge") ||
+        (request.method === "POST" &&
+          path === "/internal/op" &&
+          ["reindex", "ftsRebuild", "filesRebuild", "contentGc"].includes(String(body.op)));
       return await (maintenance ? this.withMaintenance(operation) : operation());
     } catch (error) {
       if (error instanceof RequestLimitError) return couchError(413, "request_entity_too_large", error.message);
       if (error instanceof BadRequestError) return couchError(400, "bad_request", error.message);
-      console.warn("LiveSync DB request failed", { message: String(error), stack: error instanceof Error ? error.stack : undefined });
+      console.warn("LiveSync DB request failed", {
+        message: String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
       return couchError(500, "internal_server_error", "Internal server error");
     }
   }
@@ -1298,7 +935,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       (this.indexNeedsVersionUpgrade() ||
         this.indexedSeq() < this.currentSeq() ||
         this.first(`SELECT 1 FROM index_state WHERE pending = 1 AND attempts < ? LIMIT 1`, INDEX_MAX_ATTEMPTS) ||
-        this.hasFullTextBacklog() || this.fileMirror()?.hasWork(this.currentSeq()))
+        this.hasFullTextBacklog() ||
+        this.fileMirror()?.hasWork(this.currentSeq()))
     ) {
       void this.scheduleIndexing();
     }
@@ -1393,11 +1031,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
 
   private putDb(dbName: string): Response {
     if (this.dbExists()) {
-      return couchError(
-        412,
-        "file_exists",
-        "The database could not be created, the file already exists.",
-      );
+      return couchError(412, "file_exists", "The database could not be created, the file already exists.");
     }
     this.setMeta("created", "1");
     this.setMeta("db_name", dbName);
@@ -1421,7 +1055,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     if (ref) {
       const fullText = this.bindings().fullText;
       if (fullText) await fullText.deleteVault(ref);
-      else await deleteFtsIndex(this.ftsBucket(), ref);
+      else await deleteFtsIndex(this.builtInFullText.ftsBucket(), ref);
     }
     this.sqlExec("DELETE FROM checkpoint_work");
     this.sqlExec("DELETE FROM checkpoint_dirty");
@@ -1446,8 +1080,10 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         const journal = this.journal();
         if (!journal) return json({ error: "R2_STORAGE_REQUIRED" }, { status: 409 });
         const work = this.checkpointWork();
-        const garbage = await journal.collectGarbage({ execute: body.execute === true,
-          roots: [...(work ? [work.references, work.previous] : []), ...(this.fileMirror()?.uploader.roots() ?? [])] });
+        const garbage = await journal.collectGarbage({
+          execute: body.execute === true,
+          roots: [...(work ? [work.references, work.previous] : []), ...(this.fileMirror()?.uploader.roots() ?? [])],
+        });
         return json({ execute: body.execute === true, keys: garbage });
       }
       case "filesRebuild": {
@@ -1485,9 +1121,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       case "readNotes": {
         // Batch read for FTS snippets: one DO round trip for all hits.
         const paths = Array.isArray(body.paths)
-          ? body.paths
-              .filter((p): p is string => typeof p === "string")
-              .slice(0, 50)
+          ? body.paths.filter((p): p is string => typeof p === "string").slice(0, 50)
           : [];
         const contents: Record<string, string | null> = {};
         for (const path of paths) contents[path] = null;
@@ -1497,7 +1131,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
           const wanted = new Set(paths);
           for (const row of this.listNoteRevisionsForFts(paths)) {
             if (wanted.has(row.fts_path) && contents[row.fts_path] == null) {
-              contents[row.fts_path] = (await this.fileContentForRow(row));
+              contents[row.fts_path] = await this.fileContentForRow(row);
             }
           }
         }
@@ -1516,11 +1150,22 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         if (doc.type !== "newnote") return json({ error: "NOT_BINARY" }, { status: 400 });
         const base64 = await this.fileContentForRow(row);
         if (base64 == null) return json({ error: "NOT_SYNCED" }, { status: 409 });
-        if (base64.length > Math.ceil(REQUEST_LIMITS.maxAttachmentBytes / 3) * 4) return json({ error: "TOO_LARGE" }, { status: 413 });
+        if (base64.length > Math.ceil(REQUEST_LIMITS.maxAttachmentBytes / 3) * 4)
+          return json({ error: "TOO_LARGE" }, { status: 413 });
         let size: number;
-        try { size = atob(base64).length; } catch { return json({ error: "INVALID_BASE64" }, { status: 400 }); }
+        try {
+          size = atob(base64).length;
+        } catch {
+          return json({ error: "INVALID_BASE64" }, { status: 400 });
+        }
         if (size > REQUEST_LIMITS.maxAttachmentBytes) return json({ error: "TOO_LARGE" }, { status: 413 });
-        return json({ path, base64, contentHash: await hashText(base64), contentType: doc.contentType ?? "application/octet-stream", size });
+        return json({
+          path,
+          base64,
+          contentHash: await hashText(base64),
+          contentType: doc.contentType ?? "application/octet-stream",
+          size,
+        });
       }
       case "listFiles":
         return this.listFiles();
@@ -1533,7 +1178,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         await this.scheduleIndexing(0);
         return json({ ok: true });
       case "ftsRebuild":
-        if (!this.vaultRef() || await this.bindings().fullText?.beginRebuild?.(this.vaultRef()!) !== false) this.requestFullTextRebuild();
+        if (!this.vaultRef() || (await this.bindings().fullText?.beginRebuild?.(this.vaultRef()!)) !== false)
+          this.requestFullTextRebuild();
         await this.scheduleIndexing(0);
         return json({ ok: true });
       case "indexStatus":
@@ -1541,12 +1187,13 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
           ...(this.externalFullText()
             ? {
                 fullText: {
-                  indexed: this.first<{ count: number }>(
-                    `SELECT COUNT(*) AS count FROM index_state WHERE fts_hash IS NOT NULL`,
-                  )?.count ?? 0,
-                  pending: this.first<{ count: number }>(
-                    `SELECT COUNT(*) AS count FROM index_state WHERE fts_hash IS NULL`,
-                  )?.count ?? 0,
+                  indexed:
+                    this.first<{ count: number }>(
+                      `SELECT COUNT(*) AS count FROM index_state WHERE fts_hash IS NOT NULL`,
+                    )?.count ?? 0,
+                  pending:
+                    this.first<{ count: number }>(`SELECT COUNT(*) AS count FROM index_state WHERE fts_hash IS NULL`)
+                      ?.count ?? 0,
                 },
               }
             : {}),
@@ -1555,17 +1202,15 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
           fileMirror: this.fileMirror()?.status() ?? null,
           indexedSeq: this.indexedSeq(),
           currentSeq: this.currentSeq(),
-          indexed: this.first<{ count: number }>(
-            `SELECT COUNT(*) AS count FROM index_state WHERE pending = 0`,
-          )?.count ?? 0,
-          pending: this.first<{ count: number }>(
-            `SELECT COUNT(*) AS count FROM index_state WHERE pending = 1`,
-          )?.count ?? 0,
+          indexed:
+            this.first<{ count: number }>(`SELECT COUNT(*) AS count FROM index_state WHERE pending = 0`)?.count ?? 0,
+          pending:
+            this.first<{ count: number }>(`SELECT COUNT(*) AS count FROM index_state WHERE pending = 1`)?.count ?? 0,
           fts: {
             generation: this.getMeta(FTS_GENERATION_META_KEY),
             rebuildAt: Number(this.getMeta(FTS_REBUILD_AT_META_KEY)) || null,
             error: this.getMeta(FTS_ERROR_META_KEY),
-            ...(this.externalFullText() ? {} : { pending: this.countFtsPending() }),
+            ...(this.externalFullText() ? {} : { pending: this.builtInFullText.countFtsPending() }),
           },
         });
       default:
@@ -1576,8 +1221,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   private async writeNote(body: InternalOp): Promise<Response> {
     const path = typeof body.path === "string" ? body.path : "";
     const content = typeof body.content === "string" ? body.content : null;
-    const expectedBaseHash =
-      typeof body.expectedBaseHash === "string" ? body.expectedBaseHash : "";
+    const expectedBaseHash = typeof body.expectedBaseHash === "string" ? body.expectedBaseHash : "";
     const binary = body.op === "writeAttachment";
     if ((!binary && !path.endsWith(".md")) || !isSafeVaultPath(path) || content == null) {
       return json({ error: "Invalid Markdown note path" }, { status: 400 });
@@ -1585,8 +1229,15 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     if (this.journal() && !expectedBaseHash) return json({ error: "EXPECTED_HASH_REQUIRED" }, { status: 400 });
     let byteSize = content ? enc.encode(content).byteLength : 0;
     if (binary && content != null) {
-      if (content.length > Math.ceil(REQUEST_LIMITS.maxAttachmentBytes / 3) * 4) return json({ error: "TOO_LARGE" }, { status: 413 });
-      if ((content.length % 4 !== 0 || /[^A-Za-z0-9+/=]/.test(content) || /=/.test(content.slice(0, -2)) || !/^(?:[A-Za-z0-9+/]{2}|[A-Za-z0-9+/]=|==)$/.test(content.slice(-2)) && content.length !== 0)) return json({ error: "INVALID_BASE64" }, { status: 400 });
+      if (content.length > Math.ceil(REQUEST_LIMITS.maxAttachmentBytes / 3) * 4)
+        return json({ error: "TOO_LARGE" }, { status: 413 });
+      if (
+        content.length % 4 !== 0 ||
+        /[^A-Za-z0-9+/=]/.test(content) ||
+        /=/.test(content.slice(0, -2)) ||
+        (!/^(?:[A-Za-z0-9+/]{2}|[A-Za-z0-9+/]=|==)$/.test(content.slice(-2)) && content.length !== 0)
+      )
+        return json({ error: "INVALID_BASE64" }, { status: 400 });
       byteSize = atob(content).length;
       if (byteSize > REQUEST_LIMITS.maxAttachmentBytes) return json({ error: "TOO_LARGE" }, { status: 413 });
     }
@@ -1594,11 +1245,9 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       return json({ error: "LiveSync database does not exist" }, { status: 409 });
     }
 
-    const existing = (await this.findNoteRow(path, true));
+    const existing = await this.findNoteRow(path, true);
     const existingDoc = existing ? cloneBody(existing) : null;
-    const currentContent = existing && !docIsDeleted(existingDoc!)
-      ? (await this.fileContentForRow(existing))
-      : "";
+    const currentContent = existing && !docIsDeleted(existingDoc!) ? await this.fileContentForRow(existing) : "";
     if (currentContent == null) {
       return json({ error: "CONFLICT", path, reason: "Note content is not fully synced" }, { status: 409 });
     }
@@ -1615,41 +1264,35 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       children.push(chunkId);
       const current = this.rawWinningRow(chunkId);
       if (current && !current.deleted) continue;
-      const result = await this.insertRevision(
-        { _id: chunkId, type: "leaf", data: piece },
-        { newEdits: true },
-      );
+      const result = await this.insertRevision({ _id: chunkId, type: "leaf", data: piece }, { newEdits: true });
       if (!result.ok) {
         return json({ error: "WRITE_FAILED", path, reason: result.reason }, { status: 500 });
       }
     }
 
     const journal = this.journal();
-    const binaryKey = binary && journal ? await journal.putBytes(Uint8Array.from(atob(content), (char) => char.charCodeAt(0))) : null;
+    const binaryKey =
+      binary && journal ? await journal.putBytes(Uint8Array.from(atob(content), (char) => char.charCodeAt(0))) : null;
     const now = Date.now();
     const noteDoc: DocBody = {
       _id: existing?.id ?? noteDocIdForPath(path, this.usesCaseInsensitiveIds()),
       path,
       ...(binaryKey ? { binaryKey } : {}),
       children,
-      ctime:
-        typeof existingDoc?.ctime === "number" && !docIsDeleted(existingDoc)
-          ? existingDoc.ctime
-          : now,
+      ctime: typeof existingDoc?.ctime === "number" && !docIsDeleted(existingDoc) ? existingDoc.ctime : now,
       mtime: now,
       size: byteSize,
       type: binary ? "newnote" : "plain",
-      ...(binary ? { contentType: typeof body.contentType === "string" ? body.contentType : "application/octet-stream" } : {}),
+      ...(binary
+        ? { contentType: typeof body.contentType === "string" ? body.contentType : "application/octet-stream" }
+        : {}),
       eden: {},
     };
     if (existing) noteDoc._rev = existing.rev;
     const result = await this.insertRevision(noteDoc, { newEdits: true });
     if (!result.ok) {
       const status = result.error === "conflict" ? 409 : 500;
-      return json(
-        { error: status === 409 ? "CONFLICT" : "WRITE_FAILED", path, reason: result.reason },
-        { status },
-      );
+      return json({ error: status === 409 ? "CONFLICT" : "WRITE_FAILED", path, reason: result.reason }, { status });
     }
     return json({ ok: true, path, rev: result.rev });
   }
@@ -1677,8 +1320,9 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
          AND COALESCE(m.type, '') NOT IN ('leaf', 'chunkpack')
          AND m.soft_deleted = 0`,
     );
-    files.push(...this.rows<LiveSyncFileRow>(
-      `SELECT
+    files.push(
+      ...this.rows<LiveSyncFileRow>(
+        `SELECT
          json_extract(r.body, '$.path') AS path,
          json_extract(r.body, '$.size') AS size,
          json_extract(r.body, '$.mtime') AS mtime,
@@ -1692,7 +1336,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
          AND NOT EXISTS (
            SELECT 1 FROM rev_metadata m WHERE m.id = r.id AND m.rev = r.rev
          )`,
-    ));
+      ),
+    );
     files.sort((a, b) => a.path.localeCompare(b.path));
     return files;
   }
@@ -1707,54 +1352,71 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
        LIMIT 1`,
       path,
     );
-    if (!row) row = this.first<RevRow>(
-      `SELECT r.*
+    if (!row)
+      row = this.first<RevRow>(
+        `SELECT r.*
        FROM docs d
        JOIN revs r ON r.id = d.id AND r.rev = d.winning_rev
        WHERE ${includeDeleted ? "1" : "d.deleted = 0"}
          AND r.body_chunked = 0
          AND json_extract(r.body, '$.path') = ?
        LIMIT 1`,
-      path,
-    );
+        path,
+      );
     if (!row) return null;
     if (!hydrate) {
-      const metadata = this.first<{ soft_deleted: number }>("SELECT soft_deleted FROM rev_metadata WHERE id=? AND rev=?", row.id, row.rev);
+      const metadata = this.first<{ soft_deleted: number }>(
+        "SELECT soft_deleted FROM rev_metadata WHERE id=? AND rev=?",
+        row.id,
+        row.rev,
+      );
       return !includeDeleted && (row.deleted || metadata?.soft_deleted) ? null : row;
     }
-    const hydrated = (await this.hydrateRevision(row));
+    const hydrated = await this.hydrateRevision(row);
     return !includeDeleted && docIsDeleted(cloneBody(hydrated)) ? null : hydrated;
   }
 
   private async fileContent(path: string): Promise<string | null> {
-    const row = (await this.findNoteRow(path));
-    return row ? (await this.fileContentForRow(row)) : null;
+    const row = await this.findNoteRow(path);
+    return row ? await this.fileContentForRow(row) : null;
   }
 
   private mirrorReader(): MirrorSourceReader {
     const journal = this.journal();
     if (!journal) throw new Error("Missing content bucket");
-    return new MirrorSourceReader(this.ctx.storage.sql, journal.prefix, async path =>
-      (path.startsWith("i:") ? null : await this.findNoteRow(path, false, false)) ?? await this.findNoteRow(`i:${path}`, false, false),
-    operation => this.exclusive(operation), (id, rev) => {
-      const row = this.rawRevRow(id, rev);
-      if (!row) throw new FileMirrorChanged();
-      if (!row.body_chunked) return row.body;
-      let bytes = 0;
-      const parts: string[] = [];
-      for (const chunk of this.ctx.storage.sql.exec<{ body: string }>(
-        "SELECT body FROM rev_body_chunks WHERE id=? AND rev=? ORDER BY chunk_index", id, rev)) {
-        bytes += enc.encode(chunk.body).byteLength;
-        if (bytes > MIRROR_LIMITS.envelopeBytes) throw new FileMirrorUnsupported("SOURCE_TOO_LARGE");
-        parts.push(chunk.body);
-      }
-      return parts.join("");
-    });
+    return new MirrorSourceReader(
+      this.ctx.storage.sql,
+      journal.prefix,
+      async (path) =>
+        (path.startsWith("i:") ? null : await this.findNoteRow(path, false, false)) ??
+        (await this.findNoteRow(`i:${path}`, false, false)),
+      (operation) => this.exclusive(operation),
+      (id, rev) => {
+        const row = this.rawRevRow(id, rev);
+        if (!row) throw new FileMirrorChanged();
+        if (!row.body_chunked) return row.body;
+        let bytes = 0;
+        const parts: string[] = [];
+        for (const chunk of this.ctx.storage.sql.exec<{ body: string }>(
+          "SELECT body FROM rev_body_chunks WHERE id=? AND rev=? ORDER BY chunk_index",
+          id,
+          rev,
+        )) {
+          bytes += enc.encode(chunk.body).byteLength;
+          if (bytes > MIRROR_LIMITS.envelopeBytes) throw new FileMirrorUnsupported("SOURCE_TOO_LARGE");
+          parts.push(chunk.body);
+        }
+        return parts.join("");
+      },
+    );
   }
 
   /** Reassemble a note's content from inline data or child chunks. */
-  private async fileContentForRow(row: RevRow, hydrate = (row: RevRow) => this.hydrateRevision(row)): Promise<string | null> {
-    const doc = cloneBody((await hydrate(row)));
+  private async fileContentForRow(
+    row: RevRow,
+    hydrate = (row: RevRow) => this.hydrateRevision(row),
+  ): Promise<string | null> {
+    const doc = cloneBody(await hydrate(row));
     if (typeof doc.data === "string") return doc.data;
     if (Array.isArray(doc.data) && doc.data.every((piece) => typeof piece === "string")) {
       return (doc.data as string[]).join("");
@@ -1764,10 +1426,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       : [];
     if (children.length === 0) return typeof doc.children === "undefined" ? null : "";
 
-    const eden =
-      doc.eden && typeof doc.eden === "object"
-        ? (doc.eden as Record<string, { data?: unknown }>)
-        : {};
+    const eden = doc.eden && typeof doc.eden === "object" ? (doc.eden as Record<string, { data?: unknown }>) : {};
     const chunks = this.rows<RevRow>(
       `SELECT r.*
        FROM docs d
@@ -1778,7 +1437,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     );
     const dataById = new Map(
       await mapBatches(chunks, 4, async (chunk) => {
-        const body = cloneBody((await hydrate(chunk)));
+        const body = cloneBody(await hydrate(chunk));
         return [chunk.id, typeof body.data === "string" ? body.data : null] as const;
       }),
     );
@@ -1788,9 +1447,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       const edenChunk = eden[id];
       return typeof edenChunk?.data === "string" ? edenChunk.data : null;
     });
-    return content.every((chunk): chunk is string => typeof chunk === "string")
-      ? content.join("")
-      : null;
+    return content.every((chunk): chunk is string => typeof chunk === "string") ? content.join("") : null;
   }
 
   // ---------------------------------------------------------------------
@@ -1840,10 +1497,11 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const mirror = this.fileMirror();
     if (!mirror) return;
     try {
-      const work = await mirror.run(this.mirrorReader(), operation => this.exclusive(operation));
+      const work = await mirror.run(this.mirrorReader(), (operation) => this.exclusive(operation));
       if (work.runAt != null) await this.scheduleIndexing(Math.max(0, work.runAt - Date.now()));
       else if (work.more) await this.scheduleIndexing(0);
-      else if (work.retry) await this.scheduleIndexing(Math.max(0, (work.retryAt ?? Date.now() + INDEX_RETRY_DELAY_MS) - Date.now()));
+      else if (work.retry)
+        await this.scheduleIndexing(Math.max(0, (work.retryAt ?? Date.now() + INDEX_RETRY_DELAY_MS) - Date.now()));
     } catch (error) {
       console.warn("LiveSync file mirror failed", { message: String(error) });
       await this.scheduleIndexing(INDEX_RETRY_DELAY_MS);
@@ -1857,11 +1515,18 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     try {
       await this.exclusive(async () => {
         await this.resolveVaultIdentity();
-        if (!this.checkpointWork() || this.journalHead === undefined || this.getMeta("r2_applied_head_v3") !== this.journalHead) await this.restoreJournal();
+        if (
+          !this.checkpointWork() ||
+          this.journalHead === undefined ||
+          this.getMeta("r2_applied_head_v3") !== this.journalHead
+        )
+          await this.restoreJournal();
       });
       canMirror = true;
       const result = await this.exclusive(async () => {
-        const checkpointDue = this.journal() && (this.checkpointWork() || this.currentSeq() - Number(this.getMeta("checkpoint_seq") ?? 0) >= 4096);
+        const checkpointDue =
+          this.journal() &&
+          (this.checkpointWork() || this.currentSeq() - Number(this.getMeta("checkpoint_seq") ?? 0) >= 4096);
         if (checkpointDue && this.getMeta("maintenance_turn") !== "index") {
           nextTurn = "index";
           if (!this.checkpointWork()) await this.requestCheckpoint(false);
@@ -1877,28 +1542,42 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       const preparedAt = Date.now();
       // Tokenization, posting-page uploads and manifest CAS never hold the
       // canonical request lock. The maintenance lock still orders publishers.
-      const publicationRetry = await result.publish?.() ?? false;
+      const publicationRetry = (await result.publish?.()) ?? false;
       const publishedAt = Date.now();
       const complete = await this.exclusive(async () => {
         this.setMeta("maintenance_turn", nextTurn!);
         if (this.checkpointWork()) await this.scheduleIndexing(25);
         else if (result.more || result.worked) await this.scheduleIndexing(0);
         else if (result.retry || publicationRetry) await this.scheduleIndexing(INDEX_RETRY_DELAY_MS);
-        else await this.maybeRunFtsBuild();
-        return !result.more && !result.retry && !publicationRetry && !this.hasFullTextBacklog() &&
-          !this.first(`SELECT 1 FROM index_state WHERE pending = 1 LIMIT 1`) && this.indexedSeq() >= this.currentSeq();
+        else await this.builtInFullText.maybeRunFtsBuild();
+        return (
+          !result.more &&
+          !result.retry &&
+          !publicationRetry &&
+          !this.hasFullTextBacklog() &&
+          !this.first(`SELECT 1 FROM index_state WHERE pending = 1 LIMIT 1`) &&
+          this.indexedSeq() >= this.currentSeq()
+        );
       });
       if (complete && this.vaultRef()) await this.bindings().fullText?.completeRebuild?.(this.vaultRef()!);
-      console.log({ message: "LiveSync maintenance timings",
-        preparationMs: preparedAt - started, publicationMs: publishedAt - preparedAt,
-        totalMs: Date.now() - started, publicationPaths: result.publicationPaths ?? 0,
+      console.log({
+        message: "LiveSync maintenance timings",
+        preparationMs: preparedAt - started,
+        publicationMs: publishedAt - preparedAt,
+        totalMs: Date.now() - started,
+        publicationPaths: result.publicationPaths ?? 0,
         publicationBatchSize: this.indexPublicationBatchSize(),
-        more: result.more, retry: result.retry || publicationRetry, complete,
+        more: result.more,
+        retry: result.retry || publicationRetry,
+        complete,
       });
     } catch (error) {
       // A failed checkpoint may have restored SQLite; persist the other task's
       // next turn afterwards so repeated failures cannot monopolize maintenance.
-      console.warn("LiveSync maintenance failed", { message: String(error), stack: error instanceof Error ? error.stack : undefined });
+      console.warn("LiveSync maintenance failed", {
+        message: String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
       await this.exclusive(async () => {
         if (nextTurn) this.setMeta("maintenance_turn", nextTurn);
         await this.scheduleIndexing(this.checkpointWork() ? 25 : INDEX_RETRY_DELAY_MS);
@@ -1961,13 +1640,20 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     for (const id of ids) {
       const row = this.rawWinningRow(id);
       if (!row) continue;
-      const metadata = this.first<RevisionMetadata>("SELECT path,size,mtime,type,soft_deleted FROM rev_metadata WHERE id=? AND rev=?", row.id, row.rev);
+      const metadata = this.first<RevisionMetadata>(
+        "SELECT path,size,mtime,type,soft_deleted FROM rev_metadata WHERE id=? AND rev=?",
+        row.id,
+        row.rev,
+      );
       if (metadata?.path && metadata.type !== "leaf" && metadata.type !== "chunkpack") {
         touchedPaths.set(metadata.path, row.deleted || metadata.soft_deleted ? null : row);
         continue;
       }
       const doc = metadata ? null : cloneBody(await this.hydrateRevision(row));
-      if (doc && isNoteDoc(doc)) { touchedPaths.set(doc.path, row.deleted || docIsDeleted(doc) ? null : row); continue; }
+      if (doc && isNoteDoc(doc)) {
+        touchedPaths.set(doc.path, row.deleted || docIsDeleted(doc) ? null : row);
+        continue;
+      }
       if (!row.deleted && !metadata?.soft_deleted && (!doc || !docIsDeleted(doc))) chunkArrived = true;
       // Tombstones carry no path; recover it from the index state or an earlier revision.
       const previousPath =
@@ -1977,7 +1663,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
           id,
         )?.path;
       if (previousPath && !touchedPaths.has(previousPath)) {
-        touchedPaths.set(previousPath, (await this.findNoteRow(previousPath, false, false)));
+        touchedPaths.set(previousPath, await this.findNoteRow(previousPath, false, false));
       }
     }
     if (chunkArrived) {
@@ -1985,16 +1671,20 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       else this.setMeta("index_chunk_sweep", "");
     }
     const sweep = this.getMeta("index_chunk_sweep");
-    const pendingRows = sweep != null
-      ? this.rows<IndexStateRow>("SELECT * FROM index_state WHERE pending=1 AND path>? ORDER BY path LIMIT 16", sweep)
-      : this.rows<IndexStateRow>("SELECT * FROM index_state WHERE pending=1 AND attempts<? ORDER BY attempts,path LIMIT 16", INDEX_MAX_ATTEMPTS);
+    const pendingRows =
+      sweep != null
+        ? this.rows<IndexStateRow>("SELECT * FROM index_state WHERE pending=1 AND path>? ORDER BY path LIMIT 16", sweep)
+        : this.rows<IndexStateRow>(
+            "SELECT * FROM index_state WHERE pending=1 AND attempts<? ORDER BY attempts,path LIMIT 16",
+            INDEX_MAX_ATTEMPTS,
+          );
     // Chunk arrivals do not carry a path: re-check every pending note when a
     // chunk arrived, however often it was tried before. Without one, only
     // notes still under the periodic retry cap are re-checked.
     for (const pending of pendingRows) {
       if (touchedPaths.has(pending.path)) continue;
       if (sweep != null || pending.attempts < INDEX_MAX_ATTEMPTS) {
-        touchedPaths.set(pending.path, (await this.findNoteRow(pending.path, false, false)));
+        touchedPaths.set(pending.path, await this.findNoteRow(pending.path, false, false));
       }
     }
     for (const backlog of fullTextBacklog) {
@@ -2008,7 +1698,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     // consumes a retry nor strands a note already at the retry limit.
     if (sweep != null) {
       const ordered = new Map<string, RevRow | null>();
-      for (const pending of pendingRows) if (touchedPaths.has(pending.path)) ordered.set(pending.path, touchedPaths.get(pending.path)!);
+      for (const pending of pendingRows)
+        if (touchedPaths.has(pending.path)) ordered.set(pending.path, touchedPaths.get(pending.path)!);
       for (const [path, row] of touchedPaths) ordered.set(path, row);
       touchedPaths.clear();
       for (const [path, row] of ordered) touchedPaths.set(path, row);
@@ -2036,78 +1727,116 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       // Even a later hydration/vector failure must not acknowledge staged work.
       for (const path of attemptedPaths) {
         prepared.set(path, this.first<IndexStateRow>("SELECT * FROM index_state WHERE path = ?", path));
-        this.sqlExec(`INSERT INTO index_state (path,fts_hash,pending,attempts) VALUES (?,NULL,1,0)
-          ON CONFLICT(path) DO UPDATE SET fts_hash=NULL,pending=1`, path);
+        this.sqlExec(
+          `INSERT INTO index_state (path,fts_hash,pending,attempts) VALUES (?,NULL,1,0)
+          ON CONFLICT(path) DO UPDATE SET fts_hash=NULL,pending=1`,
+          path,
+        );
       }
     }
     const preparedEpoch = this.indexPublicationEpoch;
 
     if (sweep != null) {
-      const deferredAt = pendingRows.findIndex(row => this.indexDeferredPaths.has(row.path));
+      const deferredAt = pendingRows.findIndex((row) => this.indexDeferredPaths.has(row.path));
       if (deferredAt >= 0) {
         if (deferredAt > 0) this.setMeta("index_chunk_sweep", pendingRows[deferredAt - 1]!.path);
-      }
-      else if (pendingRows.length === 16) this.setMeta("index_chunk_sweep", pendingRows.at(-1)!.path);
-      else if (this.getMeta("index_chunk_sweep_again") === "1") { this.setMeta("index_chunk_sweep", ""); this.sqlExec("DELETE FROM meta WHERE key='index_chunk_sweep_again'"); }
-      else this.sqlExec("DELETE FROM meta WHERE key='index_chunk_sweep'");
+      } else if (pendingRows.length === 16) this.setMeta("index_chunk_sweep", pendingRows.at(-1)!.path);
+      else if (this.getMeta("index_chunk_sweep_again") === "1") {
+        this.setMeta("index_chunk_sweep", "");
+        this.sqlExec("DELETE FROM meta WHERE key='index_chunk_sweep_again'");
+      } else this.sqlExec("DELETE FROM meta WHERE key='index_chunk_sweep'");
     }
     const lastSeq = changes.at(-1)?.seq ?? since;
     if (lastSeq > since) {
       this.setMeta(INDEXED_SEQ_META_KEY, String(lastSeq));
-      if (!fullText) this.armFtsBuild(FTS_BUILD_DEBOUNCE_MS);
+      if (!fullText) this.builtInFullText.armFtsBuild(FTS_BUILD_DEBOUNCE_MS);
     }
     // Selected missing-chunk paths use the delayed retry below. Unselected
     // pending paths need another immediate pass even when the feed is caught up.
-    const pendingOutsideBatch = this.first(`SELECT 1 FROM index_state
+    const pendingOutsideBatch = this.first(
+      `SELECT 1 FROM index_state
       WHERE pending=1 AND attempts<? AND path NOT IN (SELECT value FROM json_each(?)) LIMIT 1`,
-      INDEX_MAX_ATTEMPTS, JSON.stringify([...touchedPaths.keys()]));
-    const more = changes.length >= INDEX_BATCH_SIZE || fullTextBacklog.length >= FTS_BACKLOG_BATCH_SIZE || this.indexSliceMore ||
-      this.getMeta("index_chunk_sweep") != null || pendingOutsideBatch != null;
+      INDEX_MAX_ATTEMPTS,
+      JSON.stringify([...touchedPaths.keys()]),
+    );
+    const more =
+      changes.length >= INDEX_BATCH_SIZE ||
+      fullTextBacklog.length >= FTS_BACKLOG_BATCH_SIZE ||
+      this.indexSliceMore ||
+      this.getMeta("index_chunk_sweep") != null ||
+      pendingOutsideBatch != null;
     return {
       more,
       retry,
       worked: changes.length > 0,
       publicationPaths: attemptedPaths.size,
-      ...(publication.length ? { publish: async () => {
-        let failed = false;
-        let requestLimited = false;
-        try {
-          const writer = await fullText!.openWriter(ref);
-          for (const work of publication) await work(writer);
-          await writer.close();
-        } catch (error) {
-          failed = true;
-          requestLimited = /Too many API requests by single Worker invocation|Too many subrequests/i.test(String(error));
-          console.warn("Full-text publication failed", { message: String(error), stack: error instanceof Error ? error.stack : undefined });
-        }
-        return this.exclusive(async () => {
-          // Recovery/rebuild invalidates the entire snapshot. Normal writes
-          // invalidate only the paths whose source revisions actually changed.
-          if (this.indexPublicationEpoch !== preparedEpoch || !this.dbExists()) return true;
-          if (failed) {
-            // Dense notes can touch most posting pages. Reduce the next slice
-            // rather than repeating the same over-limit batch indefinitely.
-            if (requestLimited) this.setMeta("index_publication_batch_size",
-              String(Math.max(1, Math.floor(this.indexPublicationBatchSize() / 2))));
-            for (const path of attemptedPaths) this.sqlExec("UPDATE index_state SET attempts=attempts+1 WHERE path=?", path);
-            return true;
+      ...(publication.length
+        ? {
+            publish: async () => {
+              let failed = false;
+              let requestLimited = false;
+              try {
+                const writer = await fullText!.openWriter(ref);
+                for (const work of publication) await work(writer);
+                await writer.close();
+              } catch (error) {
+                failed = true;
+                requestLimited = /Too many API requests by single Worker invocation|Too many subrequests/i.test(
+                  String(error),
+                );
+                console.warn("Full-text publication failed", {
+                  message: String(error),
+                  stack: error instanceof Error ? error.stack : undefined,
+                });
+              }
+              return this.exclusive(async () => {
+                // Recovery/rebuild invalidates the entire snapshot. Normal writes
+                // invalidate only the paths whose source revisions actually changed.
+                if (this.indexPublicationEpoch !== preparedEpoch || !this.dbExists()) return true;
+                if (failed) {
+                  // Dense notes can touch most posting pages. Reduce the next slice
+                  // rather than repeating the same over-limit batch indefinitely.
+                  if (requestLimited)
+                    this.setMeta(
+                      "index_publication_batch_size",
+                      String(Math.max(1, Math.floor(this.indexPublicationBatchSize() / 2))),
+                    );
+                  for (const path of attemptedPaths)
+                    this.sqlExec("UPDATE index_state SET attempts=attempts+1 WHERE path=?", path);
+                  return true;
+                }
+                let stale = false;
+                for (const [path, row] of prepared) {
+                  const source = touchedPaths.get(path);
+                  const current = await this.findNoteRow(path, false, false);
+                  const samePath = source ? current?.id === source.id && current.rev === source.rev : current == null;
+                  const sameRevisions = [...preparedRevisions.get(path)!].every(
+                    ([id, rev]) => this.rawWinningRow(id)?.rev === rev,
+                  );
+                  // Check absence as well as revisions: a replacement document may
+                  // recreate a path while its old index entry is being deleted.
+                  if (!samePath || !sameRevisions) {
+                    stale = true;
+                    continue;
+                  }
+                  if (!row) this.sqlExec("DELETE FROM index_state WHERE path=?", path);
+                  else
+                    this.sqlExec(
+                      `UPDATE index_state SET doc_id=?,hash=?,fts_hash=?,chunks=?,pending=?,attempts=? WHERE path=?`,
+                      row.doc_id,
+                      row.hash,
+                      row.fts_hash,
+                      row.chunks,
+                      row.pending,
+                      row.attempts,
+                      path,
+                    );
+                }
+                return stale;
+              });
+            },
           }
-          let stale = false;
-          for (const [path, row] of prepared) {
-            const source = touchedPaths.get(path);
-            const current = await this.findNoteRow(path, false, false);
-            const samePath = source ? current?.id === source.id && current.rev === source.rev : current == null;
-            const sameRevisions = [...preparedRevisions.get(path)!].every(([id, rev]) => this.rawWinningRow(id)?.rev === rev);
-            // Check absence as well as revisions: a replacement document may
-            // recreate a path while its old index entry is being deleted.
-            if (!samePath || !sameRevisions) { stale = true; continue; }
-            if (!row) this.sqlExec("DELETE FROM index_state WHERE path=?", path);
-            else this.sqlExec(`UPDATE index_state SET doc_id=?,hash=?,fts_hash=?,chunks=?,pending=?,attempts=? WHERE path=?`,
-              row.doc_id, row.hash, row.fts_hash, row.chunks, row.pending, row.attempts, path);
-          }
-          return stale;
-        });
-      } } : {}),
+        : {}),
     };
   }
 
@@ -2155,25 +1884,39 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const hydrate = (row: RevRow) => {
       const key = JSON.stringify([row.id, row.rev]);
       let pending = hydrated.get(key);
-      if (!pending) { pending = read(() => this.hydrateRevision(row)); hydrated.set(key, pending); }
+      if (!pending) {
+        pending = read(() => this.hydrateRevision(row));
+        hydrated.set(key, pending);
+      }
       return pending;
     };
-    const inputs = new Map(await mapBatches([...touchedPaths].slice(0, batchSize), 4, async ([path, source]) => {
-      const revisions = new Map<string, string>();
-      const readRevision = (row: RevRow) => { revisions.set(row.id, row.rev); return hydrate(row); };
-      const row = source ? await readRevision(source) : null;
-      const indexable = row != null && cloneBody(row).type !== "newnote" && isIndexableMarkdownPath(path, policy);
-      const content = indexable ? await this.fileContentForRow(row!, readRevision) : null;
-      options.preparedRevisions.set(path, revisions);
-      return [path, { row, content }] as const;
-    }));
-    const started = Date.now(); let processed = 0;
+    const inputs = new Map(
+      await mapBatches([...touchedPaths].slice(0, batchSize), 4, async ([path, source]) => {
+        const revisions = new Map<string, string>();
+        const readRevision = (row: RevRow) => {
+          revisions.set(row.id, row.rev);
+          return hydrate(row);
+        };
+        const row = source ? await readRevision(source) : null;
+        const indexable = row != null && cloneBody(row).type !== "newnote" && isIndexableMarkdownPath(path, policy);
+        const content = indexable ? await this.fileContentForRow(row!, readRevision) : null;
+        options.preparedRevisions.set(path, revisions);
+        return [path, { row, content }] as const;
+      }),
+    );
+    const started = Date.now();
+    let processed = 0;
     for (const [path, source] of touchedPaths) {
-      if (processed >= batchSize || processed > 0 && Date.now() - started >= 50) {
+      if (processed >= batchSize || (processed > 0 && Date.now() - started >= 50)) {
         this.indexDeferredPaths.add(path);
-        this.sqlExec(`INSERT INTO index_state (path,doc_id,pending,attempts) VALUES (?,?,1,0)
-          ON CONFLICT(path) DO UPDATE SET doc_id=excluded.doc_id,pending=1`, path, source?.id ?? null);
-        this.indexSliceMore = true; continue;
+        this.sqlExec(
+          `INSERT INTO index_state (path,doc_id,pending,attempts) VALUES (?,?,1,0)
+          ON CONFLICT(path) DO UPDATE SET doc_id=excluded.doc_id,pending=1`,
+          path,
+          source?.id ?? null,
+        );
+        this.indexSliceMore = true;
+        continue;
       }
       processed++;
       const { row, content } = inputs.get(path)!;
@@ -2264,9 +2007,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         const mtime = this.noteMtimeForRow(row);
         if (oversized) console.warn("Full-text index skipping oversized note", { path });
         const ok = await writeFullText(path, (w) =>
-          oversized
-            ? w.delete(path)
-            : w.upsert({ path, content, contentHash: hash, mtime }),
+          oversized ? w.delete(path) : w.upsert({ path, content, contentHash: hash, mtime }),
         );
         if (ok) ftsHash = hash;
         else ftsFailed = true;
@@ -2313,7 +2054,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     // A pass whose time has come but whose alarm was lost (reset, upgrade)
     // counts as backlog too; the alarm this schedules runs it.
     if (due != null) return due <= Date.now();
-    return this.hasFtsPending();
+    return this.builtInFullText.hasFtsPending();
   }
 
   /** Re-send every note to the full-text index (external: per note; built-in: new segments). */
@@ -2328,7 +2069,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       // The existing segments keep serving searches until the rebuilt ones
       // cover every note; then they are retired (see runFtsPass).
       this.setMeta(FTS_REBUILD_EPOCH_META_KEY, String(Date.now()));
-      this.armFtsBuild(0);
+      this.builtInFullText.armFtsBuild(0);
     }
   }
 
@@ -2356,367 +2097,6 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     return typeof mtime === "number" ? mtime : null;
   }
 
-  private ftsBucket(): R2Bucket {
-    const bucket = this.bindings().bucket;
-    if (!bucket) throw new Error("VaultBindings needs either bucket or fullText");
-    return bucket;
-  }
-
-  // ---------------------------------------------------------------------
-  // Built-in R2 full-text index: one immutable segment per pass, driven by
-  // index_state.fts_hash (null or stale = the note waits for the index)
-  // ---------------------------------------------------------------------
-
-  private static readonly FTS_PENDING_WHERE = `pending = 0 AND hash IS NOT NULL AND doc_id IS NOT NULL
-         AND (fts_hash IS NULL OR fts_hash != hash)`;
-
-  private hasFtsPending(): boolean {
-    return (
-      this.first<{ n: number }>(
-        `SELECT 1 AS n FROM index_state WHERE ${LiveSyncVaultDO.FTS_PENDING_WHERE} LIMIT 1`,
-      ) != null
-    );
-  }
-
-  private countFtsPending(): number {
-    return (
-      this.first<{ count: number }>(
-        `SELECT COUNT(*) AS count FROM index_state WHERE ${LiveSyncVaultDO.FTS_PENDING_WHERE}`,
-      )?.count ?? 0
-    );
-  }
-
-  private armFtsBuild(delayMs: number): void {
-    this.setMeta(FTS_REBUILD_AT_META_KEY, String(Date.now() + delayMs));
-  }
-
-  private async maybeRunFtsBuild(): Promise<void> {
-    if (!this.vaultRef() || !this.dbExists() || this.externalFullText()) return;
-    const dueRaw = this.getMeta(FTS_REBUILD_AT_META_KEY);
-    let due = dueRaw ? Number(dueRaw) : null;
-    if (due == null) {
-      // Nothing armed: notes can still be waiting after a reset rolled the
-      // arming back, or from before the index tracked them per note.
-      if (this.getMeta(FTS_ERROR_META_KEY) || !this.hasFtsPending()) return;
-      due = Date.now();
-    }
-    if (Date.now() < due) {
-      await this.scheduleIndexing(due - Date.now());
-      return;
-    }
-    try {
-      const more = await this.runFtsPass();
-      if (more) {
-        this.armFtsBuild(0);
-        await this.scheduleIndexing(0);
-      } else {
-        this.sqlExec(`DELETE FROM meta WHERE key = ?`, FTS_REBUILD_AT_META_KEY);
-      }
-    } catch (error) {
-      console.warn("FTS pass failed", error);
-      this.armFtsBuild(FTS_BUILD_RETRY_MS);
-      await this.scheduleIndexing(FTS_BUILD_RETRY_MS);
-    }
-  }
-
-  /**
-   * One alarm event's worth of full-text work: index pending notes into a
-   * new segment, or, once nothing is pending, one maintenance step (retire
-   * the legacy generation, merge two segments). Returns whether another pass
-   * is needed right away.
-   */
-  private async runFtsPass(): Promise<boolean> {
-    const ref = this.vaultRef();
-    if (!ref) return false;
-    const bucket = this.ftsBucket();
-
-    // An interrupted previous attempt (memory reset, CPU limit) leaves its
-    // last phase marker behind; a completed or abandoned one does not count.
-    const previous = await readFtsPhase(bucket, ref);
-    const interrupted = previous != null && !FTS_SETTLED_PHASES.includes(String(previous.phase));
-    const attempts = (interrupted ? Number(previous.attempts) || 0 : 0) + 1;
-    if (attempts > FTS_MAX_BUILD_ATTEMPTS) {
-      const message = `full-text pass was interrupted ${attempts - 1} times (last phase: ${String(previous?.phase)}); the vault is probably too large for the in-DO build`;
-      console.warn("FTS pass giving up", { attempts: attempts - 1, lastPhase: previous?.phase });
-      await markFtsPhase(bucket, ref, "failed", { attempts: attempts - 1, lastPhase: previous?.phase });
-      this.setMeta(FTS_ERROR_META_KEY, message);
-      return false;
-    }
-    const marker = { attempts };
-
-    const pending = this.rows<{ path: string; doc_id: string; hash: string }>(
-      `SELECT path, doc_id, hash FROM index_state
-       WHERE ${LiveSyncVaultDO.FTS_PENDING_WHERE}
-       ORDER BY path LIMIT ?`,
-      FTS_SEGMENT_MAX_DOCS + 1,
-    );
-    if (pending.length > 0) {
-      await markFtsPhase(bucket, ref, "segment-start", { ...marker, pending: pending.length });
-      const manifest = await readFtsManifest(bucket, ref);
-      const maxTotal = this.bindings().ftsMaxTotalCodeUnits ?? FTS_MAX_TOTAL_CODE_UNITS;
-      const indexedChars = manifest ? this.ftsCountedSegments(manifest).reduce((sum, s) => sum + s.totalChars, 0) : 0;
-      try {
-        return await this.buildFtsSegment(ref, pending, { marker, budget: maxTotal - indexedChars, maxTotal });
-      } catch (error) {
-        if (!(error instanceof FtsTooLargeError)) throw error;
-        // Over the guard. Dead weight (replaced versions) counts toward it,
-        // so shed the worst segment's first and try again; only a vault that
-        // is too big when live is recorded as such and disarmed.
-        const rewrite = manifest ? await this.planFtsStaleRewrite(ref, manifest, { force: true }) : null;
-        if (rewrite) {
-          console.warn("FTS pass over the size guard; rewriting a segment to drop stale text", { segment: rewrite.segments[0]?.id });
-          await this.runFtsCompaction(ref, rewrite, marker, "current");
-          return true;
-        }
-        const message = `vault exceeds the full-text size guard (${error.codeUnits.toLocaleString("en")}+ of ${error.limit.toLocaleString("en")} code units)`;
-        console.warn("FTS pass aborted: vault exceeds size guard", { codeUnits: error.codeUnits });
-        await markFtsPhase(bucket, ref, "too-large", { codeUnits: error.codeUnits });
-        this.setMeta(FTS_ERROR_META_KEY, message);
-        return false;
-      }
-    }
-
-    // Nothing pending: maintenance, one step per event.
-    const manifest = await readFtsManifest(bucket, ref);
-    if (!manifest) return false;
-    const epoch = this.ftsRebuildEpoch();
-    const outdated = this.ftsOutdatedSegments(manifest).map((s) => s.id);
-    if (outdated.length > 0) {
-      // Every note is in a hashed segment now (and, after a rebuild, in one
-      // built since): the older ones are redundant.
-      await retireFtsSegments(bucket, ref, outdated);
-      this.sqlExec(`DELETE FROM meta WHERE key = ?`, FTS_REBUILD_EPOCH_META_KEY);
-      console.log("FTS outdated segments retired", { segments: outdated, rebuild: epoch != null });
-      return true;
-    }
-    if (epoch != null) {
-      // Nothing pending and nothing older than the rebuild: it is complete.
-      this.sqlExec(`DELETE FROM meta WHERE key = ?`, FTS_REBUILD_EPOCH_META_KEY);
-    }
-    const merge = planFtsCompaction(manifest, {
-      maxSegments: FTS_COMPACT_MAX_SEGMENTS,
-      maxMergedChars: FTS_COMPACT_MAX_MERGED_CHARS,
-    });
-    if (merge) {
-      await this.runFtsCompaction(ref, merge, marker, "indexed");
-      return true;
-    }
-    const rewrite = await this.planFtsStaleRewrite(ref, manifest);
-    if (!rewrite) return false;
-    await this.runFtsCompaction(ref, rewrite, marker, "current");
-    return true;
-  }
-
-  /**
-   * Merge or rewrite segments. "indexed" keeps the version the index last
-   * recorded for a path (searches never lose a note that way); "current"
-   * keeps only the vault's current content, dropping versions of notes that
-   * are still waiting to be re-indexed, which is what frees space.
-   */
-  private async runFtsCompaction(
-    ref: VaultRef,
-    plan: CompactionPlan,
-    marker: Record<string, unknown>,
-    keep: "indexed" | "current",
-  ): Promise<void> {
-    const merged = await compactFtsSegments(this.ftsBucket(), ref, plan, {
-      isLive: (docs) =>
-        docs.map((doc) =>
-          keep === "indexed" ? this.ftsDocIsLive(doc.path, doc.hash ?? null) : this.ftsDocIsCurrent(doc.path, doc.hash ?? null),
-        ),
-      marker,
-    });
-    if (merged) this.setMeta(FTS_GENERATION_META_KEY, merged.segment.id);
-    console.log("FTS segments compacted", {
-      merged: plan.segments.map((s) => s.id),
-      into: merged?.segment.id,
-      docCount: merged?.segment.docCount,
-    });
-  }
-
-  private ftsRebuildEpoch(): number | null {
-    const raw = this.getMeta(FTS_REBUILD_EPOCH_META_KEY);
-    return raw ? Number(raw) || null : null;
-  }
-
-  /** Segments a maintenance step retires: the legacy generation, and those a rebuild replaced. */
-  private ftsOutdatedSegments(manifest: FtsManifest): FtsSegment[] {
-    const epoch = this.ftsRebuildEpoch();
-    return manifest.segments.filter((s) => !s.hashed || (epoch != null && s.builtAt < epoch));
-  }
-
-  /** Whether a segment entry is the vault's current content of its path (see runFtsCompaction). */
-  private ftsDocIsCurrent(path: string, hash: string | null): boolean {
-    if (hash == null) return false;
-    const row = this.first<{ hash: string | null }>(`SELECT hash FROM index_state WHERE path = ?`, path);
-    return row?.hash === hash;
-  }
-
-  private ftsStaleRewriteCandidates(manifest: FtsManifest): FtsSegment[] {
-    return this.ftsCountedSegments(manifest).filter((s) => s.hashed && s.format === 2);
-  }
-
-  /** Cheap check (manifest and doc counts only) for whether a stale scan could find enough to rewrite. */
-  private ftsStaleDocsSuspected(manifest: FtsManifest): boolean {
-    const candidates = this.ftsStaleRewriteCandidates(manifest);
-    if (!candidates.some((s) => s.totalChars >= FTS_STALE_REWRITE_MIN_CHARS)) return false;
-    const liveDocs =
-      this.first<{ count: number }>(`SELECT COUNT(*) AS count FROM index_state WHERE fts_hash IS NOT NULL`)?.count ?? 0;
-    return candidates.reduce((sum, s) => sum + s.docCount, 0) > liveDocs * FTS_STALE_SCAN_DOC_RATIO;
-  }
-
-  /** Segments the size guard counts: all of them, minus those a rebuild in progress will retire. */
-  private ftsCountedSegments(manifest: FtsManifest): FtsSegment[] {
-    const epoch = this.ftsRebuildEpoch();
-    return epoch == null ? manifest.segments : manifest.segments.filter((s) => s.builtAt >= epoch);
-  }
-
-  /**
-   * The segment worth rewriting alone to drop replaced/deleted versions, if
-   * any. Reading every segment's doc list is skipped while the manifest's
-   * doc count says there is little to gain, unless `force` (the size guard
-   * tripped).
-   */
-  private async planFtsStaleRewrite(
-    ref: VaultRef,
-    manifest: FtsManifest,
-    options: { force?: boolean } = {},
-  ): Promise<CompactionPlan | null> {
-    const candidates = this.ftsStaleRewriteCandidates(manifest);
-    if (candidates.length === 0) return null;
-    if (!options.force && !this.ftsStaleDocsSuspected(manifest)) return null;
-    const liveChars = new Map<string, number>();
-    for (const segment of candidates) {
-      const docs = await readFtsSegmentDocs(this.ftsBucket(), ref, segment.id);
-      let live = 0;
-      for (const doc of docs) if (this.ftsDocIsCurrent(doc.path, doc.hash ?? null)) live += doc.chars;
-      liveChars.set(segment.id, live);
-    }
-    return planFtsStaleRewrite({ ...manifest, segments: candidates }, liveChars, {
-      minFreedRatio: FTS_STALE_REWRITE_MIN_RATIO,
-      minFreedChars: FTS_STALE_REWRITE_MIN_CHARS,
-    });
-  }
-
-  /**
-   * Index up to one segment's worth of the pending notes and record them as
-   * indexed. Returns whether another pass is needed: more of the backlog, or
-   * a maintenance step the new manifest calls for. Bodies are read one note
-   * at a time while the segment is built, so only the postings and one note
-   * live in memory at once.
-   */
-  private async buildFtsSegment(
-    ref: VaultRef,
-    pending: Array<{ path: string; doc_id: string; hash: string }>,
-    options: { marker: Record<string, unknown>; budget: number; maxTotal: number },
-  ): Promise<boolean> {
-    const bucket = this.ftsBucket();
-    const self = this;
-    const written: Array<{ path: string; hash: string }> = [];
-    // Notes not worth a segment entry (oversized, body gone) are still marked
-    // indexed, or the pass would pick them up again forever.
-    const skipped: Array<{ path: string; hash: string }> = [];
-    let consumed = 0;
-    let codeUnits = 0;
-    async function* inputs(): AsyncGenerator<FtsDocInput> {
-      for (const row of pending) {
-        if (consumed >= FTS_SEGMENT_MAX_DOCS || codeUnits >= FTS_SEGMENT_MAX_CODE_UNITS) break;
-        const rev = self.rawWinningRow(row.doc_id);
-        const full = rev ? (await self.fileContentForRow(rev)) : null;
-        if (full == null) {
-          consumed += 1;
-          console.warn("FTS pass skipping note without a readable body", { path: row.path });
-          skipped.push(row);
-          continue;
-        }
-        // The note is indexed as its body is now, under the hash the vault
-        // recorded for it (which is what "indexed" is checked against). If
-        // the body moved on since, the change is in the feed and re-queues
-        // the note with its new hash; a note whose recorded hash never
-        // matches its body would otherwise stay pending forever.
-        // A long note is indexed up to the cap (its first part stays
-        // searchable), and a note the segment has no room for starts the
-        // next one rather than stretching this one.
-        const content = full.length > FTS_MAX_NOTE_CODE_UNITS ? full.slice(0, FTS_MAX_NOTE_CODE_UNITS) : full;
-        if (content.length < full.length) {
-          console.warn("FTS pass indexing only the start of a long note", { path: row.path, codeUnits: full.length });
-        }
-        if (consumed > 0 && codeUnits + content.length > FTS_SEGMENT_MAX_CODE_UNITS) break;
-        consumed += 1;
-        codeUnits += content.length;
-        if (codeUnits > options.budget) {
-          throw new FtsTooLargeError(options.maxTotal - options.budget + codeUnits, options.maxTotal);
-        }
-        const mtime = rev ? self.noteMtimeForRow(rev) : null;
-        written.push(row);
-        yield {
-          path: row.path,
-          content,
-          hash: row.hash,
-          ...(mtime != null ? { mtime } : {}),
-        };
-      }
-    }
-
-    const result = await appendFtsSegment(bucket, ref, inputs(), { marker: options.marker });
-    // A note the build handed back (segment full of terms) stays pending for
-    // the next segment; one it dropped (too many terms on its own) is marked
-    // like an oversized note.
-    if (result.dropped.length > 0) console.warn("FTS pass dropping notes with too many distinct terms", { paths: result.dropped });
-    const settled = new Set([...result.docs.map((doc) => doc.path), ...result.dropped]);
-    const indexed = written.filter((row) => settled.has(row.path));
-    for (const row of [...indexed, ...skipped]) {
-      this.sqlExec(
-        `UPDATE index_state SET fts_hash = ? WHERE path = ? AND hash = ?`,
-        row.hash,
-        row.path,
-        row.hash,
-      );
-    }
-    if (result.segment) this.setMeta(FTS_GENERATION_META_KEY, result.segment.id);
-    this.sqlExec(`DELETE FROM meta WHERE key = ?`, FTS_ERROR_META_KEY);
-    console.log("FTS segment written", {
-      segment: result.segment?.id ?? null,
-      docCount: result.segment?.docCount ?? 0,
-      codeUnits,
-      skipped: skipped.length,
-      dropped: result.dropped.length,
-      segments: result.manifest?.segments.length,
-      attempts: options.marker.attempts,
-    });
-    return consumed < pending.length || this.hasFtsPending() || this.ftsNeedsMaintenance(result.manifest);
-  }
-
-  /** Whether the idle maintenance step (retire outdated, merge, shed stale text) may have work. */
-  private ftsNeedsMaintenance(manifest: FtsManifest | null | undefined): boolean {
-    if (!manifest) return false;
-    return (
-      this.ftsOutdatedSegments(manifest).length > 0 ||
-      planFtsCompaction(manifest, {
-        maxSegments: FTS_COMPACT_MAX_SEGMENTS,
-        maxMergedChars: FTS_COMPACT_MAX_MERGED_CHARS,
-      }) != null ||
-      this.ftsStaleDocsSuspected(manifest)
-    );
-  }
-
-  /**
-   * Whether a segment entry is the vault's current version of its path. A
-   * hashed entry is current when the index last wrote that hash, or, while a
-   * forced rebuild has cleared the index's record, when the note still has
-   * that content. A legacy entry (no hash) stands until the note is written
-   * to a hashed segment.
-   */
-  private ftsDocIsLive(path: string, hash: string | null): boolean {
-    const row = this.first<{ hash: string | null; fts_hash: string | null }>(
-      `SELECT hash, fts_hash FROM index_state WHERE path = ?`,
-      path,
-    );
-    if (!row) return false;
-    if (hash == null) return row.fts_hash == null;
-    return row.fts_hash === hash || (row.fts_hash == null && row.hash === hash);
-  }
-
   /**
    * Check ranked search candidates against the vault's current state, drop
    * replaced/deleted versions and duplicate paths, and return the bodies of
@@ -2738,7 +2118,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     for (const candidate of candidates) {
       if (hits.length >= limit) break;
       const hash = typeof candidate.hash === "string" ? candidate.hash : null;
-      if (seen.has(candidate.path) || !this.ftsDocIsLive(candidate.path, hash)) continue;
+      if (seen.has(candidate.path) || !this.builtInFullText.ftsDocIsLive(candidate.path, hash)) continue;
       const docId = this.first<{ doc_id: string | null }>(
         `SELECT doc_id FROM index_state WHERE path = ?`,
         candidate.path,
@@ -2746,11 +2126,13 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       const rev = docId ? this.rawWinningRow(docId) : null;
       if (!rev || rev.deleted) continue;
       const metadata = this.first<{ path: string | null; soft_deleted: number }>(
-        `SELECT path, soft_deleted FROM rev_metadata WHERE id = ? AND rev = ?`, rev.id, rev.rev,
+        `SELECT path, soft_deleted FROM rev_metadata WHERE id = ? AND rev = ?`,
+        rev.id,
+        rev.rev,
       );
       if (metadata && (metadata.soft_deleted || metadata.path !== candidate.path)) continue;
-      if (docIsDeleted(cloneBody((await this.hydrateRevision(rev))))) continue;
-      const content = (await this.fileContentForRow(rev));
+      if (docIsDeleted(cloneBody(await this.hydrateRevision(rev)))) continue;
+      const content = await this.fileContentForRow(rev);
       if (content == null || (hash != null && (await hashText(content)) !== hash)) continue;
       seen.add(candidate.path);
       hits.push({ path: candidate.path, hash, content });
@@ -2763,9 +2145,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
    * (findNoteRow) are unusable here: their fallback JSON-scans every winning
    * rev body per call, which blows the DO CPU limit on a full rebuild.
    */
-  private listNoteRevisionsForFts(paths?: string[]): Array<
-    RevRow & { fts_path: string; fts_mtime: number | null }
-  > {
+  private listNoteRevisionsForFts(paths?: string[]): Array<RevRow & { fts_path: string; fts_mtime: number | null }> {
     const pathBindings = paths ? [JSON.stringify(paths)] : [];
     type FtsRevRow = RevRow & { fts_path: string; fts_mtime: number | null };
     const rows = this.rows<FtsRevRow>(
@@ -2779,8 +2159,9 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
          ${paths ? "AND m.path IN (SELECT value FROM json_each(?))" : ""}`,
       ...pathBindings,
     );
-    rows.push(...this.rows<FtsRevRow>(
-      `SELECT r.*,
+    rows.push(
+      ...this.rows<FtsRevRow>(
+        `SELECT r.*,
          json_extract(r.body, '$.path') AS fts_path,
          json_extract(r.body, '$.mtime') AS fts_mtime
        FROM docs d
@@ -2794,8 +2175,9 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
          AND NOT EXISTS (
            SELECT 1 FROM rev_metadata m WHERE m.id = r.id AND m.rev = r.rev
          )`,
-      ...pathBindings,
-    ));
+        ...pathBindings,
+      ),
+    );
     return rows;
   }
 
@@ -2811,12 +2193,9 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   private dbInfo(dbName: string): Response {
     const missing = this.requireDb();
     if (missing) return missing;
-    const docCount = this.first<{ count: number }>(
-      `SELECT COUNT(*) AS count FROM docs WHERE deleted = 0`,
-    )?.count ?? 0;
-    const deletedCount = this.first<{ count: number }>(
-      `SELECT COUNT(*) AS count FROM docs WHERE deleted = 1`,
-    )?.count ?? 0;
+    const docCount = this.first<{ count: number }>(`SELECT COUNT(*) AS count FROM docs WHERE deleted = 0`)?.count ?? 0;
+    const deletedCount =
+      this.first<{ count: number }>(`SELECT COUNT(*) AS count FROM docs WHERE deleted = 1`)?.count ?? 0;
     const updateSeq = this.currentSeq();
     return json({
       db_name: this.getMeta("db_name") ?? dbName,
@@ -2842,13 +2221,16 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const missing = this.requireDb();
     if (missing) return missing;
     if (!path) return couchError(400, "bad_request", "File path is required.");
-    const row = (await this.findNoteRow(path));
+    const row = await this.findNoteRow(path);
     if (!row) return couchError(404, "not_found", "File not found.");
-    return json({ content: (await this.fileContentForRow(row)) });
+    return json({ content: await this.fileContentForRow(row) });
   }
 
   private currentSeq(): number {
-    return Math.max(Number(this.getMeta("monotonic_seq") ?? 0), this.first<{ seq: number }>(`SELECT COALESCE(MAX(seq), 0) AS seq FROM changes`)?.seq ?? 0);
+    return Math.max(
+      Number(this.getMeta("monotonic_seq") ?? 0),
+      this.first<{ seq: number }>(`SELECT COALESCE(MAX(seq), 0) AS seq FROM changes`)?.seq ?? 0,
+    );
   }
 
   private nextSeq(): number {
@@ -2936,15 +2318,32 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       const journal = this.journal();
       if (!journal) throw new Error("Missing content bucket binding");
       if (pointer.part === "body") {
-        const stored = JSON.parse(await journal.body(pointer.r2)) as { format: number; body: DocBody; history: unknown };
+        const stored = JSON.parse(await journal.body(pointer.r2)) as {
+          format: number;
+          body: DocBody;
+          history: unknown;
+        };
         if (stored.format !== 3) throw new Error("Unsupported revision envelope");
-        return { ...row, body: JSON.stringify(stored.body), body_chunked: 0, rev_history: JSON.stringify(stored.history) };
+        return {
+          ...row,
+          body: JSON.stringify(stored.body),
+          body_chunked: 0,
+          rev_history: JSON.stringify(stored.history),
+        };
       }
-      const history = row.rev_history ? JSON.parse(row.rev_history) as { r2?: string } : null;
+      const history = row.rev_history ? (JSON.parse(row.rev_history) as { r2?: string }) : null;
       // Legacy body/history objects are independent; settle both reads before continuing.
-      const parts = await Promise.allSettled([journal.body(pointer.r2), history?.r2 ? journal.body(history.r2) : Promise.resolve(row.rev_history)]);
+      const parts = await Promise.allSettled([
+        journal.body(pointer.r2),
+        history?.r2 ? journal.body(history.r2) : Promise.resolve(row.rev_history),
+      ]);
       for (const result of parts) if (result.status === "rejected") throw result.reason;
-      return { ...row, body: (parts[0] as PromiseFulfilledResult<string>).value, body_chunked: 0, rev_history: (parts[1] as PromiseFulfilledResult<string | null>).value };
+      return {
+        ...row,
+        body: (parts[0] as PromiseFulfilledResult<string>).value,
+        body_chunked: 0,
+        rev_history: (parts[1] as PromiseFulfilledResult<string | null>).value,
+      };
     }
     return row.body_chunked ? { ...row, body: this.revisionBody(row), body_chunked: 0 } : row;
   }
@@ -2959,10 +2358,15 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         let ancestor: RevRow | null = leaf;
         const seen = new Set<string>();
         while (ancestor) {
-          if (ancestor.rev === rev) { result.push(leaf); break; }
+          if (ancestor.rev === rev) {
+            result.push(leaf);
+            break;
+          }
           if (seen.has(ancestor.rev)) throw new Error("Revision ancestry cycle");
           seen.add(ancestor.rev);
-          ancestor = ancestor.parent_rev ? this.rawRevRow(id, ancestor.parent_rev) ?? await this.archivedRevRow(id, ancestor.parent_rev) : null;
+          ancestor = ancestor.parent_rev
+            ? (this.rawRevRow(id, ancestor.parent_rev) ?? (await this.archivedRevRow(id, ancestor.parent_rev)))
+            : null;
         }
       }
       return result;
@@ -2971,11 +2375,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const pending = [start];
     while (pending.length > 0) {
       const row = pending.pop()!;
-      const children = this.rows<RevRow>(
-        `SELECT * FROM revs WHERE id = ? AND parent_rev = ?`,
-        id,
-        row.rev,
-      );
+      const children = this.rows<RevRow>(`SELECT * FROM revs WHERE id = ? AND parent_rev = ?`, id, row.rev);
       if (children.length === 0) leaves.push(row);
       else pending.push(...children);
     }
@@ -3018,7 +2418,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
 
   private async winningRow(id: string): Promise<RevRow | null> {
     const row = this.rawWinningRow(id);
-    return row ? (await this.hydrateRevision(row)) : null;
+    return row ? await this.hydrateRevision(row) : null;
   }
 
   private rawRevRow(id: string, rev: string): RevRow | null {
@@ -3026,8 +2426,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   }
 
   private async revRow(id: string, rev: string): Promise<RevRow | null> {
-    const row = this.rawRevRow(id, rev) ?? await this.archivedRevRow(id, rev);
-    return row?.body_available ? (await this.hydrateRevision(row)) : null;
+    const row = this.rawRevRow(id, rev) ?? (await this.archivedRevRow(id, rev));
+    return row?.body_available ? await this.hydrateRevision(row) : null;
   }
 
   private conflictsFor(id: string, winningRev: string): string[] {
@@ -3050,12 +2450,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       if (existing) {
         if (existing.parent_rev) continue;
         if (!parentRev) break;
-        this.sqlExec(
-          `UPDATE revs SET parent_rev = ? WHERE id = ? AND rev = ?`,
-          parentRev,
-          id,
-          rev,
-        );
+        this.sqlExec(`UPDATE revs SET parent_rev = ? WHERE id = ? AND rev = ?`, parentRev, id, rev);
         continue;
       }
       const parsed = parseRev(rev);
@@ -3087,13 +2482,18 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     bodyKey?: string;
   }): Promise<void> {
     const journal = this.journal();
-    const key = journal ? row.bodyKey ?? await journal.putBody(JSON.stringify({ format: 3, body: JSON.parse(row.body), history: JSON.parse(row.revHistory) })) : null;
+    const key = journal
+      ? (row.bodyKey ??
+        (await journal.putBody(
+          JSON.stringify({ format: 3, body: JSON.parse(row.body), history: JSON.parse(row.revHistory) }),
+        )))
+      : null;
     const historyKey = key;
     // Stop hot ancestry at the archived tree; the full lineage stays in R2.
     if (journal && row.ancestors) {
       const hot: string[] = [];
       for (const rev of row.ancestors) {
-        if (!this.rawRevRow(row.id,rev) && await this.archivedRevRow(row.id, rev)) break;
+        if (!this.rawRevRow(row.id, rev) && (await this.archivedRevRow(row.id, rev))) break;
         hot.push(rev);
       }
       row.ancestors = hot;
@@ -3171,7 +2571,10 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     return body;
   }
 
-  private async insertRevision(doc: DocBody, options: { newEdits: boolean; bodyKey?: string }): Promise<{
+  private async insertRevision(
+    doc: DocBody,
+    options: { newEdits: boolean; bodyKey?: string },
+  ): Promise<{
     ok: boolean;
     id: string;
     rev?: string;
@@ -3185,7 +2588,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     if (options.newEdits) {
       let parentRev = typeof doc._rev === "string" ? doc._rev : null;
       const deletedWinner = this.rawWinningRow(id);
-      if (deletedWinner && deletedWinner.deleted && !parentRev) parentRev = deletedWinner.rev;
+      if (deletedWinner?.deleted && !parentRev) parentRev = deletedWinner.rev;
       const rev = await newRevision(doc, parentRev);
       // Check the tree after the only await, so nothing changed in between.
       const current = this.rawWinningRow(id);
@@ -3194,9 +2597,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       }
       // Any current leaf may be extended, not only the winner: deleting a
       // losing revision is how CouchDB conflicts are resolved.
-      const parent = parentRev
-        ? this.rawLeafRevs(id).find((leaf) => leaf.rev === parentRev) ?? null
-        : null;
+      const parent = parentRev ? (this.rawLeafRevs(id).find((leaf) => leaf.rev === parentRev) ?? null) : null;
       if (parentRev && !parent) {
         return { ok: false, id, error: "conflict", reason: "Document update conflict." };
       }
@@ -3223,7 +2624,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       return { ok: false, id, error: "bad_request", reason: "Invalid rev format." };
     }
     const hotExisting = this.rawRevRow(id, doc._rev);
-    const existing = hotExisting ?? await this.archivedRevRow(id, doc._rev);
+    const existing = hotExisting ?? (await this.archivedRevRow(id, doc._rev));
     if (existing?.body_available) return { ok: true, id, rev: doc._rev };
 
     const parsed = parseRev(doc._rev)!;
@@ -3239,11 +2640,23 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         for (let i = offset; i < Math.min(offset + 128, ancestors.length); i++) {
           const rev = ancestors[i]!;
           const hot = this.rawRevRow(id, rev);
-          const known = hot ?? await this.archivedRevRow(id, rev);
-          records.push(known ? { ...known, parent_rev: known.parent_rev ?? ancestors[i + 1] ?? null } : {
-            id, rev, gen: parseRev(rev)!.gen, parent_rev: ancestors[i + 1] ?? null,
-            body: "{}", body_chunked: 0, body_available: 0, deleted: 0, seq, rev_history: null,
-          });
+          const known = hot ?? (await this.archivedRevRow(id, rev));
+          records.push(
+            known
+              ? { ...known, parent_rev: known.parent_rev ?? ancestors[i + 1] ?? null }
+              : {
+                  id,
+                  rev,
+                  gen: parseRev(rev)!.gen,
+                  parent_rev: ancestors[i + 1] ?? null,
+                  body: "{}",
+                  body_chunked: 0,
+                  body_available: 0,
+                  deleted: 0,
+                  seq,
+                  rev_history: null,
+                },
+          );
           if (hot) hotRows.push(hot);
         }
         await this.archiveRows(id, records);
@@ -3253,8 +2666,22 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         }
       }
       const body = JSON.stringify({ ...withoutMeta(doc), _id: id, _rev: doc._rev });
-      const r2 = options.bodyKey ?? await this.journal()!.putBody(JSON.stringify({ format: 3, body: JSON.parse(body), history: JSON.parse(revisionHistory(doc, doc._rev)) }));
-      await this.archiveRows(id, [{ ...existing, parent_rev: existing.parent_rev ?? ancestors[0] ?? null, body: JSON.stringify({ r2, part: "body" }), body_chunked: 2, body_available: 1, deleted, rev_history: JSON.stringify({ r2, part: "history" }) }]);
+      const r2 =
+        options.bodyKey ??
+        (await this.journal()!.putBody(
+          JSON.stringify({ format: 3, body: JSON.parse(body), history: JSON.parse(revisionHistory(doc, doc._rev)) }),
+        ));
+      await this.archiveRows(id, [
+        {
+          ...existing,
+          parent_rev: existing.parent_rev ?? ancestors[0] ?? null,
+          body: JSON.stringify({ r2, part: "body" }),
+          body_chunked: 2,
+          body_available: 1,
+          deleted,
+          rev_history: JSON.stringify({ r2, part: "history" }),
+        },
+      ]);
       this.sqlExec("INSERT INTO changes (seq,id,rev,deleted) VALUES (?,?,?,?)", seq, id, doc._rev, deleted);
       this.setMeta("monotonic_seq", String(seq));
       this.recalculateWinner(id);
@@ -3285,15 +2712,18 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
 
     if (request.method === "GET") {
       const openRevs = url.searchParams.get("open_revs");
-      if (openRevs) return (await this.handleOpenRevs(id, openRevs, url));
+      if (openRevs) return await this.handleOpenRevs(id, openRevs, url);
       const rev = url.searchParams.get("rev");
-      const row = rev ? (await this.revRow(id, rev)) : (await this.winningRow(id));
+      const row = rev ? await this.revRow(id, rev) : await this.winningRow(id);
       if (!row) return couchError(404, "not_found", "missing");
       if (row.deleted && !rev) return couchError(404, "not_found", "deleted");
-      return json(this.publicDoc(row, {
-        conflicts: boolParam(url.searchParams.get("conflicts")),
-        revs: boolParam(url.searchParams.get("revs")),
-      }), { headers: { etag: `"${row.rev}"` } });
+      return json(
+        this.publicDoc(row, {
+          conflicts: boolParam(url.searchParams.get("conflicts")),
+          revs: boolParam(url.searchParams.get("revs")),
+        }),
+        { headers: { etag: `"${row.rev}"` } },
+      );
     }
 
     if (request.method === "PUT") {
@@ -3337,13 +2767,17 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     }
     const includeRevs = boolParam(url.searchParams.get("revs"));
     const latest = boolParam(url.searchParams.get("latest"));
-    const rows = (await Promise.all(revs.map(async (rev): Promise<Array<{ ok: DocBody } | { missing: string }>> => {
-      const found = latest
-        ? (await this.descendantLeafRevs(id, rev))
-        : [(await this.revRow(id, rev))].filter((row): row is RevRow => row !== null);
-      if (found.length === 0) return [{ missing: rev }];
-      return found.map((row) => ({ ok: this.publicDoc(row, { revs: includeRevs }) }));
-    }))).flat();
+    const rows = (
+      await Promise.all(
+        revs.map(async (rev): Promise<Array<{ ok: DocBody } | { missing: string }>> => {
+          const found = latest
+            ? await this.descendantLeafRevs(id, rev)
+            : [await this.revRow(id, rev)].filter((row): row is RevRow => row !== null);
+          if (found.length === 0) return [{ missing: rev }];
+          return found.map((row) => ({ ok: this.publicDoc(row, { revs: includeRevs }) }));
+        }),
+      )
+    ).flat();
     return json(rows);
   }
 
@@ -3420,13 +2854,19 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     // Keep the staged window small even when the request contains thousands of docs.
     for (let offset = 0; offset < docs.length; offset += 4) {
       const batch = docs.slice(offset, offset + 4);
-      const keys = !newEdits && journal ? await mapBatches(batch, 4, async doc => {
-        const id = docIdFromBody(doc);
-        const rev = doc._rev;
-        if (!id || typeof rev !== "string" || !parseRev(rev) || this.rawRevRow(id, rev)?.body_available) return undefined;
-        const stored = { ...withoutMeta(doc), _id: id, _rev: rev };
-        return journal.putBody(JSON.stringify({ format: 3, body: stored, history: JSON.parse(revisionHistory(doc, rev)) }));
-      }) : [];
+      const keys =
+        !newEdits && journal
+          ? await mapBatches(batch, 4, async (doc) => {
+              const id = docIdFromBody(doc);
+              const rev = doc._rev;
+              if (!id || typeof rev !== "string" || !parseRev(rev) || this.rawRevRow(id, rev)?.body_available)
+                return undefined;
+              const stored = { ...withoutMeta(doc), _id: id, _rev: rev };
+              return journal.putBody(
+                JSON.stringify({ format: 3, body: stored, history: JSON.parse(revisionHistory(doc, rev)) }),
+              );
+            })
+          : [];
       for (const [index, doc] of batch.entries()) {
         const result = await this.insertRevision(doc, { newEdits, bodyKey: keys[index] });
         results.push(
@@ -3436,7 +2876,12 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         );
       }
     }
-    console.log({ message: "LiveSync bulk preparation", documents: docs.length, newEdits, elapsedMs: Date.now() - started });
+    console.log({
+      message: "LiveSync bulk preparation",
+      documents: docs.length,
+      newEdits,
+      elapsedMs: Date.now() - started,
+    });
     return json(results);
   }
 
@@ -3448,7 +2893,9 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     for (const [id, revs] of Object.entries(body)) {
       if (!Array.isArray(revs)) continue;
       const missingRevs: string[] = [];
-      for (const rev of revs) if (typeof rev === "string" && !this.rawRevRow(id, rev) && !(await this.archivedRevRow(id, rev))) missingRevs.push(rev);
+      for (const rev of revs)
+        if (typeof rev === "string" && !this.rawRevRow(id, rev) && !(await this.archivedRevRow(id, rev)))
+          missingRevs.push(rev);
       if (missingRevs.length > 0) result[id] = { missing: missingRevs };
     }
     return json(result);
@@ -3461,30 +2908,30 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const body = await readJsonBody(request);
     const includeRevs = boolParam(body.revs) || boolParam(url.searchParams.get("revs"));
     const latest = boolParam(body.latest) || boolParam(url.searchParams.get("latest"));
-    const docs = Array.isArray(body.docs)
-      ? (body.docs as Array<{ id?: unknown; rev?: unknown }>)
-      : [];
-    const results = await Promise.all(docs.map(async (item) => {
-      const id = typeof item.id === "string" ? item.id : "";
-      const rev = typeof item.rev === "string" ? item.rev : "";
-      const rows =
-        id && rev
-          ? latest
-            ? (await this.descendantLeafRevs(id, rev))
-            : [(await this.revRow(id, rev))].filter((row): row is RevRow => row !== null)
-          : id
-            ? (await this.leafRevs(id))
-            : [];
-      return {
-        id,
-        docs:
-          rows.length > 0
-            ? rows.map((row) => ({
-                ok: this.publicDoc(row, { revs: includeRevs }),
-              }))
-            : [{ error: { id, rev, error: "not_found", reason: "missing" } }],
-      };
-    }));
+    const docs = Array.isArray(body.docs) ? (body.docs as Array<{ id?: unknown; rev?: unknown }>) : [];
+    const results = await Promise.all(
+      docs.map(async (item) => {
+        const id = typeof item.id === "string" ? item.id : "";
+        const rev = typeof item.rev === "string" ? item.rev : "";
+        const rows =
+          id && rev
+            ? latest
+              ? await this.descendantLeafRevs(id, rev)
+              : [await this.revRow(id, rev)].filter((row): row is RevRow => row !== null)
+            : id
+              ? await this.leafRevs(id)
+              : [];
+        return {
+          id,
+          docs:
+            rows.length > 0
+              ? rows.map((row) => ({
+                  ok: this.publicDoc(row, { revs: includeRevs }),
+                }))
+              : [{ error: { id, rev, error: "not_found", reason: "missing" } }],
+        };
+      }),
+    );
     return json({ results });
   }
 
@@ -3515,9 +2962,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const includeDocs = boolParam(options.include_docs);
     const conflicts = boolParam(options.conflicts);
     const keys = Array.isArray(options.keys) ? (options.keys as string[]) : null;
-    const totalRows = this.first<{ count: number }>(
-      `SELECT COUNT(*) AS count FROM docs WHERE deleted = 0`,
-    )?.count ?? 0;
+    const totalRows = this.first<{ count: number }>(`SELECT COUNT(*) AS count FROM docs WHERE deleted = 0`)?.count ?? 0;
     if (keys) {
       return json({
         total_rows: totalRows,
@@ -3537,21 +2982,21 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       args.push(startKey);
     }
     if (endKey !== null) {
-      clauses.push(
-        descending ? (inclusiveEnd ? "id >= ?" : "id > ?") : inclusiveEnd ? "id <= ?" : "id < ?",
-      );
+      clauses.push(descending ? (inclusiveEnd ? "id >= ?" : "id > ?") : inclusiveEnd ? "id <= ?" : "id < ?");
       args.push(endKey);
     }
     const skip = Math.max(numberParam(options.skip, 0), 0);
     const limit = options.limit === undefined ? -1 : Math.max(numberParam(options.limit, -1), 0);
-    const rows = await Promise.all(this.rows<DocRow>(
-      `SELECT * FROM docs WHERE ${clauses.join(" AND ")}
+    const rows = await Promise.all(
+      this.rows<DocRow>(
+        `SELECT * FROM docs WHERE ${clauses.join(" AND ")}
        ORDER BY id ${descending ? "DESC" : "ASC"}
        LIMIT ? OFFSET ?`,
-      ...args,
-      limit,
-      skip,
-    ).map((row) => this.allDocsRow(row.id, includeDocs, conflicts)));
+        ...args,
+        limit,
+        skip,
+      ).map((row) => this.allDocsRow(row.id, includeDocs, conflicts)),
+    );
     return json({ total_rows: totalRows, offset: skip, rows });
   }
 
@@ -3571,8 +3016,9 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const body = await readJsonBody(request);
     const selector = (body.selector ?? {}) as Selector;
     const limit = numberParam(body.limit, 25);
-    const docs = (await Promise.all(this.rows<DocRow>(`SELECT * FROM docs ORDER BY id`)
-      .map((row) => this.winningRow(row.id))))
+    const docs = (
+      await Promise.all(this.rows<DocRow>(`SELECT * FROM docs ORDER BY id`).map((row) => this.winningRow(row.id)))
+    )
       .filter((row): row is RevRow => row !== null && !row.deleted)
       .map((row) => this.publicDoc(row))
       .filter((doc) => matchesSelector(doc, selector))
@@ -3618,9 +3064,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
              deleted = (SELECT deleted FROM docs WHERE docs.id = changes.id)
          WHERE seq IN (SELECT MAX(seq) FROM changes GROUP BY id)`,
       );
-      sql.exec(
-        `DELETE FROM changes WHERE seq NOT IN (SELECT MAX(seq) FROM changes GROUP BY id)`,
-      );
+      sql.exec(`DELETE FROM changes WHERE seq NOT IN (SELECT MAX(seq) FROM changes GROUP BY id)`);
     });
     return json({ ok: true }, { status: 202 });
   }
@@ -3644,7 +3088,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     const since = normalizeSince(options.since, this.currentSeq());
     // Longpoll and continuous feeds are driven by the Worker, which re-asks
     // after a change notification; here every feed answers immediately.
-    const batch = (await this.changeBatch(options, since));
+    const batch = await this.changeBatch(options, since);
     const idle = batch.rows.length === 0 && batch.lastSeq === since;
     return json(
       {
@@ -3689,13 +3133,15 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         if (style === "all_docs") {
           const leaves = this.rawLeafRevs(row.id);
           const matching: RevRow[] = selector ? [] : leaves;
-          if (selector) for (const leaf of leaves) if (await this.matchesRevisionSelector(leaf, selector, metrics)) matching.push(leaf);
+          if (selector)
+            for (const leaf of leaves)
+              if (await this.matchesRevisionSelector(leaf, selector, metrics)) matching.push(leaf);
           if (matching.length === 0) continue;
           rows.push({ ...row, revs: matching.map((leaf) => leaf.rev) });
         } else {
           if (selector) {
             const winning = this.rawWinningRow(row.id);
-            if (!winning || !await this.matchesRevisionSelector(winning, selector, metrics)) continue;
+            if (!winning || !(await this.matchesRevisionSelector(winning, selector, metrics))) continue;
           }
           rows.push(row);
         }
@@ -3706,21 +3152,36 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         break;
       }
     }
-    if (selector && metrics.scanned) console.log({ message: "LiveSync filtered changes", ...metrics, matched: rows.length, elapsedMs: Date.now() - started });
+    if (selector && metrics.scanned)
+      console.log({
+        message: "LiveSync filtered changes",
+        ...metrics,
+        matched: rows.length,
+        elapsedMs: Date.now() - started,
+      });
     return {
       rows,
       lastSeq,
-      pending: this.first<{ count: number }>(
-        `SELECT COUNT(*) AS count FROM docs WHERE updated_seq > ?`,
-        lastSeq,
-      )?.count ?? 0,
+      pending:
+        this.first<{ count: number }>(`SELECT COUNT(*) AS count FROM docs WHERE updated_seq > ?`, lastSeq)?.count ?? 0,
     };
   }
 
-  private async matchesRevisionSelector(row: RevRow, selector: Selector, metrics: { metadataMatches: number; bodyFallbacks: number }): Promise<boolean> {
-    const metadata = this.first<RevisionMetadata>("SELECT path,size,mtime,type,soft_deleted FROM rev_metadata WHERE id=? AND rev=?", row.id, row.rev);
+  private async matchesRevisionSelector(
+    row: RevRow,
+    selector: Selector,
+    metrics: { metadataMatches: number; bodyFallbacks: number },
+  ): Promise<boolean> {
+    const metadata = this.first<RevisionMetadata>(
+      "SELECT path,size,mtime,type,soft_deleted FROM rev_metadata WHERE id=? AND rev=?",
+      row.id,
+      row.rev,
+    );
     const matched = matchesMetadata(row, metadata, selector);
-    if (matched !== undefined) { metrics.metadataMatches++; return matched; }
+    if (matched !== undefined) {
+      metrics.metadataMatches++;
+      return matched;
+    }
     metrics.bodyFallbacks++;
     return matchesSelector(this.publicDoc(await this.hydrateRevision(row)), selector);
   }
@@ -3733,7 +3194,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     };
     if (row.deleted) result.deleted = true;
     if (boolParam(options.include_docs)) {
-      const rev = (await this.revRow(row.id, row.rev));
+      const rev = await this.revRow(row.id, row.rev);
       if (rev) {
         result.doc = this.publicDoc(rev, {
           conflicts: boolParam(options.conflicts),

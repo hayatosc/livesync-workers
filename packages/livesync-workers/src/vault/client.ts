@@ -74,8 +74,15 @@ const APPEND_ATTEMPTS = 3;
 export interface Vault {
   /** List all files, including attachments, under the same path policy. */
   listFiles?(): Promise<VaultNoteStat[]>;
-  readAttachment?(path: string): Promise<{ path: string; base64: string; contentHash: string; contentType: string; size: number } | null>;
-  writeAttachment?(path: string, base64: string, expectedBaseHash: string, contentType?: string): Promise<WriteVaultNoteResult>;
+  readAttachment?(
+    path: string,
+  ): Promise<{ path: string; base64: string; contentHash: string; contentType: string; size: number } | null>;
+  writeAttachment?(
+    path: string,
+    base64: string,
+    expectedBaseHash: string,
+    contentType?: string,
+  ): Promise<WriteVaultNoteResult>;
   readonly ref: VaultRef;
   readonly policy: VaultPolicy;
   /** Vault-relative Markdown paths, sorted. */
@@ -94,11 +101,7 @@ export interface Vault {
    * that was read. `createIfMissing` also locks on the empty content, so a
    * concurrent creation is detected as CONFLICT.
    */
-  appendToNote(
-    path: string,
-    text: string,
-    options?: { createIfMissing?: boolean },
-  ): Promise<AppendVaultNoteResult>;
+  appendToNote(path: string, text: string, options?: { createIfMissing?: boolean }): Promise<AppendVaultNoteResult>;
   /** False when the bindings have no vector index; `search` then returns nothing. */
   readonly semanticSearch: boolean;
   /** Semantic search over indexed notes. */
@@ -179,7 +182,13 @@ class VaultClient implements Vault {
 
   async exists(): Promise<boolean> {
     const res = await this.stub().fetch(
-      new Request("https://livesync-db/", { method: "HEAD", headers: { [INTERNAL_SECRET_HEADER]: this.options.internalSecret, [VAULT_REF_HEADER]: encodeURIComponent(JSON.stringify(this.ref)) } }),
+      new Request("https://livesync-db/", {
+        method: "HEAD",
+        headers: {
+          [INTERNAL_SECRET_HEADER]: this.options.internalSecret,
+          [VAULT_REF_HEADER]: encodeURIComponent(JSON.stringify(this.ref)),
+        },
+      }),
     );
     return res.status === 200;
   }
@@ -195,10 +204,23 @@ class VaultClient implements Vault {
     if (!response.ok) throw new Error(`Attachment read failed (${response.status})`);
     return response.json<{ path: string; base64: string; contentHash: string; contentType: string; size: number }>();
   }
-  async writeAttachment(path: string, base64: string, expectedBaseHash: string, contentType?: string): Promise<WriteVaultNoteResult> {
+  async writeAttachment(
+    path: string,
+    base64: string,
+    expectedBaseHash: string,
+    contentType?: string,
+  ): Promise<WriteVaultNoteResult> {
     if (this.hidden(path)) return { ok: false, path, error: "FORBIDDEN_PATH" };
-    const response = await this.internalResponse({ op: "writeAttachment", path, content: base64, expectedBaseHash, contentType });
-    return response.ok ? { ok: true, path } : { ok: false, path, error: response.status === 409 ? "CONFLICT" : "WRITE_FAILED" };
+    const response = await this.internalResponse({
+      op: "writeAttachment",
+      path,
+      content: base64,
+      expectedBaseHash,
+      contentType,
+    });
+    return response.ok
+      ? { ok: true, path }
+      : { ok: false, path, error: response.status === 409 ? "CONFLICT" : "WRITE_FAILED" };
   }
 
   async listMarkdownPaths(): Promise<string[]> {
@@ -231,11 +253,7 @@ class VaultClient implements Vault {
     return { ...contents, ...payload.contents };
   }
 
-  async writeNote(
-    path: string,
-    content: string,
-    expectedBaseHash: string,
-  ): Promise<WriteVaultNoteResult> {
+  async writeNote(path: string, content: string, expectedBaseHash: string): Promise<WriteVaultNoteResult> {
     if (this.hidden(path)) return { ok: false, error: "FORBIDDEN_PATH", path };
     const res = await this.internalResponse({
       op: "writeNote",
@@ -278,12 +296,15 @@ class VaultClient implements Vault {
       const paths = [...new Set(candidates.map((candidate) => candidate.path))];
       const contents = await this.readNotes(paths);
       const hashes = new Map<string, string>();
-      await Promise.all(paths.map(async (path) => {
-        const content = contents[path];
-        if (content != null) hashes.set(path, await hashText(content));
-      }));
-      return candidates.map((candidate) =>
-        hashes.has(candidate.path) && (candidate.hash == null || hashes.get(candidate.path) === candidate.hash),
+      await Promise.all(
+        paths.map(async (path) => {
+          const content = contents[path];
+          if (content != null) hashes.set(path, await hashText(content));
+        }),
+      );
+      return candidates.map(
+        (candidate) =>
+          hashes.has(candidate.path) && (candidate.hash == null || hashes.get(candidate.path) === candidate.hash),
       );
     });
   }
@@ -295,23 +316,33 @@ class VaultClient implements Vault {
       const result = shared
         ? await shared.call(this.bindings.fullText, this.ref, query, limit, {
             acceptPath: (path) => !this.hidden(path) && inFolder(path),
-            validate: async (candidates) => Promise.all(candidates.map(async ({ path, hash }) => {
-              const content = await this.readNote(path);
-              return content != null && await hashText(content) === hash;
-            })),
+            validate: async (candidates) =>
+              Promise.all(
+                candidates.map(async ({ path, hash }) => {
+                  const content = await this.readNote(path);
+                  return content != null && (await hashText(content)) === hash;
+                }),
+              ),
           })
-        : await this.bindings.fullText.search(this.ref, query, folder || this.bindings.fullText.sourceHashes ? Number.MAX_SAFE_INTEGER : limit);
+        : await this.bindings.fullText.search(
+            this.ref,
+            query,
+            folder || this.bindings.fullText.sourceHashes ? Number.MAX_SAFE_INTEGER : limit,
+          );
       const candidates = result.hits.filter((hit) => !this.hidden(hit.path) && inFolder(hit.path));
       const hits: FullTextSearchHit[] = [];
       for (const hit of candidates) {
         if (hits.length >= limit) break;
         if (!shared && hit.contentHash !== undefined) {
           const current = await this.readNote(hit.path);
-          if (current == null || await hashText(current) !== hit.contentHash) continue;
+          if (current == null || (await hashText(current)) !== hit.contentHash) continue;
         }
         hits.push(hit);
       }
-      if (result.building) { await this.internalResponse({ op: "ftsRebuild" }); return { status: "building" }; }
+      if (result.building) {
+        await this.internalResponse({ op: "ftsRebuild" });
+        return { status: "building" };
+      }
       return {
         status: "ready",
         hits,
@@ -340,7 +371,7 @@ class VaultClient implements Vault {
     const resolved: { hits: ResolvedHit[] } = { hits: [] };
     const seen = new Set<string>();
     let pageSize = Math.min(500, limit * FTS_OVERFETCH + 20);
-    for (let start = 0; start < candidates.length && resolved.hits.length < limit;) {
+    for (let start = 0; start < candidates.length && resolved.hits.length < limit; ) {
       const page = candidates.slice(start, start + pageSize).filter((hit) => !seen.has(hit.path));
       start += pageSize;
       pageSize = Math.min(500, pageSize * 2);
@@ -367,9 +398,7 @@ class VaultClient implements Vault {
         snippets:
           live.content == null
             ? []
-            : hit.matches
-                .slice(0, FTS_SNIPPETS_PER_DOC)
-                .map((match) => extractSnippet(live.content!, match)),
+            : hit.matches.slice(0, FTS_SNIPPETS_PER_DOC).map((match) => extractSnippet(live.content!, match)),
       });
     }
     return {
@@ -405,7 +434,10 @@ class VaultClient implements Vault {
     const res = await this.stub().fetch(
       new Request("https://livesync-db/internal/purge", {
         method: "POST",
-        headers: { [INTERNAL_SECRET_HEADER]: this.options.internalSecret, [VAULT_REF_HEADER]: encodeURIComponent(JSON.stringify(this.ref)) },
+        headers: {
+          [INTERNAL_SECRET_HEADER]: this.options.internalSecret,
+          [VAULT_REF_HEADER]: encodeURIComponent(JSON.stringify(this.ref)),
+        },
       }),
     );
     if (!res.ok) throw new Error(`LiveSync vault purge failed (${res.status})`);

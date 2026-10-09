@@ -1,0 +1,50 @@
+# Dependency update PRs. Versions are pinned exactly, so nothing moves without one.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directories:
+      - "/"
+      - "/packages/livesync-workers"
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Asia/Tokyo
+    # Skip releases younger than a week to sit out compromised or broken versions.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    groups:
+      # wrangler, workers-types, vitest-pool-workers and cf move together.
+      cloudflare:
+        patterns:
+          - "wrangler"
+          - "cf"
+          - "@cloudflare/*"
+          - "agents"
+      mcp:
+        patterns:
+          - "@modelcontextprotocol/*"
+          - "ai"
+          - "zod"
+      dev-tools:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+    # LiveSync versions are pinned to what the E2E suite verifies
+    # (test/e2e/plugin-lock.json); bump them together by hand.
+    ignore:
+      - dependency-name: "@vrtmrz/*"
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: Asia/Tokyo
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns:
+          - "*"

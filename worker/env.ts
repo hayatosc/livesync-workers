@@ -14,7 +14,7 @@ export interface Env {
   VECTORIZE: VectorizeIndex;
   AI: Ai;
 
-  // Variables (wrangler.jsonc `vars`, or added in the dashboard).
+  // Variables (declared in cloudflare.config.ts `worker.env`).
   SQLITE_MAX_BYTES?: string;
   SQLITE_HEADROOM_BYTES?: string;
   LIVESYNC_DATABASE?: string;

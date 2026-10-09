@@ -192,9 +192,7 @@ export function encodePostings(writer: ByteWriter, postings: Posting[]): void {
  * Entries may carry decoded postings or bytes pre-encoded by PostingsBuilder;
  * both produce the same shard bytes. Entries are sorted by term here.
  */
-export function encodeShard(
-  entries: Iterable<[string, Posting[] | EncodedPostings]>,
-): Uint8Array {
+export function encodeShard(entries: Iterable<[string, Posting[] | EncodedPostings]>): Uint8Array {
   const writer = new ByteWriter();
   for (const byte of MAGIC) writer.u8(byte);
   writer.varint(SHARD_FORMAT_VERSION);
@@ -249,10 +247,7 @@ export function decodeShard(data: Uint8Array): Map<string, Posting[]> {
   return result;
 }
 
-async function pipeThrough(
-  data: Uint8Array,
-  stream: CompressionStream | DecompressionStream,
-): Promise<Uint8Array> {
+async function pipeThrough(data: Uint8Array, stream: CompressionStream | DecompressionStream): Promise<Uint8Array> {
   const source = new ReadableStream<Uint8Array>({
     start(controller) {
       controller.enqueue(data);
@@ -391,10 +386,7 @@ export type BucketedShard = {
 };
 
 /** Group entries into buckets and gzip each; empty buckets take no bytes. */
-export async function encodeBucketedShard(
-  entries: Iterable<TermEntry>,
-  bucketCount: number,
-): Promise<BucketedShard> {
+export async function encodeBucketedShard(entries: Iterable<TermEntry>, bucketCount: number): Promise<BucketedShard> {
   const buckets: TermEntry[][] = Array.from({ length: bucketCount }, () => []);
   for (const entry of entries) buckets[bucketForTerm(entry.term, bucketCount)]!.push(entry);
   const compressed = await Promise.all(

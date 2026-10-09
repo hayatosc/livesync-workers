@@ -61,7 +61,9 @@ describe("fts-index segments", () => {
     const { bucket, store } = memoryBucket();
     expect((await appendFtsSegment(bucket, ref, [])).segment).toBeNull();
     expect([...store.keys()]).toEqual(["fts/u1/v1/debug.json"]);
-    expect(JSON.parse(new TextDecoder().decode(store.get("fts/u1/v1/debug.json")))).toMatchObject({ phase: "segment-empty" });
+    expect(JSON.parse(new TextDecoder().decode(store.get("fts/u1/v1/debug.json")))).toMatchObject({
+      phase: "segment-empty",
+    });
   });
 
   it("reads a version-1 manifest as one legacy segment and retires it later", async () => {
@@ -88,7 +90,9 @@ describe("fts-index segments", () => {
     expect(retired?.retired).toEqual([{ id: "gen-old", at: 1_000_000 }]);
     // Still on disk for in-flight searches; swept by the next commit once the grace period passed.
     expect(segmentDirs(store).has("gen-old")).toBe(true);
-    await appendFtsSegment(bucket, ref, [{ path: "b.md", content: "新しいメモ", hash: "b1" }], { now: 1_000_000 + 10 * 60_000 });
+    await appendFtsSegment(bucket, ref, [{ path: "b.md", content: "新しいメモ", hash: "b1" }], {
+      now: 1_000_000 + 10 * 60_000,
+    });
     expect(segmentDirs(store).has("gen-old")).toBe(false);
     expect((await readFtsManifest(bucket, ref))?.retired).toEqual([]);
   });
@@ -103,7 +107,14 @@ describe("fts-index segments", () => {
   });
 
   it("plans compaction of the two smallest segments only past the segment cap", async () => {
-    const segment = (id: string, totalChars: number) => ({ id, docCount: 1, totalChars, builtAt: 0, hashed: true, format: 2 as const });
+    const segment = (id: string, totalChars: number) => ({
+      id,
+      docCount: 1,
+      totalChars,
+      builtAt: 0,
+      hashed: true,
+      format: 2 as const,
+    });
     const manifest: FtsManifest = {
       version: 2,
       shardCount: 16,
@@ -120,7 +131,14 @@ describe("fts-index segments", () => {
   });
 
   it("plans a lone rewrite of the segment with the most stale text past the thresholds", () => {
-    const segment = (id: string, totalChars: number) => ({ id, docCount: 1, totalChars, builtAt: 0, hashed: true, format: 2 as const });
+    const segment = (id: string, totalChars: number) => ({
+      id,
+      docCount: 1,
+      totalChars,
+      builtAt: 0,
+      hashed: true,
+      format: 2 as const,
+    });
     const manifest: FtsManifest = {
       version: 2,
       shardCount: 16,
@@ -239,7 +257,7 @@ describe("fts-index segments", () => {
     const { bucket } = memoryBucket();
     await appendFtsSegment(bucket, ref, [
       { path: "short.md", content: "会議室", hash: "1" },
-      { path: "long.md", content: "会議室 " + "無関係な長い本文。".repeat(20), hash: "2" },
+      { path: "long.md", content: `会議室 ${"無関係な長い本文。".repeat(20)}`, hash: "2" },
     ]);
     await appendFtsSegment(bucket, ref, [{ path: "twice.md", content: "会議室と会議室", hash: "3" }]);
     const hits = (await ready(bucket, "会議室")).hits;
@@ -250,7 +268,9 @@ describe("fts-index segments", () => {
   it("keeps tenant and vault namespaces separate and deletes everything on request", async () => {
     const { bucket, store } = memoryBucket();
     await appendFtsSegment(bucket, ref, [{ path: "a.md", content: "会議", hash: "a1" }]);
-    expect(await ftsSearch(bucket, { tenantId: "u2", databaseName: "v1" }, "会議", 10)).toEqual({ status: "not-built" });
+    expect(await ftsSearch(bucket, { tenantId: "u2", databaseName: "v1" }, "会議", 10)).toEqual({
+      status: "not-built",
+    });
     await deleteFtsIndex(bucket, ref);
     expect(store.size).toBe(0);
   });
