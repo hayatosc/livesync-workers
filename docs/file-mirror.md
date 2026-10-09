@@ -1,6 +1,6 @@
 # Original files in R2
 
-The deployed Worker automatically saves the latest reconstructable files in
+The Worker automatically saves the latest reconstructable files in
 `CONTENT_BUCKET`, using their original vault-relative paths:
 
 ```text
@@ -31,17 +31,20 @@ edits do not extend this deadline, and only the latest complete winner for each
 path is exported. Search indexing and authoritative sync commits keep their own
 timing. Initial backfills and queued batches continue without this delay.
 
-Each pass exports at most eight files and 16 MiB of content,
-starting no further file after one second. Reads and uploads may finish after
-that time budget; files are reconstructed one at a time. Remaining files stay
-queued for the next alarm. Creating or editing a file queues a replacement, and
+Each pass visits at most eight files, handles at most 16 MiB of content and
+issues at most 64 mirror R2 operations, starting no further file after one
+second. Reads and uploads may finish after
+that time budget; files are decoded one part at a time. Checkpoint and search
+work run first. Remaining files stay queued for the next alarm. Creating or editing a file queues a replacement, and
 deletion removes its copy. A changed path removes the old copy and writes the
 new one. Existing vaults are backfilled on their next
 access. A file whose chunks have not arrived waits until the missing chunks are
 received. While an update is incomplete, its last complete copy can remain.
 
-Uploads release the normal request lock, so replication can proceed while a copy
-is being written. An edit during an upload is picked up by the next pass. Upload
+Source reads and multipart part uploads release the normal request lock, so
+replication can proceed during those calls. Final PUT/completion holds the lock
+after validating the source revisions, preventing a stale job from publishing
+after a newer committed edit. An edit cancels old multipart work. Upload
 failures are retried without rejecting an already committed sync write or
 preventing search/checkpoint maintenance. Each copy is eventually consistent;
 the folder as a whole is not an atomic snapshot of the vault.
@@ -58,6 +61,8 @@ preserving other vaults' copies and the existing recovery history.
 - `pending`: queued files, missing chunks, and retryable storage failures.
 - `errors`: unsupported files and retryable storage failures.
 - `rebuilding`: whether the initial R2/current-document scan is incomplete.
+- `stale`: pending/error paths retaining a previously acknowledged copy.
+- `active`: a resumable job's path, phase, decoded/uploaded bytes and target revision, or `null`.
 
 The counters describe work discovered so far; additional files can be found in
 later scan batches. During an edit, a previous copy may still exist even though
@@ -78,13 +83,28 @@ inline chunks, compressed data and unsupported binary encodings are not exported
 as if they were original content. They are reported as errors. There is no
 server-side decryption or decompression.
 
-Each exported file is limited to 10 MiB, matching the existing attachment API's
-decoded limit. Invalid paths and keys exceeding R2's
-[1,024-byte key limit](https://developers.cloudflare.com/r2/platform/limits/)
-are rejected. Export failures do not remove the authoritative revision data.
+Each exported file is limited to **100 MiB of actual decoded bytes**. The
+attachment write API retains its separate 10 MiB limit. Files up to 8 MiB use a
+single PUT; larger files use resumable 8 MiB multipart parts. A revision's JSON
+envelope must fit 4 MiB; legacy whole-file inline revisions exceeding this must
+be split into LiveSync chunks. At most 8,192 source occurrences and 4 MiB of
+manifest descriptors are accepted. Incorrect declared sizes are rejected.
 
-Objects have a content type, a SHA-256 `contentHash`, and an `mtime` custom metadata
-field when available. Unknown extensions use `application/octet-stream`.
+Invalid paths and keys exceeding R2's
+[1,024-byte key limit](https://developers.cloudflare.com/r2/platform/limits/)
+are rejected. Validation failures retain an older complete copy and leave the
+authoritative revision data intact. Storage errors use persisted jittered
+exponential backoff, up to fifteen minutes; a new source revision requeues them.
+
+Objects have a content type, `mirrorFormat: "2"`, a source fingerprint/revision
+and an optional `mtime` custom metadata field. Small direct PUTs also have a
+SHA-256 `contentHash`. Multipart objects omit `contentHash`: their actual output
+SHA-256 is retained in the derived DO state, avoiding a second source pass or a
+full R2 staging copy. After complete SQLite recovery, an existing matching
+format-2 copy can be adopted with digest unknown. Unknown extensions use
+`application/octet-stream`. See the [large-file implementation specification](file-mirror-large-files.md)
+for recovery, budgets, cost accounting and qualification limits.
+
 Original timestamps are metadata; the R2 upload timestamp reflects the copy's
 upload time.
 

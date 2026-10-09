@@ -33,15 +33,16 @@ async function bulk(object: DurableObjectStub, docs: unknown[]) {
 
 async function drain(object: DurableObjectStub, name: string) {
   await runInDurableObject(object, async (instance: PersistentVaultDO, state) => {
-    const mirror = new R2FileMirror(state.storage.sql, bindings.CONTENT, ref(name));
+    const mirror = new R2FileMirror(state.storage, bindings.CONTENT, ref(name));
     for (let attempt = 0; attempt < 100; attempt++) {
       // Explicitly advance the mirror's persisted deadline when manually draining work.
       state.storage.sql.exec("DELETE FROM file_mirror_meta WHERE key='run_at'");
+      state.storage.sql.exec("UPDATE file_mirror_state SET retry_at=0");
       await instance.alarm();
       const seq = Number(state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key='monotonic_seq'").toArray()[0]?.value ?? 0);
       if (!mirror.hasWork(seq)) return;
     }
-    throw new Error("File mirror did not catch up");
+    throw new Error("File mirror did not catch up: " + JSON.stringify(state.storage.sql.exec("SELECT path,status,error FROM file_mirror_state").toArray()));
   });
 }
 
@@ -107,11 +108,11 @@ it("exports eight files in one pass despite R2 latency, then continues the backf
     try {
       await instance.alarm();
       expect(puts).toBe(8);
-      expect(new R2FileMirror(state.storage.sql, bucket, ref(name)).status()).toMatchObject({ saved: 8, pending: 3 });
+      expect(new R2FileMirror(state.storage, bucket, ref(name)).status()).toMatchObject({ saved: 8, pending: 3 });
       expect(delays).toContain(0);
       await instance.alarm();
       expect(puts).toBe(11);
-      expect(new R2FileMirror(state.storage.sql, bucket, ref(name)).status()).toMatchObject({ saved: 11, pending: 0 });
+      expect(new R2FileMirror(state.storage, bucket, ref(name)).status()).toMatchObject({ saved: 11, pending: 0 });
     } finally { mutable.bindings = original; mutable.scheduleIndexing = schedule; }
   });
 });
@@ -157,22 +158,46 @@ it("coalesces committed edits for five seconds without extending the deadline ac
   });
 });
 
-it("bounds reconstructed bytes per pass and leaves oversized batches queued", async () => {
-  const name = "files-batch-bytes";
+it.each([false, true])("bounds decoded and attempted upload bytes per pass, including failures: %s", async fail => {
+  const name = `files-batch-bytes-${fail}`;
   const object = await fixture(name);
   await bulk(object, Array.from({ length: 3 }, (_, i) => ({ _id: `note-${i}`, _rev: "1-a", path: `${i}.md`, type: "plain", data: "small source" })));
   await runInDurableObject(object, async (_instance: PersistentVaultDO, state) => {
     await state.storage.deleteAlarm();
-    const mirror = new R2FileMirror(state.storage.sql, bindings.CONTENT, ref(name));
-    const bytes = new Uint8Array(9 * 1024 * 1024);
-    const contentHash = await hashText("test batch bytes");
-    const read = async (path: string) => ({ docId: `note-${path.slice(0, 1)}`, bytes, contentType: "application/octet-stream", contentHash, mtime: null });
+    let failPut = fail, attemptedBytes = 0;
+    const bucket = new Proxy(bindings.CONTENT, { get(target, property) {
+      const method = Reflect.get(target, property);
+      if (property === "put") return async (path: string, value: Uint8Array, options: R2PutOptions) => {
+        attemptedBytes += value.byteLength;
+        if (failPut && path.endsWith("/0.md")) throw new Error("Injected failed bounded PUT");
+        return target.put(path, value, options);
+      };
+      return typeof method === "function" ? method.bind(target) : method;
+    } });
+    const mirror = new R2FileMirror(state.storage, bucket, ref(name));
+    const data = "x".repeat(7 * 1024 * 1024);
+    const root = { id: "fake", rev: "1-a", r2: null, envelope: false, eden: null, childId: null, childRev: null };
+    const reader = {
+      snapshot: async (path: string) => ({ docId: `note-${path[0]}`, rev: "1-a", root, type: "plain" as const,
+        contentType: "text/plain", declaredSize: data.length, mtime: null, fingerprint: path, sources: [root], small: true }),
+      read: async () => [data], current: async () => true,
+    };
     const exclusive = <T>(operation: () => Promise<T>) => operation();
-    expect(await mirror.run(read, exclusive)).toMatchObject({ more: true });
-    expect(mirror.status()).toMatchObject({ saved: 1, pending: 2 });
-    expect(await mirror.run(read, exclusive)).toMatchObject({ more: true });
-    expect(mirror.status()).toMatchObject({ saved: 2, pending: 1 });
-    expect(await mirror.run(read, exclusive)).toEqual({ more: false, retry: false });
+    expect(await mirror.run(reader, exclusive)).toMatchObject({ more: true });
+    const first = mirror.status();
+    expect(first.saved).toBeGreaterThanOrEqual(fail ? 0 : 1);
+    expect(first.saved).toBeLessThan(3);
+    // Two complete files plus at most 2 MiB of the third fit in the 16 MiB budget.
+    const tail = state.storage.sql.exec<{ n: number }>("SELECT COALESCE(SUM(length(data)),0) AS n FROM file_mirror_tail").one().n;
+    expect(first.saved * data.length + tail).toBeLessThanOrEqual(16 * 1024 * 1024);
+    expect(attemptedBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+    failPut = false;
+    for (let attempt = 0; attempt < 3 && mirror.status().pending; attempt++) {
+      state.storage.sql.exec("UPDATE file_mirror_state SET retry_at=0");
+      attemptedBytes = 0;
+      await mirror.run(reader, exclusive);
+      expect(attemptedBytes).toBeLessThanOrEqual(16 * 1024 * 1024);
+    }
     expect(mirror.status()).toMatchObject({ saved: 3, pending: 0 });
   });
 });
@@ -214,6 +239,23 @@ it("waits for missing chunks and resumes every pending file when a chunk arrives
   await drain(object, name);
   expect((await bindings.CONTENT.list({ prefix: fileMirrorPrefix(ref(name)) })).objects).toHaveLength(24);
   expect(await (await bindings.CONTENT.get(key(name, "23.md")))!.text()).toBe("complete");
+});
+
+it("updates a copied file when only its child revision changes", async () => {
+  const name = "files-child-winner";
+  const object = await fixture(name);
+  await bulk(object, [
+    { _id: "h:child", _rev: "1-a", type: "leaf", data: "old child" },
+    { _id: "note", _rev: "1-a", path: "Note.md", type: "plain", children: ["h:child"] },
+  ]);
+  await drain(object, name);
+  const previous = (await bindings.CONTENT.head(key(name, "Note.md")))!.customMetadata!.sourceFingerprint;
+  await bulk(object, [{ _id: "h:child", _rev: "2-b", _revisions: { start: 2, ids: ["b", "a"] }, type: "leaf", data: "new child" }]);
+  await drain(object, name);
+  const output = (await bindings.CONTENT.get(key(name, "Note.md")))!;
+  expect(await output.text()).toBe("new child");
+  expect(output.customMetadata!.sourceFingerprint).not.toBe(previous);
+  expect(output.customMetadata!.sourceRev).toBe("1-a");
 });
 
 it("backfills existing documents and repairs stale copies after SQLite cache loss", async () => {
@@ -259,7 +301,7 @@ it("pages through existing files and supports an authenticated rebuild of manual
 it("retries failed copies without blocking replication, and catches edits during an upload", async () => {
   const name = "files-concurrent";
   const object = await fixture(name);
-  await bulk(object, [{ _id: "note", _rev: "1-a", path: "Note.md", type: "plain", data: "old" }]);
+  await bulk(object, [{ _id: "h:large", _rev: "1-a", type: "leaf", data: "x".repeat(1024 * 1024) }, { _id: "note", _rev: "1-a", path: "Note.md", type: "plain", children: Array(10).fill("h:large") }]);
   await runInDurableObject(object, async (instance: PersistentVaultDO, state) => {
     const mutable = instance as unknown as { bindings(): VaultBindings };
     const original = mutable.bindings.bind(instance);
@@ -269,13 +311,18 @@ it("retries failed copies without blocking replication, and catches edits during
     const blocked = new Promise<void>(resolve => { release = resolve; });
     const bucket = new Proxy(bindings.CONTENT, { get(target, property) {
       const value = Reflect.get(target, property);
-      if (property !== "put") return typeof value === "function" ? value.bind(target) : value;
-      return async (path: string, ...args: unknown[]) => {
-        if (path.startsWith(fileMirrorPrefix(ref(name)))) {
-          if (mode === "fail") throw new Error("Injected file copy failure");
-          if (mode === "hold") { mode = "pass"; entered(); await blocked; }
-        }
-        return value.apply(target, [path, ...args]);
+      if (property !== "resumeMultipartUpload") return typeof value === "function" ? value.bind(target) : value;
+      return (path: string, uploadId: string) => {
+        const upload = target.resumeMultipartUpload(path, uploadId);
+        return new Proxy(upload, { get(partTarget, partProperty) {
+          const method = Reflect.get(partTarget, partProperty);
+          if (partProperty !== "uploadPart") return typeof method === "function" ? method.bind(partTarget) : method;
+          return async (...args: unknown[]) => {
+            if (mode === "fail") throw new Error("Injected file copy failure");
+            if (mode === "hold") { mode = "pass"; entered(); await blocked; }
+            return method.apply(partTarget, args);
+          };
+        } });
       };
     } });
     mutable.bindings = () => ({ ...original(), contentBucket: bucket });
@@ -284,6 +331,7 @@ it("retries failed copies without blocking replication, and catches edits during
       expect(state.storage.sql.exec<{ status: string }>("SELECT status FROM file_mirror_state WHERE path='Note.md'").one().status).toBe("retry");
       expect((await instance.fetch(new Request("https://db/note"))).status).toBe(200);
       mode = "hold";
+      state.storage.sql.exec("UPDATE file_mirror_state SET retry_at=0");
       const alarm = instance.alarm();
       try {
         await uploading;
@@ -376,7 +424,7 @@ it("keeps unsupported content out of file copies and confines writes and purge t
     { _id: "h:encrypted", _rev: "1-a", type: "leaf", e_: true, data: "%ciphertext" },
     { _id: "compressed", _rev: "1-a", path: "Compressed.md", type: "plain", data: "\u000eLZ\u001dcompressed" },
     { _id: "invalid", _rev: "1-a", path: "../escape.md", type: "plain", data: "invalid" },
-    { _id: "oversized", _rev: "1-a", path: "Huge.md", type: "plain", data: "small", size: 10 * 1024 * 1024 + 1 },
+    { _id: "oversized", _rev: "1-a", path: "Huge.md", type: "plain", data: "small", size: 100 * 1024 * 1024 + 1 },
     { _id: "h:repeated", _rev: "1-a", type: "leaf", data: "AAAA".repeat(256) },
     { _id: "repeated", _rev: "1-a", path: "Repeated.png", type: "newnote", children: Array.from({ length: 15_000 }, () => "h:repeated"), size: 1 },
   ]);
@@ -384,7 +432,7 @@ it("keeps unsupported content out of file copies and confines writes and purge t
   await drain(other, "files-other");
   expect((await bindings.CONTENT.list({ prefix: fileMirrorPrefix(ref(name)) })).objects.map(object => object.key)).toEqual([key(name, "Note.md")]);
   await runInDurableObject(object, async (_instance, state) => {
-    expect(new R2FileMirror(state.storage.sql, bindings.CONTENT, ref(name)).status()).toMatchObject({ saved: 1, errors: 5 });
+    expect(new R2FileMirror(state.storage, bindings.CONTENT, ref(name)).status()).toMatchObject({ saved: 1, errors: 5 });
   });
   expect((await object.fetch("https://db/", { method: "DELETE" })).status).toBe(200);
   expect((await bindings.CONTENT.list({ prefix: fileMirrorPrefix(ref(name)) })).objects).toHaveLength(0);
