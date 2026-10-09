@@ -1,0 +1,64 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "includes": [
+      "worker/**",
+      "scripts/**",
+      "test/**",
+      "packages/livesync-workers/src/**",
+      "packages/livesync-workers/test/**",
+      "packages/livesync-workers/scripts/**",
+      "*.ts",
+      "!**/*.json",
+      "!**/*.jsonc"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 120
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double",
+      "trailingCommas": "all",
+      "semicolons": "always"
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "style": {
+        "noNonNullAssertion": "off"
+      },
+      "suspicious": {
+        "noControlCharactersInRegex": "off"
+      }
+    }
+  },
+  "assist": {
+    "enabled": true,
+    "actions": {
+      "source": {
+        "organizeImports": "off"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["test/e2e/**"],
+      "javascript": {
+        "formatter": {
+          "quoteStyle": "single"
+        }
+      }
+    }
+  ]
+}

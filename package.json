@@ -16,6 +16,8 @@
     "setup": "node scripts/setup.mjs",
     "rollback:prepare": "node scripts/prepare-rollback.mjs",
     "typecheck": "cf workers types && pnpm --filter livesync-workers typecheck && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.workers.json --noEmit",
+    "lint": "biome ci",
+    "format": "biome check --write",
     "test": "pnpm --filter livesync-workers test && vitest run && pnpm test:workers",
     "cf-typegen": "cf workers types",
     "test:workers": "vitest run -c vitest.workers.config.ts --maxWorkers=1 --testTimeout=60000",
@@ -36,6 +38,7 @@
     "zod": "4.4.1"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.14",
     "@cloudflare/vitest-pool-workers": "0.22.0",
     "@cloudflare/workers-types": "4.20260501.1",
     "@types/node": "24.12.2",
