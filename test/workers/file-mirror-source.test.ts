@@ -12,7 +12,7 @@ const prefix = "content/v1/source-bounds/vault/";
 const source: MirrorReference = {
   id: "chunk",
   rev: "1-a",
-  r2: prefix + "objects/source",
+  r2: `${prefix}objects/source`,
   envelope: false,
   eden: null,
   childId: null,

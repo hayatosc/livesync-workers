@@ -203,7 +203,7 @@ describe("Vault.grep candidate pages", () => {
   async function indexedVault(includeLive: boolean) {
     const { bucket } = memoryBucket();
     const ref = { tenantId: "user-1", databaseName: "notes-test" };
-    const live = "other ".repeat(100) + "needle";
+    const live = `${"other ".repeat(100)}needle`;
     const liveHash = await hashText(live);
     await appendFtsSegment(bucket, ref, [
       ...Array.from({ length: 40 }, (_, index) => ({

@@ -257,7 +257,7 @@ describe("fts-index segments", () => {
     const { bucket } = memoryBucket();
     await appendFtsSegment(bucket, ref, [
       { path: "short.md", content: "会議室", hash: "1" },
-      { path: "long.md", content: "会議室 " + "無関係な長い本文。".repeat(20), hash: "2" },
+      { path: "long.md", content: `会議室 ${"無関係な長い本文。".repeat(20)}`, hash: "2" },
     ]);
     await appendFtsSegment(bucket, ref, [{ path: "twice.md", content: "会議室と会議室", hash: "3" }]);
     const hits = (await ready(bucket, "会議室")).hits;

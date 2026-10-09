@@ -12,7 +12,7 @@ const enc = new TextEncoder();
  * `//evil.example`, so the value is parsed against the request origin.
  */
 export function safeRedirectTarget(raw: string | null, origin: string): string {
-  if (!raw || !raw.startsWith("/")) return "/";
+  if (!raw?.startsWith("/")) return "/";
   let target: URL;
   try {
     target = new URL(raw, origin);

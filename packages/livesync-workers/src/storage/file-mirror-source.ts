@@ -64,7 +64,7 @@ export class MirrorSourceReader implements MirrorReader {
     let envelope = false;
     if (row.body_chunked === 2) {
       const pointer = object(JSON.parse(row.body));
-      if (typeof pointer.r2 !== "string" || !pointer.r2.startsWith(this.contentPrefix + "objects/"))
+      if (typeof pointer.r2 !== "string" || !pointer.r2.startsWith(`${this.contentPrefix}objects/`))
         throw new FileMirrorUnsupported("UNSUPPORTED_CONTENT: cross-vault reference");
       r2 = pointer.r2;
       envelope = pointer.part === "body";
@@ -89,7 +89,7 @@ export class MirrorSourceReader implements MirrorReader {
     this.cache = null;
     let text: string;
     if (ref.r2) {
-      if (!ref.r2.startsWith(this.contentPrefix + "objects/"))
+      if (!ref.r2.startsWith(`${this.contentPrefix}objects/`))
         throw new FileMirrorUnsupported("UNSUPPORTED_CONTENT: cross-vault reference");
       const stored = await io.get(ref.r2);
       if (!stored) throw new Error("Missing persistent mirror source");

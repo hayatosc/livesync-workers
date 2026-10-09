@@ -214,7 +214,7 @@ it("rejects declared oversize without reading and bounds direct internal JSON en
   });
 });
 it("bounds the public POST changes proxy before parsing or forwarding", async () => {
-  const body = "{}" + " ".repeat(REQUEST_LIMITS.maxRequestBytes - 1);
+  const body = `{}${" ".repeat(REQUEST_LIMITS.maxRequestBytes - 1)}`;
   const response = await SELF.fetch("https://worker/livesync/vault/_changes", {
     method: "POST",
     headers: { Authorization: `Basic ${btoa("alice:integration-pass")}`, Origin: "https://client.example" },

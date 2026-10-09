@@ -6,7 +6,7 @@ describe("embedding chunk boundaries", () => {
   it("keeps the complete body of a long single line in bounded chunks", () => {
     const path = "note.md";
     const prefix = `[${path}]\n`;
-    const content = "a".repeat(5000) + " tailneedle";
+    const content = `${"a".repeat(5000)} tailneedle`;
     const chunks = chunkMarkdown(path, content);
     expect(chunks).toHaveLength(2);
     expect(chunks.every((chunk) => chunk.text.length <= 4000)).toBe(true);
@@ -14,8 +14,8 @@ describe("embedding chunk boundaries", () => {
   });
 
   it("counts the path prefix in the embedding limit and bounds long heading lines", () => {
-    const path = "folder/".repeat(100) + "note.md";
-    const content = "## " + "h".repeat(5000) + "\n" + "body";
+    const path = `${"folder/".repeat(100)}note.md`;
+    const content = `## ${"h".repeat(5000)}\nbody`;
     const chunks = chunkMarkdown(path, content);
     expect(chunks.every((chunk) => chunk.text.length <= 4000)).toBe(true);
     expect(chunks.at(-1)!.text.endsWith("body")).toBe(true);
@@ -66,7 +66,7 @@ describe("vector cleanup planning", () => {
       {
         ref: { tenantId: "u", databaseName: "v" },
         path: "a.md",
-        content: "a".repeat(5000) + " tailneedle",
+        content: `${"a".repeat(5000)} tailneedle`,
         hash: "h",
         previousChunks: 0,
       },

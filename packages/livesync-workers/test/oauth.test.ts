@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 // provider's own PKCE parsing (challenge optional, method defaulting to plain).
 vi.mock("@cloudflare/workers-oauth-provider", () => ({
   OAuthProvider: class {
+    // biome-ignore lint/suspicious/noExplicitAny: mirrors the untyped options of the mocked provider.
     constructor(private readonly options: Record<string, any>) {}
     fetch(request: Request, env: Record<string, unknown>, ctx: unknown) {
       const options = this.options;

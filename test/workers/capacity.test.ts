@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { it, expect, afterEach } from "vitest";
-import { PersistentVaultDO, type TestEnv } from "./entry.js";
+import type { PersistentVaultDO, TestEnv } from "./entry.js";
 import type { VaultBindings } from "../../packages/livesync-workers/src/types.js";
 import { R2Journal, contentPrefix } from "../../packages/livesync-workers/src/storage/r2-journal.js";
 import { drainCheckpoint, stopCheckpointAlarms } from "./checkpoint-helpers.js";

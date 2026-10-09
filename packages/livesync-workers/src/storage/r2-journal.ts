@@ -27,12 +27,16 @@ export class R2Journal {
 
   async head(): Promise<{ commit: string | null; etag: string | null }> {
     const object = await this.bucket.get(this.headKey);
-    if (!object) return (this.observed = { commit: null, etag: null });
+    if (!object) {
+      this.observed = { commit: null, etag: null };
+      return this.observed;
+    }
     const head = await object.json<JournalHead>();
     if (head.version !== 1 || !head.commit.startsWith(`${this.prefix}commits/`)) {
       throw new Error("Invalid content journal head");
     }
-    return (this.observed = { commit: head.commit, etag: object.etag });
+    this.observed = { commit: head.commit, etag: object.etag };
+    return this.observed;
   }
 
   /** Retry only explicit throttling/unavailability; CAS still fences every head write. */

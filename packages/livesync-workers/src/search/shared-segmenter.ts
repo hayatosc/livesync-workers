@@ -182,7 +182,9 @@ export class SharedSegmenterIndex implements FullTextIndex {
       if (!old) return;
       for (const term of old.terms) postingChanges.set(`${term}\0${path}`, null);
       manifest.docCount--;
-      old.lengths.forEach((length, f) => (manifest.totalLengths[f] = manifest.totalLengths[f]! - length));
+      old.lengths.forEach((length, f) => {
+        manifest.totalLengths[f] = manifest.totalLengths[f]! - length;
+      });
     };
     const guard = () => {
       if (closed) throw new Error("Index writer is closed");
@@ -222,7 +224,9 @@ export class SharedSegmenterIndex implements FullTextIndex {
           updatedAt: indexed.updatedAt,
         };
         manifest.docCount++;
-        current.lengths.forEach((length, f) => (manifest.totalLengths[f] = manifest.totalLengths[f]! + length));
+        current.lengths.forEach((length, f) => {
+          manifest.totalLengths[f] = manifest.totalLengths[f]! + length;
+        });
         manifest.builtAt = Math.max(manifest.builtAt, current.updatedAt);
         documentChanges.set(note.path, current);
         for (const term of terms)
@@ -360,7 +364,7 @@ export class SharedSegmenterIndex implements FullTextIndex {
           continue;
         let score = 0,
           matchCount = 0;
-        matches.forEach((phrase, p) =>
+        matches.forEach((phrase, p) => {
           phrase.forEach((positions, f) => {
             const tf = positions.length;
             if (!tf) return;
@@ -369,8 +373,8 @@ export class SharedSegmenterIndex implements FullTextIndex {
             score +=
               (weights[fields[f]!] * idf * tf * 2.2) / (tf + 1.2 * (0.25 + (0.75 * record.lengths[f]!) / average));
             matchCount += tf;
-          }),
-        );
+          });
+        });
         const candidate: Candidate = {
           path: record.path,
           hash: record.hash,
@@ -400,7 +404,7 @@ export class SharedSegmenterIndex implements FullTextIndex {
         if (!stored) throw new Error("Missing shared index snippet source");
         const note = await stored.json<IndexedNote>();
         const snippets: FullTextSearchHit["snippets"] = [];
-        candidate.matches.forEach((phrase) =>
+        candidate.matches.forEach((phrase) => {
           phrase.forEach((positions, f) => {
             const text = note.fields[fields[f]!].text;
             for (const occurrence of positions) {
@@ -411,8 +415,8 @@ export class SharedSegmenterIndex implements FullTextIndex {
                 after: [...text.slice(occurrence.end, occurrence.end + 100)].slice(0, 40).join(""),
               });
             }
-          }),
-        );
+          });
+        });
         hits.push({
           path: candidate.path,
           contentHash: candidate.hash,

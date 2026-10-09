@@ -1,7 +1,7 @@
 import { escapeHtml, htmlPage } from "livesync-workers/oauth";
 import { VAULT_TOOL_NAMES } from "livesync-workers/mcp";
 import type { VaultIndexStatus } from "livesync-workers";
-import { type Env } from "./env.js";
+import type { Env } from "./env.js";
 import { setupVaultConfig } from "./host.js";
 import { SETUP_URI_CLIENT_SCRIPT, SETUP_URI_IDS } from "./setup-uri.js";
 import { VERSION } from "./version.js";

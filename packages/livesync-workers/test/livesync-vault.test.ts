@@ -519,7 +519,7 @@ describe("LiveSync Vectorize indexing", () => {
 
   it("re-embeds unchanged long lines from index version 2, including their tails, only once", async () => {
     const { durableObject, storage, env } = await created();
-    const content = "x".repeat(5_000) + "tailneedle";
+    const content = `${"x".repeat(5_000)}tailneedle`;
     await replicate(durableObject, [noteDoc("long.md", "1-a", "long.md", [], { data: content })]);
     // Model the old completed index: identical content hash, but only one truncated vector.
     storage.sql.exec(

@@ -217,11 +217,11 @@ try {
     await expectDeleted(foreign, 'assets/original.pdf');
   });
   await step('note and binary updates preserve links and bytes', async () => {
-    await write(writer, '日本語.md', note + 'updated\n');
+    await write(writer, '日本語.md', `${note}updated\n`);
     await write(writer, 'assets/original.pdf', updated.toString('base64'), true);
     await sync(writer);
     await sync(reader);
-    await expectFile(reader, '日本語.md', Buffer.from(note + 'updated\n'));
+    await expectFile(reader, '日本語.md', Buffer.from(`${note}updated\n`));
     await expectFile(reader, 'assets/original.pdf', updated);
   });
   await step('offline edit reconnects after local backend restart', async () => {

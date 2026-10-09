@@ -83,7 +83,10 @@ describe("codec", () => {
     const byTerm = new Map<string, Posting[]>();
     const builder = new PostingsBuilder(shardCount);
     let seed = 7;
-    const rand = (n: number) => (seed = (seed * 48271) % 2147483647) % n;
+    const rand = (n: number) => {
+      seed = (seed * 48271) % 2147483647;
+      return seed % n;
+    };
     const terms = ["会議", "室内", "livesync", "z", "検索", "メモ", "第1", "1回"];
     for (let doc = 0; doc < 300; doc += 1) {
       const chosen = [...new Set(Array.from({ length: 1 + rand(5) }, () => terms[rand(terms.length)]!))];
@@ -270,7 +273,7 @@ describe("mergeShard", () => {
       buildIndex(b, { format: 1 }),
       buildIndex(kept),
     ]);
-    const indexE = decodeSegmentIndex(expected.files.get("index.bin")!, DEFAULT_SHARD_COUNT, DEFAULT_BUCKET_COUNT);
+    decodeSegmentIndex(expected.files.get("index.bin")!, DEFAULT_SHARD_COUNT, DEFAULT_BUCKET_COUNT);
     for (let shard = 0; shard < DEFAULT_SHARD_COUNT; shard += 1) {
       const merged = await mergeShard(
         [

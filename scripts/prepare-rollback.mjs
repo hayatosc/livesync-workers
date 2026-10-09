@@ -45,7 +45,7 @@ for (const file of overlays) {
 }
 await writeFile(
   path.join(destination, "ROLLBACK_BUILD.json"),
-  JSON.stringify({ sourceCommit, configCommit, overlayHashes }, null, 2) + "\n",
+  `${JSON.stringify({ sourceCommit, configCommit, overlayHashes }, null, 2)}\n`,
 );
 console.log(JSON.stringify({ destination, sourceCommit, configCommit }));
 console.log("Prepared source only; nothing was deployed. In that directory, run:");

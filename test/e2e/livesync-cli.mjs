@@ -100,7 +100,7 @@ async function expectFile(client, path, bytes) {
 async function expectMissing(client, path) {
   const listing = await client.run('ls', path);
   assert.equal(
-    listing.split('\n').some((line) => line.startsWith(path + '\t')),
+    listing.split('\n').some((line) => line.startsWith(`${path}\t`)),
     false,
     `deleted or isolated path: ${path}`,
   );

@@ -333,7 +333,11 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
             work.startedSeq,
           );
           const groups = new Map<string, RevRow[]>();
-          for (const row of rows) (groups.get(row.id) ?? (groups.set(row.id, []), groups.get(row.id)!)).push(row);
+          for (const row of rows) {
+            const group = groups.get(row.id);
+            if (group) group.push(row);
+            else groups.set(row.id, [row]);
+          }
           const entries = [...groups];
           for (let i = 0; i < entries.length; i += 6) {
             const results = await Promise.allSettled(
@@ -2584,7 +2588,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     if (options.newEdits) {
       let parentRev = typeof doc._rev === "string" ? doc._rev : null;
       const deletedWinner = this.rawWinningRow(id);
-      if (deletedWinner && deletedWinner.deleted && !parentRev) parentRev = deletedWinner.rev;
+      if (deletedWinner?.deleted && !parentRev) parentRev = deletedWinner.rev;
       const rev = await newRevision(doc, parentRev);
       // Check the tree after the only await, so nothing changed in between.
       const current = this.rawWinningRow(id);

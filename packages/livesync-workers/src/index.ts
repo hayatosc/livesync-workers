@@ -29,7 +29,7 @@ export {
   DEFAULT_WORKERS_AI_EMBEDDING_MODEL,
   DEFAULT_EMBEDDING_DIMENSIONS,
 } from "./search/embedder.js";
-export { type VectorSearchHit } from "./search/vector-index.js";
+export type { VectorSearchHit } from "./search/vector-index.js";
 export * from "./credentials.js";
 
 export { SegmenterFullTextIndex, analyzeWords, SEGMENTER_ANALYZER } from "./search/segmenter-index.js";

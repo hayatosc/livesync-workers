@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { it, expect } from "vitest";
-import { PersistentVaultDO, type TestEnv } from "../workers/entry.js";
+import type { PersistentVaultDO, TestEnv } from "../workers/entry.js";
 import type { VaultBindings } from "../../packages/livesync-workers/src/types.js";
 const bindings = env as unknown as TestEnv;
 const delayMs = 2; // Explicit synthetic per CONTENT operation; not remote R2 latency.

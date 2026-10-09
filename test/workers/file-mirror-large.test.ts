@@ -10,7 +10,7 @@ const bindings = env as unknown as TestEnv;
 const MiB = 1024 * 1024;
 const chunkBytes = 3 * 256 * 1024;
 const ref = (name: string) => ({ tenantId: name, databaseName: "vault" });
-const key = (name: string) => fileMirrorPrefix(ref(name)) + "Attachments/Large.pdf";
+const key = (name: string) => `${fileMirrorPrefix(ref(name))}Attachments/Large.pdf`;
 
 async function fixture(name: string, size: number, declared = size) {
   const object = bindings.VAULT_DB.get(bindings.VAULT_DB.idFromName(`${name}:vault`));
@@ -310,7 +310,7 @@ it("bounds R2 calls, caches only an unfinished part, and lets a small change ove
       if (["get", "head", "list", "put", "delete", "createMultipartUpload"].includes(String(property)))
         return (...args: unknown[]) => {
           calls++;
-          if (property === "put" && args[0] === fileMirrorPrefix(ref(name)) + "Note.md") publications.push("small");
+          if (property === "put" && args[0] === `${fileMirrorPrefix(ref(name))}Note.md`) publications.push("small");
           return method.apply(target, args);
         };
       return typeof method === "function" ? method.bind(target) : method;
@@ -345,7 +345,7 @@ it("bounds R2 calls, caches only an unfinished part, and lets a small change ove
       await pass(instance, state, name, bucket);
       expect(calls).toBeLessThanOrEqual(64);
       expect(publications[0]).toBe("small");
-      expect(await (await bindings.CONTENT.get(fileMirrorPrefix(ref(name)) + "Note.md"))!.text()).toBe(
+      expect(await (await bindings.CONTENT.get(`${fileMirrorPrefix(ref(name))}Note.md`))!.text()).toBe(
         "latest small change",
       );
     } finally {

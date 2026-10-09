@@ -45,7 +45,7 @@ const mcpHandler = withMcpSessionIsolation<Env>(
 const TOO_MANY_ATTEMPTS = "Too many failed attempts from your network. Try again in 15 minutes.";
 
 const appHandler: ExportedHandler<Env> = {
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
 
     if (url.pathname === "/livesync" || url.pathname.startsWith("/livesync/")) {

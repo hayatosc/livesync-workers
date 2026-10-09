@@ -1,4 +1,4 @@
-import type { FullTextIndex, FullTextNote, FullTextSearchHit, VaultRef } from "../types.js";
+import type { FullTextNote, FullTextSearchHit } from "../types.js";
 
 /** Analyzer version is part of every artifact key: old analyzers never mix with new queries. */
 export const SEGMENTER_ANALYZER = "ja-segmenter-nfkc-v1";
@@ -49,7 +49,11 @@ export const weights: Record<FieldName, number> = { body: 1, title: 3, heading: 
 function field(text: string): Field {
   const tokens = analyzeWords(text);
   const postings: Field["postings"] = Object.create(null);
-  for (const { term, position, start, end } of tokens) (postings[term] ??= []).push({ position, start, end });
+  for (const { term, position, start, end } of tokens) {
+    const list = postings[term] ?? [];
+    postings[term] = list;
+    list.push({ position, start, end });
+  }
   return { text, length: tokens.length, postings };
 }
 export function indexNote(note: FullTextNote): IndexedNote {
@@ -127,7 +131,7 @@ export async function searchWordIndex(
     });
     if (!phrases.length || matches.some((phrase) => phrase.every((positions) => !positions.length))) continue;
     const snippets: FullTextSearchHit["snippets"] = [];
-    matches.forEach((phrase) =>
+    matches.forEach((phrase) => {
       phrase.forEach((positions, f) => {
         const text = note.fields[fields[f]!].text;
         for (const occurrence of positions.slice(0, 3)) {
@@ -138,8 +142,8 @@ export async function searchWordIndex(
             after: [...text.slice(occurrence.end, occurrence.end + 100)].slice(0, 40).join(""),
           });
         }
-      }),
-    );
+      });
+    });
     candidates.push({
       path: note.path,
       hash: note.hash,
@@ -151,7 +155,7 @@ export async function searchWordIndex(
   const hits = candidates.map((candidate): FullTextSearchHit => {
     let score = 0;
     let matchCount = 0;
-    candidate.tf.forEach((phrase, p) =>
+    candidate.tf.forEach((phrase, p) => {
       phrase.forEach((tf, f) => {
         if (!tf) return;
         const average = Math.max(1, totalLengths[f]! / Math.max(1, docCount));
@@ -159,8 +163,8 @@ export async function searchWordIndex(
         score +=
           (weights[fields[f]!] * idf * (tf * 2.2)) / (tf + 1.2 * (0.25 + (0.75 * candidate.lengths[f]!) / average));
         matchCount += tf;
-      }),
-    );
+      });
+    });
     return { path: candidate.path, contentHash: candidate.hash, score, matchCount, snippets: candidate.snippets };
   });
   hits.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
