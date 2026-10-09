@@ -1,5 +1,5 @@
 import { it, expect } from "vitest";
-import { authorizedVaults, vaultConfigs, vaultFor, vaultHost, semanticSearchOn } from "./host.js";
+import { authorizedVaults, vaultBindings, vaultConfigs, vaultFor, vaultHost, semanticSearchOn } from "./host.js";
 import type { Env } from "./env.js";
 import { vaultObjectName } from "livesync-workers";
 const env = {
@@ -23,6 +23,7 @@ it("authorizes every vault selection and credential without trusting key prefixe
   await expect(host.loadVaultPolicy({ tenantId: "tenant-b", vaultId: "stable-a", databaseName: "work" })).rejects.toThrow("Unknown vault");
   expect(vaultObjectName(alice!)).toBe(vaultObjectName({ ...alice!, databaseName: "renamed" }));
   expect(semanticSearchOn(env)).toBe(false);
+  expect(vaultBindings(env).fileMirror).toBe(true);
 });
 it("rejects duplicate selectors and unknown credential secret references", () => {
   const configs = vaultConfigs(env);

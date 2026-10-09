@@ -126,6 +126,7 @@ export function vaultBindings(env: Env): VaultBindings {
     vaultDb: env.VAULT_DB,
     bucket: env.FTS_BUCKET,
     contentBucket: env.CONTENT_BUCKET,
+    fileMirror: true,
     fullText: new SegmenterFullTextIndex(env.FTS_BUCKET),
     ...(semanticSearchOn(env)
       ? { vectorize: env.VECTORIZE, embedder: workersAiEmbedder(env.AI) }

@@ -1,5 +1,8 @@
 import { REQUEST_LIMITS, BadRequestError, RequestLimitError, readBoundedJson, assertDocumentSize, assertBulkLimits, decodePathSegment } from "../livesync/limits.js";
 import { R2Journal, contentPrefix, type JournalStatement } from "../storage/r2-journal.js";
+import { R2FileMirror, FileMirrorUnsupported } from "../storage/file-mirror.js";
+import { MirrorSourceReader } from "../storage/file-mirror-source.js";
+import { MIRROR_LIMITS, FileMirrorChanged } from "../storage/file-mirror-upload.js";
 import { mapBatches, limitConcurrency } from "../storage/concurrency.js";
 import { hashText } from "../search/chunk-md.js";
 import { removeNoteVectors, upsertNoteVectors } from "../search/vector-index.js";
@@ -677,6 +680,13 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     return this.contentJournal;
   }
 
+  private fileMirror(): R2FileMirror | null {
+    const bindings = this.bindings();
+    const ref = this.vaultRef();
+    return bindings.fileMirror && bindings.contentBucket && ref
+      ? new R2FileMirror(this.ctx.storage, bindings.contentBucket, ref) : null;
+  }
+
   private sqlExec<T extends Record<string, SqlStorageValue> = Record<string, SqlStorageValue>>(query: string, ...args: unknown[]): SqlStorageCursor<T> {
     const cursor = this.ctx.storage.sql.exec<T>(query, ...args);
     if (this.statements && /^(INSERT|UPDATE|DELETE|REPLACE)\b/i.test(query.trim()) &&
@@ -725,6 +735,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     }
     this.journalHead = head;
     if (head) this.setMeta("r2_applied_head_v3", head);
+    if (fullReset) this.fileMirror()?.reset();
     // Search is derived and is rebuilt from recovered content.
     if (fullReset && this.dbExists()) {
       this.requestFullTextRebuild();
@@ -952,6 +963,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       return this.migrateLegacy(request);
     }
     await this.restoreJournal();
+    const previousSeq = this.currentSeq();
     if (journal) this.statements = [];
     let mutated = false;
     try {
@@ -975,6 +987,11 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         this.journalHead = await journal.commit(statements, this.journalHead);
         this.setMeta("r2_applied_head_v3", this.journalHead);
         this.notifyWatchers();
+        const mirror = this.fileMirror();
+        if (mirror && this.currentSeq() > previousSeq) {
+          mirror.changesCommitted(previousSeq);
+          await this.scheduleIndexing();
+        }
       }
       return response;
     } catch (error) {
@@ -1243,6 +1260,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_changes_id ON changes (id)`);
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_docs_updated_seq ON docs (updated_seq)`);
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_rev_metadata_path ON rev_metadata (path)`);
+    R2FileMirror.init(sql);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -1257,7 +1275,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       // Take locks in the same order as alarms. Ordinary sync writes can proceed
       // during index publication; deletion/rebuild must wait for its writer.
       const maintenance = request.method === "DELETE" && path === "/" ||
-        request.method === "POST" && path === "/internal/op" && ["reindex", "ftsRebuild"].includes(String(body.op));
+        request.method === "POST" && path === "/internal/purge" ||
+        request.method === "POST" && path === "/internal/op" && ["reindex", "ftsRebuild", "filesRebuild", "contentGc"].includes(String(body.op));
       return await (maintenance ? this.withMaintenance(operation) : operation());
     } catch (error) {
       if (error instanceof RequestLimitError) return couchError(413, "request_entity_too_large", error.message);
@@ -1279,7 +1298,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       (this.indexNeedsVersionUpgrade() ||
         this.indexedSeq() < this.currentSeq() ||
         this.first(`SELECT 1 FROM index_state WHERE pending = 1 AND attempts < ? LIMIT 1`, INDEX_MAX_ATTEMPTS) ||
-        this.hasFullTextBacklog())
+        this.hasFullTextBacklog() || this.fileMirror()?.hasWork(this.currentSeq()))
     ) {
       void this.scheduleIndexing();
     }
@@ -1396,6 +1415,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
   }
 
   private async purgeDb(): Promise<Response> {
+    await this.fileMirror()?.deleteVault();
     await this.removeAllVectors();
     const ref = this.vaultRef();
     if (ref) {
@@ -1426,8 +1446,16 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         const journal = this.journal();
         if (!journal) return json({ error: "R2_STORAGE_REQUIRED" }, { status: 409 });
         const work = this.checkpointWork();
-        const garbage = await journal.collectGarbage({ execute: body.execute === true, roots: work ? [work.references, work.previous] : [] });
+        const garbage = await journal.collectGarbage({ execute: body.execute === true,
+          roots: [...(work ? [work.references, work.previous] : []), ...(this.fileMirror()?.uploader.roots() ?? [])] });
         return json({ execute: body.execute === true, keys: garbage });
+      }
+      case "filesRebuild": {
+        const mirror = this.fileMirror();
+        if (!mirror) return json({ error: "FILE_MIRROR_DISABLED" }, { status: 409 });
+        mirror.reset();
+        await this.scheduleIndexing(0);
+        return json({ ok: true, pending: true });
       }
       case "listMarkdownPaths": {
         const missing = this.requireDb();
@@ -1524,6 +1552,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
             : {}),
           capacity: this.capacity(),
           checkpoint: this.checkpointProgress(),
+          fileMirror: this.fileMirror()?.status() ?? null,
           indexedSeq: this.indexedSeq(),
           currentSeq: this.currentSeq(),
           indexed: this.first<{ count: number }>(
@@ -1702,6 +1731,27 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     return row ? (await this.fileContentForRow(row)) : null;
   }
 
+  private mirrorReader(): MirrorSourceReader {
+    const journal = this.journal();
+    if (!journal) throw new Error("Missing content bucket");
+    return new MirrorSourceReader(this.ctx.storage.sql, journal.prefix, async path =>
+      (path.startsWith("i:") ? null : await this.findNoteRow(path, false, false)) ?? await this.findNoteRow(`i:${path}`, false, false),
+    operation => this.exclusive(operation), (id, rev) => {
+      const row = this.rawRevRow(id, rev);
+      if (!row) throw new FileMirrorChanged();
+      if (!row.body_chunked) return row.body;
+      let bytes = 0;
+      const parts: string[] = [];
+      for (const chunk of this.ctx.storage.sql.exec<{ body: string }>(
+        "SELECT body FROM rev_body_chunks WHERE id=? AND rev=? ORDER BY chunk_index", id, rev)) {
+        bytes += enc.encode(chunk.body).byteLength;
+        if (bytes > MIRROR_LIMITS.envelopeBytes) throw new FileMirrorUnsupported("SOURCE_TOO_LARGE");
+        parts.push(chunk.body);
+      }
+      return parts.join("");
+    });
+  }
+
   /** Reassemble a note's content from inline data or child chunks. */
   private async fileContentForRow(row: RevRow, hydrate = (row: RevRow) => this.hydrateRevision(row)): Promise<string | null> {
     const doc = cloneBody((await hydrate(row)));
@@ -1786,13 +1836,31 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
     return this.withMaintenance(() => this.runAlarm());
   }
 
+  private async runFileMirror(): Promise<void> {
+    const mirror = this.fileMirror();
+    if (!mirror) return;
+    try {
+      const work = await mirror.run(this.mirrorReader(), operation => this.exclusive(operation));
+      if (work.runAt != null) await this.scheduleIndexing(Math.max(0, work.runAt - Date.now()));
+      else if (work.more) await this.scheduleIndexing(0);
+      else if (work.retry) await this.scheduleIndexing(Math.max(0, (work.retryAt ?? Date.now() + INDEX_RETRY_DELAY_MS) - Date.now()));
+    } catch (error) {
+      console.warn("LiveSync file mirror failed", { message: String(error) });
+      await this.scheduleIndexing(INDEX_RETRY_DELAY_MS);
+    }
+  }
+
   private async runAlarm(): Promise<void> {
+    let canMirror = false;
     let nextTurn: "index" | "checkpoint" | undefined;
     const started = Date.now();
     try {
-      const result = await this.exclusive(async () => {
+      await this.exclusive(async () => {
         await this.resolveVaultIdentity();
         if (!this.checkpointWork() || this.journalHead === undefined || this.getMeta("r2_applied_head_v3") !== this.journalHead) await this.restoreJournal();
+      });
+      canMirror = true;
+      const result = await this.exclusive(async () => {
         const checkpointDue = this.journal() && (this.checkpointWork() || this.currentSeq() - Number(this.getMeta("checkpoint_seq") ?? 0) >= 4096);
         if (checkpointDue && this.getMeta("maintenance_turn") !== "index") {
           nextTurn = "index";
@@ -1835,6 +1903,8 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
         if (nextTurn) this.setMeta("maintenance_turn", nextTurn);
         await this.scheduleIndexing(this.checkpointWork() ? 25 : INDEX_RETRY_DELAY_MS);
       });
+    } finally {
+      if (canMirror) await this.runFileMirror();
     }
   }
 
