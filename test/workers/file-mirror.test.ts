@@ -304,6 +304,67 @@ it("retries failed copies without blocking replication, and catches edits during
   expect(await (await bindings.CONTENT.get(key(name, "Note.md")))!.text()).toBe("latest");
 });
 
+it("waits for an in-flight mirror upload before internal purge removes the vault", async () => {
+  const name = "files-internal-purge";
+  const object = await fixture(name);
+  await bulk(object, [{ _id: "note", _rev: "1-a", path: "Note.md", type: "plain", data: "original" }]);
+  await runInDurableObject(object, async (instance: PersistentVaultDO, state) => {
+    const mutable = instance as unknown as { bindings(): VaultBindings; scheduleIndexing(delay?: number): Promise<void> };
+    const original = mutable.bindings.bind(instance);
+    const schedule = mutable.scheduleIndexing;
+    let entered!: () => void, release!: () => void;
+    const uploading = new Promise<void>(resolve => { entered = resolve; });
+    const blocked = new Promise<void>(resolve => { release = resolve; });
+    let uploadPending = false;
+    let listedDuringUpload = false;
+    const bucket = new Proxy(bindings.CONTENT, { get(target, property) {
+      const value = Reflect.get(target, property);
+      if (property === "list") return (options?: R2ListOptions) => {
+        if (uploadPending && options?.prefix === fileMirrorPrefix(ref(name))) listedDuringUpload = true;
+        return target.list(options);
+      };
+      if (property !== "put") return typeof value === "function" ? value.bind(target) : value;
+      return async (path: string, ...args: unknown[]) => {
+        if (path.startsWith(fileMirrorPrefix(ref(name)))) {
+          uploadPending = true;
+          entered();
+          await blocked;
+          const result = await value.apply(target, [path, ...args]);
+          uploadPending = false;
+          return result;
+        }
+        return value.apply(target, [path, ...args]);
+      };
+    } });
+    mutable.bindings = () => ({ ...original(), contentBucket: bucket });
+    // Keep the race under explicit control; no subsequent alarm should remove a stray copy.
+    mutable.scheduleIndexing = async () => {};
+    await state.storage.deleteAlarm();
+    let purge: Promise<Response> | undefined;
+    const alarm = instance.alarm();
+    try {
+      await uploading;
+      purge = instance.fetch(new Request("https://db/internal/purge", {
+        method: "POST", headers: { "X-LiveSync-Internal": "integration-secret" },
+      }));
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const finished = await Promise.race([purge.then(() => true), new Promise<boolean>(resolve => {
+          timer = setTimeout(() => resolve(false), 100);
+        })]);
+        expect(finished).toBe(false);
+        expect(listedDuringUpload).toBe(false);
+      } finally { clearTimeout(timer); }
+    } finally {
+      release();
+      try { await alarm; if (purge) expect((await purge).status).toBe(200); }
+      finally { mutable.bindings = original; mutable.scheduleIndexing = schedule; }
+    }
+    expect((await bindings.CONTENT.list({ prefix: fileMirrorPrefix(ref(name)) })).objects).toHaveLength(0);
+    expect((await instance.fetch(new Request("https://db/", { method: "HEAD" }))).status).toBe(404);
+  });
+});
+
 it("keeps unsupported content out of file copies and confines writes and purge to one vault", async () => {
   const name = "files-safety";
   const object = await fixture(name);
