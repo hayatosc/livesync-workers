@@ -1273,6 +1273,7 @@ export abstract class LiveSyncVaultDO<TEnv = unknown> {
       // Take locks in the same order as alarms. Ordinary sync writes can proceed
       // during index publication; deletion/rebuild must wait for its writer.
       const maintenance = request.method === "DELETE" && path === "/" ||
+        request.method === "POST" && path === "/internal/purge" ||
         request.method === "POST" && path === "/internal/op" && ["reindex", "ftsRebuild"].includes(String(body.op));
       return await (maintenance ? this.withMaintenance(operation) : operation());
     } catch (error) {
