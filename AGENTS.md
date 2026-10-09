@@ -13,6 +13,6 @@ Before committing, run `pnpm lint` (Biome format and lint) along with
 `pnpm typecheck` and `pnpm test`. `pnpm format` applies formatting. Keep
 formatting-only commits separate and list them in `.git-blame-ignore-revs`.
 
-Deploy only with `pnpm run deploy`, which uses `cloudflare.config.ts` and tags
-the deployed commit. Do not run `wrangler deploy` or restore the removed root
-`wrangler.jsonc`: its `migrations` configuration predates `worker.exports`.
+Deploy only with `pnpm run deploy`, which uses `cloudflare.config.ts`. Do not
+run `wrangler deploy` or restore the removed root `wrangler.jsonc`: its
+`migrations` configuration predates `worker.exports`.

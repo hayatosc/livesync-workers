@@ -37,7 +37,9 @@ jobs:
 
       - name: Check script syntax
         run: |
-          for script in scripts/*.mjs test/e2e/*.mjs; do node --check "$script"; done
+          node --check scripts/setup.mjs
+          node --check scripts/prepare-rollback.mjs
+          for script in test/e2e/*.mjs; do node --check "$script"; done
 
       # Biome covers TypeScript and JavaScript; this also catches Markdown and YAML.
       - name: Check changed whitespace

@@ -53,11 +53,6 @@ pnpm build
 pnpm run deploy
 ```
 
-`pnpm run deploy` は、コミットしていない変更があるとデプロイしません。
-成功すると、デプロイした commit に `deploy/<UTC の日時>` タグを付けて push します。
-切り戻すときは、直前の `deploy/*` タグの commit を checkout して、同じ手順で再デプロイします。
-詳しくは [Cloudflare CLI](cloudflare-cli.md#デプロイと記録) を参照してください。
-
 Cloudflare Workers Builds などの自動 deploy を使っている場合は、production branch への push が deploy を起こす設定かどうかを確認してください。
 リポジトリのルートの `wrangler.jsonc` は削除したので、`wrangler deploy` を実行するビルド設定は失敗します。
 自動 deploy を使う場合は、`pnpm run deploy` 相当の手順に切り替えてください。

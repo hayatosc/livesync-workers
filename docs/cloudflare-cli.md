@@ -33,25 +33,8 @@ pnpm run deploy
 Wrangler にログインしても、`cf` の認証にはなりません。
 setup の dry run は、作成予定の資源を表示するだけで、資源は作りません。
 既存の secret は `bindings.secret()` で宣言しているので、アップロードし直す必要はありません。
-初回のデプロイでは、`.dev.vars.example` をもとに `.dev.vars` を用意し、`pnpm run deploy -- --secrets-file .dev.vars` を実行します。
-
-## デプロイと記録
-
-`pnpm run deploy`（`scripts/deploy.mjs`）は、ライブラリをビルドしてから `cf deploy` で Worker をビルドしてデプロイします。
-`--` の後の引数は、そのまま `cf deploy` に渡します。
-
-コミットしていない変更があると、デプロイせずに終了します。
-デプロイに成功すると、その commit に `deploy/<UTC の日時>`（例：`deploy/20261009-083005`）という注釈つきタグを作り、`origin` に push します。
-これで、稼働中のコードがどの commit かを後から確認でき、同じ commit を再デプロイして切り戻せます。
-
-```sh
-git tag -l 'deploy/*' --sort=-creatordate | head   # 最近のデプロイ
-git show deploy/20261009-083005                    # そのとき何をデプロイしたか
-```
-
-`--dry-run` ではタグを作りません。
-`--allow-dirty` をつけると未コミットの変更もデプロイしますが、コードと一致する commit がないのでタグは作りません。
-タグの push に失敗した場合は、表示されるコマンドで後から push してください。
+`pnpm run deploy` は、ライブラリをビルドしてから、`cf` に Worker のビルドとデプロイを任せます。
+初回のデプロイでは、`.dev.vars.example` をもとに `.dev.vars` を用意し、ライブラリをビルドしてから `pnpm exec cf deploy --secrets-file .dev.vars` を実行します。
 
 ## 永続化されたログ
 
