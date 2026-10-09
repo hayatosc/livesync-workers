@@ -52,8 +52,12 @@ export class MirrorSourceReader implements MirrorReader {
       if (!ref.r2.startsWith(this.contentPrefix + "objects/")) throw new FileMirrorUnsupported("UNSUPPORTED_CONTENT: cross-vault reference");
       const stored = await io.get(ref.r2);
       if (!stored) throw new Error("Missing persistent mirror source");
+      if (stored.size > MIRROR_LIMITS.envelopeBytes) {
+        await stored.body.cancel().catch(() => {});
+        throw new FileMirrorUnsupported("SOURCE_TOO_LARGE");
+      }
       const reader = stored.body.getReader();
-      const bytes = new Uint8Array(MIRROR_LIMITS.envelopeBytes);
+      const bytes = new Uint8Array(stored.size);
       let count = 0;
       try {
         for (;;) {

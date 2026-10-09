@@ -69,7 +69,7 @@ export class R2FileMirror {
 
   hasWork(currentSeq: number): boolean {
     return this.uploader.hasCleanup() || this.get("listed") !== "1" || this.get("scanned") !== "1" || Number(this.get("seq") ?? 0) < currentSeq ||
-      this.sql.exec("SELECT 1 FROM file_mirror_state WHERE status IN ('queued','retry') LIMIT 1").toArray().length > 0;
+      this.sql.exec("SELECT 1 FROM file_mirror_state WHERE status='queued' OR (status='retry' AND retry_at<=?) LIMIT 1", Date.now()).toArray().length > 0;
   }
 
   /** Keep a fixed window from the first committed change; backfills and active batches keep moving. */

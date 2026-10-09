@@ -249,15 +249,18 @@ export class R2MirrorUploader {
       if (active.total + decoded > MIRROR_LIMITS.fileBytes) throw new FileMirrorUnsupported("FILE_TOO_LARGE");
       if (active.metadata.declaredSize != null && active.total + decoded > active.metadata.declaredSize) throw new FileMirrorUnsupported("SIZE_MISMATCH");
     };
+    const append = (bytes: Uint8Array) => {
+      const take = Math.min(bytes.length, buffer.length - used, budgetBytes - newBytes);
+      const output = bytes.subarray(0, take);
+      buffer.set(output, used); hasher.update(output);
+      used += take; newBytes += take; active.total += take;
+      // Only bytes crossing a part/budget boundary need a serializable spill.
+      active.cursor.spill = take < bytes.length ? encodeBytes(bytes.subarray(take)) : "";
+    };
     try {
       while (used < buffer.length && newBytes < budgetBytes) {
         if (active.cursor.spill) {
-          const bytes = decodeBytes(active.cursor.spill);
-          const take = Math.min(bytes.length, buffer.length - used, budgetBytes - newBytes);
-          const output = bytes.subarray(0, take);
-          buffer.set(output, used); hasher.update(output);
-          used += take; newBytes += take; active.total += take;
-          active.cursor.spill = encodeBytes(bytes.subarray(take));
+          append(decodeBytes(active.cursor.spill));
           continue;
         }
         if (active.cursor.ended) break;
@@ -265,7 +268,7 @@ export class R2MirrorUploader {
           const final = decodeMirrorPiece(active.metadata.type, "", active.cursor.decoder, true);
           active.cursor.ended = true;
           validateLength(final.byteLength);
-          active.cursor.spill = encodeBytes(final);
+          append(final);
           continue;
         }
         if (sourceIndex !== active.cursor.source) {
@@ -282,7 +285,7 @@ export class R2MirrorUploader {
         const output = decodeMirrorPiece(active.metadata.type, text, active.cursor.decoder);
         active.cursor.offset += text.length;
         validateLength(output.byteLength);
-        active.cursor.spill = encodeBytes(output);
+        append(output);
       }
       // Exhaustion at the exact 8 MiB boundary still qualifies for one direct PUT.
       if (!active.cursor.spill && sourceIndex === active.cursor.source && pieces && active.cursor.offset === pieces[active.cursor.piece]?.length &&

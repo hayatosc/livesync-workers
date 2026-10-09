@@ -38,12 +38,16 @@ SQLite rows; active references are roots for authoritative content GC. Child
 revision changes requeue dependent originals. Root and child generation checks
 cancel work after edits, rename, deletion or winner changes.
 
-Read one bounded JSON envelope at a time. Carry base64 quartets/padding or a
+Read one bounded JSON envelope at a time, allocating from the R2 object's size
+and rejecting oversized metadata before reading. Actual streamed bytes are still
+checked against the buffer bound. Carry base64 quartets/padding or a
 trailing UTF-16 high surrogate across source/string boundaries; preserve UTF-8,
 Unicode and newlines as `TextEncoder` does. Decoder pieces are at most 16K code
 units, producing at most 48 KiB. Never concatenate a complete file or decode a
 complete attachment into memory. Assemble one 8 MiB part, then upload it directly
-to the final key's multipart upload.
+to the final key's multipart upload. Copy decoded bytes directly into the part;
+only an unconsumed remainder crossing a part/budget boundary is base64 encoded
+for the persisted cursor.
 
 SHA-256 advances over the decoded bytes in the same pass. The pinned JavaScript
 `@stablelib/sha256` 2.0.1 implementation uses its public
@@ -124,7 +128,9 @@ Permanent error strings include `FILE_TOO_LARGE`, `SOURCE_TOO_LARGE`,
 `MANIFEST_TOO_LARGE`, `SIZE_MISMATCH`, `INVALID_ENCODING` and
 `UNSUPPORTED_CONTENT`. Missing chunks wait for changes. Transient errors persist
 a full-jitter exponential retry deadline: base five seconds, capped at fifteen
-minutes. No alarm sleeps for backoff. New committed changes clear the delay.
+minutes. No alarm sleeps for backoff. A retry before its deadline does not count
+as runnable work, so reads preserve its alarm and unrelated edits retain the
+five-second batching window. New committed source changes clear the delay.
 The implementation does not interpret provider Retry-After values.
 
 Existing `indexStatus`/`vaultStatus` mirror counters also expose `stale` and
