@@ -158,6 +158,53 @@ it("coalesces committed edits for five seconds without extending the deadline ac
   });
 });
 
+it.each(["work", "batch", "alarm"])("honors a future mirror retry deadline for %s", async check => {
+  const name = `files-retry-deadline-${check}`;
+  const object = await fixture(name);
+  await bulk(object, [
+    { _id: "note", _rev: "1-a", path: "Note.txt", type: "plain", data: "old" },
+    { _id: "retry", _rev: "1-a", path: "Retry.txt", type: "plain", data: "last complete copy" },
+  ]);
+  await drain(object, name);
+  await runInDurableObject(object, async (instance: PersistentVaultDO, state) => {
+    const retryAt = Date.now() + 10 * 60_000;
+    state.storage.sql.exec("UPDATE file_mirror_state SET status='retry',retry_at=?,error='Injected R2 failure' WHERE path='Retry.txt'", retryAt);
+    const mirror = new R2FileMirror(state.storage, bindings.CONTENT, ref(name));
+    const seq = Number(state.storage.sql.exec<{ value: string }>("SELECT value FROM meta WHERE key='monotonic_seq'").one().value);
+    if (check === "work") {
+      expect(mirror.hasWork(seq)).toBe(false);
+      state.storage.sql.exec("UPDATE file_mirror_state SET retry_at=0 WHERE path='Retry.txt'");
+      expect(mirror.hasWork(seq)).toBe(true);
+      return;
+    }
+    if (check === "batch") {
+      const mutable = instance as unknown as { scheduleIndexing(delay?: number): Promise<void> };
+      const schedule = mutable.scheduleIndexing;
+      mutable.scheduleIndexing = async () => {};
+      try {
+        const started = Date.now();
+        const response = await instance.fetch(new Request("https://db/_bulk_docs", { method: "POST", body: JSON.stringify({
+          new_edits: false, docs: [{ _id: "note", _rev: "2-b", _revisions: { start: 2, ids: ["b", "a"] }, path: "Note.txt", type: "plain", data: "latest" }],
+        }) }));
+        expect(response.status).toBe(200);
+        const deadline = state.storage.sql.exec<{ value: string }>("SELECT value FROM file_mirror_meta WHERE key='run_at'").toArray()[0];
+        expect(deadline).toBeDefined();
+        expect(Number(deadline!.value)).toBeGreaterThanOrEqual(started + 5000);
+        expect(Number(deadline!.value)).toBeLessThanOrEqual(Date.now() + 5000);
+        expect(await (await bindings.CONTENT.get(key(name, "Note.txt")))!.text()).toBe("old");
+      } finally { mutable.scheduleIndexing = schedule; }
+      return;
+    }
+    await state.storage.setAlarm(retryAt);
+    const fresh = new PersistentVaultDO(state, bindings);
+    enableMirror(fresh);
+    expect((await fresh.fetch(new Request("https://db/note"))).status).toBe(200);
+    expect(await state.storage.getAlarm()).toBe(retryAt);
+    await fresh.alarm();
+    expect(await state.storage.getAlarm()).toBe(retryAt);
+  });
+});
+
 it.each([false, true])("bounds decoded and attempted upload bytes per pass, including failures: %s", async fail => {
   const name = `files-batch-bytes-${fail}`;
   const object = await fixture(name);
