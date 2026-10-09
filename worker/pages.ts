@@ -49,7 +49,7 @@ export function statusPage(env: Env, data: StatusPageData): Response {
     missing.length > 0
       ? `<div class="card" style="border-color:#f59e0b"><h2>Setup incomplete</h2><p>Missing (or placeholder) secrets: <code>${missing
           .map(escapeHtml)
-          .join("</code>, <code>")}</code>.</p><p class="muted">Set them with <code>wrangler secret put NAME</code> (or in the Cloudflare dashboard under Settings → Variables and Secrets), then reload.</p></div>`
+          .join("</code>, <code>")}</code>.</p><p class="muted">Add them in the Cloudflare dashboard under Settings → Variables and Secrets (or deploy with <code>cf deploy --secrets-file .dev.vars</code>), then reload.</p></div>`
       : "");
   const indexHtml = data.admin
     ? data.indexError

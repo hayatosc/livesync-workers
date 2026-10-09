@@ -8,14 +8,15 @@ the build implementation invoked by `cf`, rather than the operator-facing CLI.
 `cloudflare.config.ts` is the deployment configuration. It targets the existing
 account, OAuth KV namespace, R2 buckets, and live SQLite Durable Object classes.
 Declare optional variables in its `worker.env` block: `cf` does not support
-Wrangler's `keep_vars`. The legacy `wrangler.jsonc` is retained for existing
-Deploy to Cloudflare and test integrations.
+Wrangler's `keep_vars`. The legacy `wrangler.jsonc` has been removed so that a
+stray `wrangler deploy` cannot redeploy the old `migrations` configuration; the
+Workers integration tests use their own `test/workers/wrangler.jsonc`.
 
 Before the first exports deployment, prepare an exports-compatible rollback
 build using [the upgrade instructions](upgrading.md#初回-exports-デプロイ前の切り戻し準備).
 Cloudflare cannot roll back across that lifecycle change to a pre-exports version;
-subsequent deployments must retain exports. The legacy `wrangler.jsonc` is not a
-rollback configuration after that transition.
+subsequent deployments must retain exports. Do not restore the legacy
+`wrangler.jsonc` from Git history as a rollback configuration.
 
 ## Commands
 

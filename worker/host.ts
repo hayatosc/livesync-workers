@@ -32,7 +32,7 @@ export function secretValue(env: Env, name: SecretName): string | undefined {
 
 export function requireSecret(env: Env, name: SecretName): string {
   const value = secretValue(env, name);
-  if (!value) throw new ConfigError(`Missing secret ${name}. Set it with: wrangler secret put ${name}`);
+  if (!value) throw new ConfigError(`Missing secret ${name}. Add it in the Cloudflare dashboard (Settings → Variables and Secrets) or deploy with: cf deploy --secrets-file .dev.vars`);
   return value;
 }
 
